@@ -34,29 +34,42 @@ pub struct EngineOptions {
 #[derive(Clone)]
 pub struct Engine {
     jobs: flume::Sender<Job>,
-    generation: Arc<AtomicU64>,
+    shared: Arc<Shared>,
+}
+
+/// Bundle location and its version, swapped by [`Engine::reload`].
+struct Shared {
+    generation: AtomicU64,
+    bundle: std::sync::RwLock<PathBuf>,
+}
+
+impl Shared {
+    fn bundle(&self) -> PathBuf {
+        self.bundle.read().map(|b| b.clone()).unwrap_or_else(|p| p.into_inner().clone())
+    }
 }
 
 impl Engine {
     /// Starts the workers and waits until the first one has evaluated the bundle.
     pub fn start(options: EngineOptions) -> Result<Self> {
         let (jobs, receiver) = flume::unbounded::<Job>();
-        let generation = Arc::new(AtomicU64::new(0));
+        let shared =
+            Arc::new(Shared { generation: AtomicU64::new(0), bundle: std::sync::RwLock::new(options.bundle.clone()) });
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         for index in 0..options.workers.max(1) {
             let receiver = receiver.clone();
-            let generation = generation.clone();
+            let shared = shared.clone();
             let options = options.clone();
             let ready = ready_tx.clone();
             thread::Builder::new()
                 .name(format!("volt-ssr-{index}"))
                 .stack_size(16 * 1024 * 1024)
-                .spawn(move || Worker::run(options, receiver, generation, ready))
+                .spawn(move || Worker::run(options, receiver, shared, ready))
                 .map_err(|e| Error::internal(format!("cannot spawn SSR worker: {e}")))?;
         }
         drop(ready_tx);
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { jobs, generation }),
+            Ok(Ok(())) => Ok(Self { jobs, shared }),
             Ok(Err(message)) => Err(Error::internal(message)),
             Err(_) => Err(Error::internal("SSR workers exited during startup")),
         }
@@ -69,9 +82,12 @@ impl Engine {
         rx.await.map_err(|_| Error::internal("SSR worker dropped the request"))?.map_err(Error::internal)
     }
 
-    /// Makes every worker re-evaluate the bundle before its next job.
-    pub fn reload(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
+    /// Makes every worker evaluate `bundle` before its next job.
+    pub fn reload(&self, bundle: PathBuf) {
+        if let Ok(mut current) = self.shared.bundle.write() {
+            *current = bundle;
+        }
+        self.shared.generation.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -86,10 +102,10 @@ impl Worker {
     fn run(
         options: EngineOptions,
         jobs: flume::Receiver<Job>,
-        generation: Arc<AtomicU64>,
+        shared: Arc<Shared>,
         ready: std::sync::mpsc::Sender<Result<(), String>>,
     ) {
-        let mut worker = match Self::load(&options, generation.load(Ordering::SeqCst)) {
+        let mut worker = match Self::load(&options, &shared.bundle(), shared.generation.load(Ordering::SeqCst)) {
             Ok(worker) => {
                 let _ = ready.send(Ok(()));
                 worker
@@ -100,9 +116,9 @@ impl Worker {
             }
         };
         while let Ok(job) = jobs.recv() {
-            let current = generation.load(Ordering::SeqCst);
+            let current = shared.generation.load(Ordering::SeqCst);
             if current != worker.generation {
-                match Self::load(&options, current) {
+                match Self::load(&options, &shared.bundle(), current) {
                     Ok(fresh) => worker = fresh,
                     Err(message) => {
                         let _ = job.reply.send(Err(message));
@@ -115,9 +131,9 @@ impl Worker {
         }
     }
 
-    fn load(options: &EngineOptions, generation: u64) -> Result<Self, String> {
-        let code = std::fs::read_to_string(&options.bundle)
-            .map_err(|e| format!("cannot read server bundle {}: {e}", options.bundle.display()))?;
+    fn load(options: &EngineOptions, bundle: &Path, generation: u64) -> Result<Self, String> {
+        let code = std::fs::read_to_string(bundle)
+            .map_err(|e| format!("cannot read server bundle {}: {e}", bundle.display()))?;
         let runtime = Runtime::new().map_err(|e| e.to_string())?;
         runtime.set_memory_limit(options.memory_limit);
         runtime.set_max_stack_size(8 * 1024 * 1024);
@@ -131,7 +147,7 @@ impl Worker {
         context.with(|ctx| -> Result<(), String> {
             install_host(&ctx, env).map_err(|e| describe(&ctx, e))?;
             ctx.eval::<(), _>(POLYFILLS).map_err(|e| describe(&ctx, e))?;
-            eval_file(&ctx, &code, &options.bundle).map_err(|e| describe(&ctx, e))
+            eval_file(&ctx, &code, bundle).map_err(|e| describe(&ctx, e))
         })?;
         Ok(Self { runtime, context, generation, deadline })
     }

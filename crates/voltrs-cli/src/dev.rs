@@ -39,46 +39,48 @@ fn classify(path: &Path) -> Option<Change> {
     Some(Change::Frontend)
 }
 
-/// The running application server.
-enum Server {
+enum Process {
     Child(Child),
     InProcess(tokio::task::JoinHandle<()>),
-    Stopped,
 }
+
+/// The running application server, stopped on drop.
+#[derive(Default)]
+struct Server(Option<Process>);
 
 impl Server {
     fn start(project: &Project, binary: Option<&Path>) -> Self {
-        match binary {
+        let process = match binary {
             Some(binary) => {
                 match Command::new(binary).env("VOLT_ROOT", &project.root).current_dir(&project.root).spawn() {
-                    Ok(child) => Self::Child(child),
+                    Ok(child) => Some(Process::Child(child)),
                     Err(error) => {
                         log::error(&format!("cannot start {}: {error}", binary.display()));
-                        Self::Stopped
+                        None
                     }
                 }
             }
             None => {
                 let root = project.root.clone();
-                Self::InProcess(tokio::spawn(async move {
+                Some(Process::InProcess(tokio::spawn(async move {
                     if let Err(error) = voltrs::App::new().root(root).serve().await {
                         log::error(error.message());
                     }
-                }))
+                })))
             }
-        }
+        };
+        Self(process)
     }
 
     fn stop(&mut self) {
-        match self {
-            Self::Child(child) => {
+        match self.0.take() {
+            Some(Process::Child(mut child)) => {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-            Self::InProcess(handle) => handle.abort(),
-            Self::Stopped => {}
+            Some(Process::InProcess(handle)) => handle.abort(),
+            None => {}
         }
-        *self = Self::Stopped;
     }
 }
 
@@ -150,7 +152,7 @@ impl<'a> Session<'a> {
 
 pub async fn run(project: Project) -> Result<()> {
     let mut session =
-        Session { pipeline: Pipeline::new(&project, true), project: &project, binary: None, server: Server::Stopped };
+        Session { pipeline: Pipeline::new(&project, true), project: &project, binary: None, server: Server::default() };
     let (tx, mut rx) = mpsc::unbounded_channel::<PathBuf>();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if let Ok(event) = event {
@@ -173,7 +175,7 @@ pub async fn run(project: Project) -> Result<()> {
     loop {
         let first = tokio::select! {
             path = rx.recv() => path,
-            _ = tokio::signal::ctrl_c() => None,
+            _ = shutdown() => None,
         };
         let Some(first) = first else { break };
         tokio::time::sleep(Duration::from_millis(60)).await;
@@ -191,6 +193,20 @@ pub async fn run(project: Project) -> Result<()> {
     }
     session.server.stop();
     Ok(())
+}
+
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(test)]

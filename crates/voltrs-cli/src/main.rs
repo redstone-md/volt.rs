@@ -87,10 +87,22 @@ fn main() {
         // SAFETY: single-threaded at this point.
         unsafe { std::env::remove_var("VOLT_DEV") };
     }
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
-    if let Err(error) = runtime.block_on(run(cli.command)) {
-        log::error(&format!("{error:#}"));
-        std::process::exit(1);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(32 * 1024 * 1024)
+        .build()
+        .expect("tokio runtime");
+    let result = runtime.block_on(async { tokio::spawn(run(cli.command)).await });
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            log::error(&format!("{error:#}"));
+            std::process::exit(1);
+        }
+        Err(panic) => {
+            log::error(&format!("volt crashed: {panic}"));
+            std::process::exit(101);
+        }
     }
 }
 

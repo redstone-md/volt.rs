@@ -154,10 +154,11 @@ impl Server {
                         let css_only = previous.manifest.server == build.manifest.server
                             && previous.manifest.client.entry == build.manifest.client.entry
                             && previous.manifest.client.css != build.manifest.client.css;
+                        let bundle = out_dir.join(&build.manifest.server);
                         if let Ok(mut slot) = server.build.write() {
                             *slot = Arc::new(build);
                         }
-                        server.engine.reload();
+                        server.engine.reload(bundle);
                         if let Some(hub) = &server.hub {
                             hub.broadcast(if css_only { "css" } else { "reload" }, "");
                         }
