@@ -1,0 +1,27 @@
+# volt.rs
+
+> volt.rs is a React framework with a Rust server. It uses the Next.js App Router conventions (app/ directory, layouts, metadata, next/link and next/navigation compatible APIs) with server-side rendering, server actions, loaders and API routes written in Rust. React renders on the server inside QuickJS, the client hydrates and navigates without reloads, and Tailwind CSS and shadcn/ui work out of the box.
+
+Key facts:
+- Create an app: `npm create volt-rs@latest my-app`. Dev: `npm run dev`. Build: `npm run build`. Run: `npm run start`.
+- Pages are React components in `app/`. Server code is Rust in `server/main.rs` using the `voltrs` crate.
+- `#[loader("/route")]` returns the page `data` prop. `#[action]` functions are called from React via the generated `@volt/api` module. `#[get("/api/x")]` defines JSON endpoints.
+- `#[model]` structs are serialized with camelCase fields and exported as TypeScript interfaces.
+- Not supported: React Server Components, async components, `"use server"`, parallel and intercepting routes, next/font.
+
+## Docs
+
+- [Getting started](https://github.com/redstone-md/volt.rs/blob/main/docs/getting-started.md): install, project structure, dev and production builds
+- [Routing](https://github.com/redstone-md/volt.rs/blob/main/docs/routing.md): file conventions, layouts, dynamic segments, Link, navigation hooks
+- [Data](https://github.com/redstone-md/volt.rs/blob/main/docs/data.md): models, loaders, actions, forms, API routes, Ctx, state, middleware, errors
+- [Metadata and SEO](https://github.com/redstone-md/volt.rs/blob/main/docs/metadata-seo.md): metadata API, JSON-LD, sitemap.xml, robots.txt, llms.txt
+- [Styling and assets](https://github.com/redstone-md/volt.rs/blob/main/docs/styling.md): Tailwind CSS, shadcn/ui, CSS, images, scripts
+- [Configuration](https://github.com/redstone-md/volt.rs/blob/main/docs/configuration.md): volt.toml, environment variables
+- [Deployment](https://github.com/redstone-md/volt.rs/blob/main/docs/deployment.md): build output, Docker, caching
+- [Coming from Next.js](https://github.com/redstone-md/volt.rs/blob/main/docs/migrating-from-nextjs.md): compatibility table and migration
+- [Architecture](https://github.com/redstone-md/volt.rs/blob/main/docs/architecture.md): how rendering, bundling and the type bridge work
+- [CLI](https://github.com/redstone-md/volt.rs/blob/main/docs/cli.md): volt commands
+
+## Optional
+
+- [App agent instructions](https://github.com/redstone-md/volt.rs/blob/main/crates/voltrs-cli/templates/default/AGENTS.md): rules for coding agents working inside a volt app
