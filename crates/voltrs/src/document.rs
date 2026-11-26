@@ -22,6 +22,13 @@ pub struct PageState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
     pub build_id: String,
+    pub site: Site,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Site {
+    pub name: String,
+    pub url: String,
 }
 
 /// JSON-safe for embedding inside `<script>`.

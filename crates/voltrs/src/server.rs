@@ -20,7 +20,7 @@ use crate::cache::PageCache;
 use crate::config::Config;
 use crate::context::{Ctx, RequestParts, State};
 use crate::dev::{EventStream, Hub};
-use crate::document::{Document, ERROR_ROUTE, NOT_FOUND_ROUTE, PageState, error_overlay};
+use crate::document::{Document, ERROR_ROUTE, NOT_FOUND_ROUTE, PageState, Site, error_overlay};
 use crate::error::{Error, ErrorKind, Result};
 use crate::log;
 use crate::manifest::{Manifest, STATIC_PREFIX};
@@ -188,8 +188,14 @@ impl Server {
             }
         };
         let accept = parts.headers.clone();
-        let request =
-            RequestParts { method: parts.method, uri: parts.uri, headers: parts.headers, body, remote: Some(remote) };
+        let request = RequestParts {
+            method: parts.method,
+            uri: parts.uri,
+            headers: parts.headers,
+            body,
+            remote: Some(remote),
+            started,
+        };
         let ctx = Ctx::new(request, self.state.clone(), self.config.clone());
 
         let mut response = self.dispatch(&ctx).await;
@@ -219,6 +225,9 @@ impl Server {
         }
         if path == "/_volt/data" {
             return self.data(ctx).await;
+        }
+        if let Some(error) = self.current().manifest.error.as_deref().filter(|_| self.dev) {
+            return Response::html(error_overlay("Build failed", error)).status(StatusCode::INTERNAL_SERVER_ERROR);
         }
         let path = self.rewrite(&path);
         if let Some(response) = self.api(ctx, &path).await {
@@ -278,7 +287,7 @@ impl Server {
         }
         let payload = if form { Payload::Form(ctx.body().clone()) } else { Payload::Json(ctx.body().clone()) };
         let result = (action.handler)(ctx.clone(), payload).await;
-        if form {
+        if form && ctx.header("x-volt-action").is_none() {
             return self.form_result(ctx, result);
         }
         match result {
@@ -409,6 +418,7 @@ impl Server {
                 headers: http::HeaderMap::new(),
                 body: Bytes::new(),
                 remote: None,
+                started: Instant::now(),
             };
             let ctx = Ctx::new(request, self.state.clone(), self.config.clone());
             let response = self.page(&ctx, route).await;
@@ -468,6 +478,7 @@ impl Server {
             status,
             error,
             build_id: self.current().manifest.build_id.clone(),
+            site: Site { name: self.config.site.name.clone(), url: self.config.site_url().to_owned() },
         }
     }
 

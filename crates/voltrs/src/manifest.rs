@@ -16,6 +16,9 @@ pub struct Manifest {
     pub server: String,
     pub client: ClientAssets,
     pub routes: Vec<RouteEntry>,
+    /// Set by `volt dev` when the last rebuild failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

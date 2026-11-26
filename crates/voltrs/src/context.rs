@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
@@ -35,6 +36,7 @@ pub(crate) struct RequestParts {
     pub headers: HeaderMap,
     pub body: Bytes,
     pub remote: Option<SocketAddr>,
+    pub started: Instant,
 }
 
 #[derive(Default)]
@@ -152,6 +154,11 @@ impl Ctx {
 
     pub fn form<T: DeserializeOwned>(&self) -> Result<T> {
         crate::form::from_bytes(&self.request.body).map_err(|e| Error::bad_request(e.to_string()))
+    }
+
+    /// Time since the request arrived.
+    pub fn elapsed(&self) -> Duration {
+        self.request.started.elapsed()
     }
 
     pub fn remote_addr(&self) -> Option<SocketAddr> {

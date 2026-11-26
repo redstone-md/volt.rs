@@ -27,7 +27,6 @@ mod document;
 mod error;
 mod response;
 mod server;
-mod ssr;
 
 pub mod config;
 pub mod form;
@@ -37,6 +36,7 @@ pub mod registry;
 pub mod router;
 pub mod sdk;
 pub mod seo;
+pub mod ssr;
 pub mod types;
 
 pub use app::App;
@@ -56,6 +56,7 @@ pub mod prelude {
         App, ChangeFrequency, Cookie, Ctx, Error, Html, IntoResponse, Json, Response, Result, SameSite, SitemapEntry,
         StatusCode, Type, action, delete, get, loader, model, not_found, patch, post, put, redirect, sitemap,
     };
+    pub use serde_json::{Value, json};
 }
 
 #[doc(hidden)]

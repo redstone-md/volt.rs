@@ -75,7 +75,10 @@ fn generates_typed_sdk() {
     assert!(source.contains("  /** What needs doing. */\n  title: string;"), "{source}");
     assert!(source.contains("  doneAt?: string | null;"), "{source}");
     assert!(source.contains("export type Status = \"Active\" | \"Archived\";"), "{source}");
-    assert!(source.contains("export type Event = { kind: \"created\"; id: number; } | { kind: \"deleted\" };"), "{source}");
+    assert!(
+        source.contains("export type Event = { kind: \"created\"; id: number; } | { kind: \"deleted\" };"),
+        "{source}"
+    );
     assert!(source.contains("export const addTodo = createAction<NewTodo, Todo>(\"add_todo\");"), "{source}");
     assert!(source.contains("export const clearAll = createAction<void, null>(\"clear_all\");"), "{source}");
     assert!(source.contains("export const lastEvent = createAction<void, Event | null>(\"last_event\");"), "{source}");

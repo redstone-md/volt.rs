@@ -1,0 +1,45 @@
+{
+  "name": "volt-rs",
+  "version": "0.0.1",
+  "description": "React framework with a Rust server: SSR, server actions and file-system routing with Next.js ergonomics",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://github.com/redstone-md/volt.rs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/redstone-md/volt.rs.git",
+    "directory": "packages/volt-rs"
+  },
+  "keywords": ["react", "rust", "ssr", "framework", "nextjs", "server-actions", "tailwind", "shadcn"],
+  "bin": {
+    "volt": "bin/volt.js"
+  },
+  "exports": {
+    ".": { "types": "./src/index.d.ts", "default": "./src/index.js" },
+    "./link": { "types": "./src/link.d.ts", "default": "./src/link.js" },
+    "./navigation": { "types": "./src/navigation.d.ts", "default": "./src/navigation.js" },
+    "./image": { "types": "./src/image.d.ts", "default": "./src/image.js" },
+    "./script": { "types": "./src/script.d.ts", "default": "./src/script.js" },
+    "./head": { "types": "./src/head.d.ts", "default": "./src/head.js" },
+    "./form": { "types": "./src/form.d.ts", "default": "./src/form.js" },
+    "./actions": { "types": "./src/actions.d.ts", "default": "./src/actions.js" },
+    "./seo": { "types": "./src/seo.d.ts", "default": "./src/seo.js" },
+    "./dynamic": { "types": "./src/dynamic.d.ts", "default": "./src/dynamic.js" },
+    "./env": { "types": "./src/env.d.ts" },
+    "./internal/*": "./src/internal/*.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["bin", "src"],
+  "sideEffects": false,
+  "peerDependencies": {
+    "react": ">=19",
+    "react-dom": ">=19"
+  },
+  "optionalDependencies": {
+    "@volt-rs/cli-darwin-arm64": "0.0.1",
+    "@volt-rs/cli-darwin-x64": "0.0.1",
+    "@volt-rs/cli-linux-arm64": "0.0.1",
+    "@volt-rs/cli-linux-x64": "0.0.1",
+    "@volt-rs/cli-win32-x64": "0.0.1"
+  }
+}

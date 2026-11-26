@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "es2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"],
+      "@volt/api": ["./.volt/types/api.ts"]
+    },
+    "types": ["volt-rs/env"]
+  },
+  "include": ["**/*.ts", "**/*.tsx", ".volt/types/*.ts"],
+  "exclude": ["node_modules", "target"]
+}
