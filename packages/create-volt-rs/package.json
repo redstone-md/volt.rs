@@ -1,0 +1,24 @@
+{
+  "name": "create-volt-rs",
+  "version": "0.0.1",
+  "description": "Create a volt.rs app: React on a Rust server",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://github.com/redstone-md/volt.rs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/redstone-md/volt.rs.git",
+    "directory": "packages/create-volt-rs"
+  },
+  "keywords": ["volt", "react", "rust", "create", "starter", "nextjs"],
+  "bin": {
+    "create-volt-rs": "index.js"
+  },
+  "files": ["index.js", "templates"],
+  "scripts": {
+    "prepack": "node scripts/copy-templates.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

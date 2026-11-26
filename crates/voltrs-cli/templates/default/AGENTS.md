@@ -1,0 +1,67 @@
+# AGENTS.md
+
+This is a [volt.rs](https://github.com/redstone-md/volt.rs) app: React 19 pages, server-rendered by a Rust server. Next.js conventions apply unless stated below.
+
+## Commands
+
+| Task | Command |
+| --- | --- |
+| Dev server with live reload | `npm run dev` |
+| Production build | `npm run build` |
+| Run production server | `npm run start` |
+| Type-check TypeScript | `npm run typecheck` |
+| Lint Rust | `cargo clippy` |
+| Regenerate the typed client | `npx volt sdk` |
+| List routes | `npx volt routes` |
+| Add a shadcn/ui component | `npx shadcn@latest add <name>` |
+
+## Layout
+
+- `app/` file-system routes: `page.tsx`, `layout.tsx`, `loading.tsx`, `error.tsx`, `not-found.tsx`, `template.tsx`. Segments: `[id]`, `[...slug]`, `[[...slug]]`, `(group)`. Folders starting with `_` are private.
+- `server/main.rs` Rust loaders, actions, API routes and shared state.
+- `components/ui/` shadcn/ui components. `lib/utils.ts` exports `cn()`.
+- `public/` static files served at `/`.
+- `volt.toml` configuration.
+- `.volt/` generated output. Never edit it. `.volt/types/api.ts` is the typed client imported as `@volt/api`.
+
+## How data flows
+
+1. A page gets its data from a Rust loader for its route:
+   ```rust
+   #[loader("/posts/[slug]")]
+   async fn post(ctx: Ctx) -> Result<Post> { /* ctx.param("slug") */ }
+   ```
+   ```tsx
+   import type { PageProps } from "@volt/api";
+   export default function Post({ data, params }: PageProps<"/posts/[slug]">) {}
+   ```
+2. Mutations are Rust actions, called from React through `@volt/api` (snake_case in Rust, camelCase in TypeScript):
+   ```rust
+   #[action]
+   async fn add_todo(ctx: Ctx, input: NewTodo) -> Result<Todo> {}
+   ```
+   ```tsx
+   import { addTodo } from "@volt/api";
+   import Form from "volt-rs/form";
+   <Form action={addTodo}><input name="title" /></Form>
+   ```
+   `<Form>` works without JavaScript and refreshes the route data after success. Outside forms call `await addTodo({ title })` and then `useRouter().refresh()`.
+3. Types shared with TypeScript are `#[model]` structs or enums. Fields become camelCase. `Option<T>` becomes an optional field.
+4. JSON APIs: `#[get("/api/x")]`, `#[post(...)]`, `#[put(...)]`, `#[patch(...)]`, `#[delete(...)]` returning `Json<T>`, `String` or `Response`.
+
+`npm run dev` regenerates `@volt/api` whenever Rust code changes.
+
+## Rules
+
+- Components render on the server (inside QuickJS) and in the browser. Touch `window`, `document` and `localStorage` only inside effects or event handlers. Do not use Node APIs in components.
+- No async server components, no `"use server"`, no `fetch` to your own backend from components: load data with a loader, mutate with an action.
+- Navigation: `volt-rs/link` and `volt-rs/navigation` (`useRouter`, `usePathname`, `useSearchParams`, `useParams`, `notFound`, `redirect`). `next/link`, `next/navigation`, `next/image`, `next/script` and `next/head` imports also work.
+- Metadata: export `metadata` or `generateMetadata` from a page or layout. The root layout sets `title.template`.
+- Images: `volt-rs/image` (`<Image src="/photo.jpg" width={800} height={600} alt="" />`) resizes local images on demand.
+- Rust errors: `Error::bad_request("...")`, `not_found()`, `redirect("/login")`, or `?` on any error (becomes a 500).
+- Shared state: register with `App::new().state(value)` and read with `ctx.state::<T>()`.
+- Styling: Tailwind CSS v4 in `app/globals.css`. Merge classes with `cn()`.
+
+## Before you finish
+
+Run `npm run typecheck`, `cargo clippy` and `npm run build`. All three must pass.
