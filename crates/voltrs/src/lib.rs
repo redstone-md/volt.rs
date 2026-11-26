@@ -25,6 +25,8 @@ mod context;
 mod dev;
 mod document;
 mod error;
+#[cfg(feature = "images")]
+mod images;
 mod response;
 mod server;
 

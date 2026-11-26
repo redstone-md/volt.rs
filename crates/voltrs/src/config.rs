@@ -99,13 +99,15 @@ impl Default for SeoConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImageConfig {
-    pub sizes: Vec<u32>,
-    pub quality: u8,
+    /// Serve `/_volt/image` resizing for `<Image>`.
+    pub optimize: bool,
+    /// Concurrent resize jobs. `0` picks the CPU count.
+    pub concurrency: usize,
 }
 
 impl Default for ImageConfig {
     fn default() -> Self {
-        Self { sizes: vec![384, 640, 828, 1080, 1200, 1920, 2048], quality: 75 }
+        Self { optimize: true, concurrency: 0 }
     }
 }
 

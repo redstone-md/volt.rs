@@ -12,6 +12,11 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["images"]
+## Image optimization endpoint at `/_volt/image`.
+images = ["dep:image"]
+
 [dev-dependencies]
 serde.workspace = true
 
@@ -31,3 +36,4 @@ serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
 flate2 = { workspace = true }
+image = { workspace = true, optional = true }

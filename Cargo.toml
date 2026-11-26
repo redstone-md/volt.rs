@@ -22,6 +22,7 @@ clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 flume = { version = "0.11", default-features = false }
 http = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 imagesize = "0.14"
 include_dir = "0.7"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }

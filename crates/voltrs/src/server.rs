@@ -82,6 +82,8 @@ pub(crate) struct Server {
     apis: HashMap<Method, Router<&'static ApiDef>>,
     cache: PageCache,
     hub: Option<Hub>,
+    #[cfg(feature = "images")]
+    images: crate::images::Images,
     dev: bool,
 }
 
@@ -110,7 +112,18 @@ impl Server {
             apis.entry(method).or_default().insert(api.path, api);
         }
 
+        #[cfg(feature = "images")]
+        let images = crate::images::Images::new(
+            config.public_dir(),
+            &out_dir,
+            match config.images.concurrency {
+                0 => config.workers(),
+                n => n,
+            },
+        );
         let server = Arc::new(Self {
+            #[cfg(feature = "images")]
+            images,
             cache: PageCache::default(),
             hub: dev.then(Hub::default),
             config: Arc::new(config),
@@ -226,6 +239,10 @@ impl Server {
         }
         if path == "/_volt/data" {
             return self.data(ctx).await;
+        }
+        #[cfg(feature = "images")]
+        if path == "/_volt/image" && self.config.images.optimize {
+            return self.images.serve(ctx.query_string()).await;
         }
         if let Some(error) = self.current().manifest.error.as_deref().filter(|_| self.dev) {
             return Response::html(error_overlay("Build failed", error)).status(StatusCode::INTERNAL_SERVER_ERROR);

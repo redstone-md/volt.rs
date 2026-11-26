@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 const POLYFILLS: &str = include_str!("polyfills.js");
 const RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TICKS: usize = 100_000;
+const GC_THRESHOLD: usize = 8 * 1024 * 1024;
 
 struct Job {
     method: &'static str,
@@ -92,7 +93,8 @@ impl Engine {
 }
 
 struct Worker {
-    runtime: Runtime,
+    /// Owns the QuickJS heap the context lives in.
+    _runtime: Runtime,
     context: Context,
     generation: u64,
     deadline: Arc<std::sync::Mutex<Option<Instant>>>,
@@ -136,6 +138,7 @@ impl Worker {
             .map_err(|e| format!("cannot read server bundle {}: {e}", bundle.display()))?;
         let runtime = Runtime::new().map_err(|e| e.to_string())?;
         runtime.set_memory_limit(options.memory_limit);
+        runtime.set_gc_threshold(GC_THRESHOLD);
         runtime.set_max_stack_size(8 * 1024 * 1024);
         let deadline: Arc<std::sync::Mutex<Option<Instant>>> = Arc::default();
         let watched = deadline.clone();
@@ -149,7 +152,7 @@ impl Worker {
             ctx.eval::<(), _>(POLYFILLS).map_err(|e| describe(&ctx, e))?;
             eval_file(&ctx, &code, bundle).map_err(|e| describe(&ctx, e))
         })?;
-        Ok(Self { runtime, context, generation, deadline })
+        Ok(Self { _runtime: runtime, context, generation, deadline })
     }
 
     fn call(&mut self, method: &str, payload: &str) -> Result<String, String> {
@@ -164,7 +167,6 @@ impl Worker {
             run().map_err(|e| describe(&ctx, e))
         });
         self.set_deadline(None);
-        self.runtime.run_gc();
         result
     }
 
