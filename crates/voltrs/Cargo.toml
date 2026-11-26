@@ -1,0 +1,33 @@
+[package]
+name = "voltrs"
+description = "Rust runtime for volt.rs: SSR, server actions, loaders and API routes for React apps"
+keywords = ["react", "ssr", "web", "framework", "nextjs"]
+categories = ["web-programming::http-server"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+
+[dependencies]
+voltrs-macros.workspace = true
+bytes.workspace = true
+flume.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+inventory.workspace = true
+percent-encoding.workspace = true
+rquickjs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+flate2 = { workspace = true }

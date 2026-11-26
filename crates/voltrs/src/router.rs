@@ -1,0 +1,269 @@
+//! File-system style route patterns: `/blog/[slug]`, `/docs/[...path]`, `/shop/[[...rest]]`.
+
+use percent_encoding::percent_decode_str;
+use serde_json::{Map, Value};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Segment {
+    Static(String),
+    Dynamic(String),
+    CatchAll(String),
+    OptionalCatchAll(String),
+}
+
+impl Segment {
+    fn parse(raw: &str) -> Option<Self> {
+        if raw.starts_with('(') && raw.ends_with(')') {
+            return None;
+        }
+        let segment = if let Some(name) = raw.strip_prefix("[[...").and_then(|s| s.strip_suffix("]]")) {
+            Self::OptionalCatchAll(name.to_owned())
+        } else if let Some(name) = raw.strip_prefix("[...").and_then(|s| s.strip_suffix(']')) {
+            Self::CatchAll(name.to_owned())
+        } else if let Some(name) = raw.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            Self::Dynamic(name.to_owned())
+        } else {
+            Self::Static(raw.to_owned())
+        };
+        Some(segment)
+    }
+
+    fn weight(&self) -> u8 {
+        match self {
+            Self::Static(_) => 0,
+            Self::Dynamic(_) => 1,
+            Self::CatchAll(_) => 2,
+            Self::OptionalCatchAll(_) => 3,
+        }
+    }
+}
+
+/// Captured route parameters in declaration order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Params(Vec<(String, ParamValue)>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Params {
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0.iter().find(|(key, _)| key == name).and_then(|(_, value)| match value {
+            ParamValue::One(v) => Some(v.as_str()),
+            ParamValue::Many(v) => v.first().map(String::as_str),
+        })
+    }
+
+    pub fn get_all(&self, name: &str) -> Vec<&str> {
+        self.0
+            .iter()
+            .filter(|(key, _)| key == name)
+            .flat_map(|(_, value)| match value {
+                ParamValue::One(v) => vec![v.as_str()],
+                ParamValue::Many(v) => v.iter().map(String::as_str).collect(),
+            })
+            .collect()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ParamValue)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    pub fn to_json(&self) -> Value {
+        let map: Map<String, Value> = self
+            .0
+            .iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    ParamValue::One(v) => Value::String(v.clone()),
+                    ParamValue::Many(v) => Value::Array(v.iter().cloned().map(Value::String).collect()),
+                };
+                (key.clone(), value)
+            })
+            .collect();
+        Value::Object(map)
+    }
+}
+
+/// A parsed route pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutePattern {
+    raw: String,
+    segments: Vec<Segment>,
+}
+
+impl RoutePattern {
+    pub fn parse(raw: &str) -> Self {
+        let segments: Vec<Segment> = raw.split('/').filter(|s| !s.is_empty()).filter_map(Segment::parse).collect();
+        let raw = Self::render(&segments);
+        Self { raw, segments }
+    }
+
+    fn render(segments: &[Segment]) -> String {
+        let body: Vec<String> = segments
+            .iter()
+            .map(|segment| match segment {
+                Segment::Static(s) => s.clone(),
+                Segment::Dynamic(n) => format!("[{n}]"),
+                Segment::CatchAll(n) => format!("[...{n}]"),
+                Segment::OptionalCatchAll(n) => format!("[[...{n}]]"),
+            })
+            .collect();
+        format!("/{}", body.join("/"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    pub fn is_dynamic(&self) -> bool {
+        self.segments.iter().any(|s| !matches!(s, Segment::Static(_)))
+    }
+
+    /// Sort key: more specific patterns first.
+    fn specificity(&self) -> (Vec<u8>, std::cmp::Reverse<usize>) {
+        (self.segments.iter().map(Segment::weight).collect(), std::cmp::Reverse(self.segments.len()))
+    }
+
+    pub fn matches(&self, path: &str) -> Option<Params> {
+        let parts: Vec<String> = path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| percent_decode_str(s).decode_utf8_lossy().into_owned())
+            .collect();
+        let mut params = Vec::new();
+        let mut index = 0;
+        for segment in &self.segments {
+            match segment {
+                Segment::Static(expected) => {
+                    if parts.get(index) != Some(expected) {
+                        return None;
+                    }
+                    index += 1;
+                }
+                Segment::Dynamic(name) => {
+                    params.push((name.clone(), ParamValue::One(parts.get(index)?.clone())));
+                    index += 1;
+                }
+                Segment::CatchAll(name) | Segment::OptionalCatchAll(name) => {
+                    let rest = parts[index.min(parts.len())..].to_vec();
+                    if rest.is_empty() && matches!(segment, Segment::CatchAll(_)) {
+                        return None;
+                    }
+                    if !rest.is_empty() {
+                        params.push((name.clone(), ParamValue::Many(rest)));
+                    }
+                    index = parts.len();
+                }
+            }
+        }
+        (index == parts.len()).then_some(Params(params))
+    }
+
+    /// Fills the pattern with params, used by redirects and sitemaps.
+    pub fn fill(&self, params: &Params) -> String {
+        let parts: Vec<String> = self
+            .segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Static(s) => Some(s.clone()),
+                Segment::Dynamic(n) => params.get(n).map(str::to_owned),
+                Segment::CatchAll(n) | Segment::OptionalCatchAll(n) => {
+                    let all = params.get_all(n);
+                    (!all.is_empty()).then(|| all.join("/"))
+                }
+            })
+            .collect();
+        format!("/{}", parts.join("/"))
+    }
+}
+
+/// Ordered collection of patterns resolving a path to the most specific match.
+#[derive(Debug, Clone)]
+pub struct Router<T> {
+    routes: Vec<(RoutePattern, T)>,
+}
+
+impl<T> Default for Router<T> {
+    fn default() -> Self {
+        Self { routes: Vec::new() }
+    }
+}
+
+impl<T> Router<T> {
+    pub fn insert(&mut self, pattern: &str, value: T) {
+        self.routes.push((RoutePattern::parse(pattern), value));
+        self.routes.sort_by_key(|(pattern, _)| pattern.specificity());
+    }
+
+    pub fn find(&self, path: &str) -> Option<(&RoutePattern, &T, Params)> {
+        self.routes.iter().find_map(|(pattern, value)| pattern.matches(path).map(|params| (pattern, value, params)))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&RoutePattern, &T)> {
+        self.routes.iter().map(|(p, v)| (p, v))
+    }
+
+    pub fn len(&self) -> usize {
+        self.routes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+}
+
+impl<T> FromIterator<(String, T)> for Router<T> {
+    fn from_iter<I: IntoIterator<Item = (String, T)>>(iter: I) -> Self {
+        let mut router = Self::default();
+        for (pattern, value) in iter {
+            router.insert(&pattern, value);
+        }
+        router
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_groups_and_params() {
+        assert_eq!(RoutePattern::parse("/(marketing)/blog/[slug]").as_str(), "/blog/[slug]");
+        assert_eq!(RoutePattern::parse("/").as_str(), "/");
+    }
+
+    #[test]
+    fn matches_segments() {
+        let p = RoutePattern::parse("/blog/[slug]");
+        assert_eq!(p.matches("/blog/hello").unwrap().get("slug"), Some("hello"));
+        assert!(p.matches("/blog").is_none());
+        assert!(p.matches("/blog/a/b").is_none());
+        let all = RoutePattern::parse("/docs/[...path]");
+        assert_eq!(all.matches("/docs/a/b").unwrap().get_all("path"), vec!["a", "b"]);
+        assert!(all.matches("/docs").is_none());
+        let opt = RoutePattern::parse("/shop/[[...rest]]");
+        assert!(opt.matches("/shop").is_some());
+        assert_eq!(opt.matches("/shop/x%20y").unwrap().get("rest"), Some("x y"));
+    }
+
+    #[test]
+    fn prefers_specific_routes() {
+        let router: Router<u8> =
+            [("/[...all]".to_owned(), 0), ("/blog/[slug]".to_owned(), 1), ("/blog/new".to_owned(), 2)]
+                .into_iter()
+                .collect();
+        assert_eq!(*router.find("/blog/new").unwrap().1, 2);
+        assert_eq!(*router.find("/blog/x").unwrap().1, 1);
+        assert_eq!(*router.find("/a/b").unwrap().1, 0);
+    }
+
+    #[test]
+    fn fills_patterns() {
+        let p = RoutePattern::parse("/blog/[slug]");
+        let params = p.matches("/blog/x").unwrap();
+        assert_eq!(RoutePattern::parse("/posts/[slug]").fill(&params), "/posts/x");
+    }
+}
