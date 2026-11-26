@@ -116,10 +116,10 @@ impl Plugin for VoltPlugin {
     }
 
     async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
-        if let Some(name) = args.id.strip_prefix('\0') {
-            if let Some(code) = self.0.modules.get(name) {
-                return Self::module(code.clone(), true);
-            }
+        if let Some(name) = args.id.strip_prefix('\0')
+            && let Some(code) = self.0.modules.get(name)
+        {
+            return Self::module(code.clone(), true);
         }
         match extension(args.id).as_deref() {
             Some("css") => {

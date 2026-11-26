@@ -1,0 +1,11 @@
+{
+  "name": "volt-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node browser.test.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.0"
+  }
+}

@@ -40,7 +40,7 @@ pub fn build(root: &Path, release: bool) -> Result<PathBuf> {
             m.reason == "compiler-artifact" && m.target.as_ref().is_some_and(|t| t.kind.iter().any(|k| k == "bin"))
         })
         .filter_map(|m| m.executable)
-        .last()
+        .next_back()
         .context("the server crate has no binary target")
 }
 

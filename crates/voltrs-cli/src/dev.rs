@@ -155,11 +155,11 @@ pub async fn run(project: Project) -> Result<()> {
         Session { pipeline: Pipeline::new(&project, true), project: &project, binary: None, server: Server::default() };
     let (tx, mut rx) = mpsc::unbounded_channel::<PathBuf>();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if let Ok(event) = event {
-            if !matches!(event.kind, notify::EventKind::Access(_)) {
-                for path in event.paths {
-                    let _ = tx.send(path);
-                }
+        if let Ok(event) = event
+            && !matches!(event.kind, notify::EventKind::Access(_))
+        {
+            for path in event.paths {
+                let _ = tx.send(path);
             }
         }
     })?;
