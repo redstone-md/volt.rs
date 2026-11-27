@@ -6,13 +6,15 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 
 | Next.js | volt |
 | --- | --- |
-| `app/**/page.tsx`, `layout.tsx`, `loading.tsx`, `error.tsx`, `not-found.tsx`, `template.tsx` | same |
+| `app/**/page.tsx`, `layout.tsx`, `loading.tsx`, `error.tsx`, `global-error.tsx`, `not-found.tsx`, `template.tsx` | same |
+| `favicon.ico`, `icon.*`, `apple-icon.*`, `opengraph-image.*`, `twitter-image.*`, `manifest.json`, `robots.txt`, `sitemap.xml` files | same (image files only: no `opengraph-image.tsx`) |
+| `app/sitemap.ts`, `app/robots.ts`, `app/manifest.ts` | same, plus Rust `#[sitemap]` providers |
 | `[slug]`, `[...slug]`, `[[...slug]]`, `(group)`, `_private` | same |
-| `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic` | aliased to `volt-rs/*` |
+| `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/cache`, `next/server` | aliased to `volt-rs/*` (`next/cache` and `next/server` only export `unstable_noStore` and `connection`) |
 | `pages/**`, `_app`, `_document`, `404`, `500`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` | same, see [Pages Router](./pages-router.md) |
 | `export const metadata`, `generateMetadata`, `export const viewport` | same |
 | `params` / `searchParams` props (sync or awaited) | same |
-| `export const revalidate`, `export const dynamic = "force-dynamic"` | same, with stale-while-revalidate |
+| `export const revalidate`, `export const dynamic` (`force-dynamic`, `force-static`, `error`) | same, with stale-while-revalidate |
 | `<Suspense>`, `use(promise)`, `loading.tsx`, `next/dynamic` | streamed from the server; `loading.tsx` shows at once on navigation, but on a first request to a page with a Rust loader only after the loader returns |
 | `generateStaticParams`, `dynamicParams`, `getStaticPaths` | same, evaluated at build time for routes without a Rust loader |
 | `output: "export"`, `basePath`, `trailingSlash` | `volt export`, `[build] base_path`, `[build] trailing_slash` |
@@ -29,7 +31,7 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 | `"use server"` action | Rust `#[action]`, imported from `@volt/api` |
 | `app/api/**/route.ts`, `pages/api/**` | Rust `#[get]`, `#[post]`, ... |
 | `middleware.ts` | `App::new().middleware(...)` |
-| `app/sitemap.ts` | automatic, plus Rust `#[sitemap]` providers |
+| no `app/sitemap.ts` | automatic sitemap of every known path |
 | `revalidatePath()` after an action | `ctx.revalidate_path()` / `voltrs::revalidate_path()` for cached pages and client route data; `<Form>` refreshes the current page automatically, or `router.refresh()` |
 | `useActionState`, `useFormStatus` | same; `volt-rs/actions` also exports a `useActionState` that returns action errors |
 | `formData.get("file")` in an action | a `File` field in the action input, or `ctx.multipart()` |

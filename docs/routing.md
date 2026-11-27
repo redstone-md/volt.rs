@@ -22,10 +22,47 @@ When several routes match, static segments win over dynamic ones, and dynamic on
 | `page.tsx` | The UI of a route. |
 | `loading.tsx` | Suspense fallback for the segment, shown at once on client navigation. See [Loading UI and streaming](#loading-ui-and-streaming). |
 | `error.tsx` | Error boundary. Receives `{ error, reset }`. |
-| `not-found.tsx` | Rendered for `notFound()` and, at the root, for unknown URLs. |
-| `template.tsx` | Like a layout, but remounted on navigation. |
+| `global-error.tsx` | At the app root only: replaces the root layout when it fails. Renders its own `<html>` and `<body>`. |
+| `not-found.tsx` | Rendered for `notFound()` thrown below its segment and, at the root, for unknown URLs. |
+| `template.tsx` | Like a layout, but remounted when the segment below it changes. |
 
-Files may use `.tsx`, `.ts`, `.jsx` or `.js`.
+Files may use `.tsx`, `.ts`, `.jsx` or `.js`. Metadata files (`icon.png`, `opengraph-image.jpg`, `sitemap.ts`, ...) are described in [Metadata and SEO](./metadata-seo.md).
+
+### Errors and not found
+
+`notFound()` renders the closest `not-found.tsx` above the segment that called it, inside the layouts above that file, with status 404 and `<meta name="robots" content="noindex">`. That works during server rendering and after client navigation. A `notFound()` thrown by a layout is handled by the `not-found.tsx` of a parent segment, and without any nested file the root `not-found.tsx` (or the built-in page) is shown. A Rust loader returning `not_found()` always renders the root not-found page.
+
+`error.tsx` catches errors of its segment on the client. On the server, a failing render falls back to the root `error.tsx` inside the root layout with status 500. When the root layout itself throws (on the server, or later in the browser), `app/global-error.tsx` is rendered instead of the whole document; without a root `error.tsx` it is also the server error page. `global-error.tsx` receives `{ error, reset }` and must render `<html>` and `<body>`. In development, the error overlay is shown instead.
+
+Error and not-found boundaries reset when the pathname changes. Layouts inside them keep their state across navigations; templates are keyed by the segment directly below them, so `app/blog/template.tsx` remounts when going from `/blog/a` to `/blog/b` but a root template does not.
+
+### Active segments
+
+`useSelectedLayoutSegment()` returns the active segment one level below the layout that calls it, and `useSelectedLayoutSegments()` all of them. In `app/layout.tsx` on `/blog/hello`, they return `"blog"` and `["blog", "hello"]`; in `app/blog/layout.tsx`, `"hello"` and `["hello"]`. Dynamic segments return their value, route groups their folder name (`"(shop)"`), and the page itself `null`. Parallel route slots are not supported, so a key other than `"children"` returns `null` / `[]`.
+
+```tsx
+"use client";
+import Link from "next/link";
+import { useSelectedLayoutSegment } from "next/navigation";
+
+export function NavLink({ slug, children }: { slug: string; children: React.ReactNode }) {
+  const active = useSelectedLayoutSegment() === slug;
+  return <Link href={`/${slug}`} className={active ? "font-bold" : ""}>{children}</Link>;
+}
+```
+
+### Route segment config
+
+| Export | Effect |
+| --- | --- |
+| `dynamic = "auto"` | Default: static routes are prerendered, routes with a Rust loader or dynamic segments render per request. |
+| `dynamic = "force-dynamic"` | Renders on every request. |
+| `dynamic = "force-static"` | One cached render per pathname shared by every visitor, even with a Rust loader (its first output is cached; without a loader the page is prerendered). `searchParams` is always empty. |
+| `dynamic = "error"` | Like `force-static`, and the build fails if the route has a Rust loader, which reads the request. |
+| `revalidate`, `dynamicParams` | See [Static generation](./static-generation.md). |
+| `fetchCache`, `runtime`, `preferredRegion`, `maxDuration` | Accepted and ignored. |
+
+The page's export wins over its layouts'. `unstable_noStore()` (`next/cache`) and `await connection()` (`next/server`) are accepted no-ops; use `dynamic = "force-dynamic"` to opt out of caching.
 
 ## Pages and layouts
 

@@ -86,7 +86,7 @@ export default function Home({ data }: PageProps<"/">) {
 
 ## Features
 
-- **App Router conventions**: `page`, `layout`, `loading`, `error`, `not-found`, `template`; `[slug]`, `[...slug]`, `[[...slug]]`, `(groups)`, `_private` folders.
+- **App Router conventions**: `page`, `layout`, `loading`, `error`, `global-error`, `not-found` (nested too), `template`; `[slug]`, `[...slug]`, `[[...slug]]`, `(groups)`, `_private` folders; `export const dynamic` (`force-static`, `force-dynamic`, `error`); `useSelectedLayoutSegment(s)` and `useServerInsertedHTML`.
 - **Pages Router** next to it: `pages/`, `_app`, `_document`, `404`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` and `next/router` with router events.
 - **Server-side rendering** of React 19 with hydration, then client-side navigation with prefetching, scroll restoration and per-route code splitting.
 - **Streaming SSR**: the shell goes out first and each `<Suspense>` boundary (`use(promise)`, `lazy`, `next/dynamic`) streams in as it resolves; crawlers get the complete page. `loading.tsx` shows instantly on client navigation.
@@ -94,7 +94,8 @@ export default function Home({ data }: PageProps<"/">) {
 - **Forms that work without JavaScript**: `<Form action={...}>` posts natively (multipart, so file uploads too) and upgrades to in-place submission with pending state, `useFormStatus` and `useActionState`.
 - **File uploads and validation**: `File` fields in `#[model]` inputs, `ctx.multipart()` in API routes, `Error::validation` field errors, and `ctx.revalidate_path` to refresh cached pages and client route data after a mutation.
 - **Metadata API** (`metadata`, `generateMetadata`, `viewport`, Open Graph, Twitter, robots, alternates, verification), JSON-LD, automatic `sitemap.xml`, `robots.txt` and `llms.txt`.
-- **Next.js imports work**: `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/font/google`, `next/font/local`.
+- **Metadata files**: `favicon.ico`, `icon.*`, `apple-icon.*`, `opengraph-image.*` (with `.alt.txt`), `twitter-image.*`, `manifest.json`, `robots.txt` and `sitemap.xml` in any segment are served and linked from the head with sizes; `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts` generate them in code.
+- **Next.js imports work**: `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/cache`, `next/server` (`connection`), `next/font/google`, `next/font/local`.
 - **Tailwind CSS v4 and shadcn/ui** out of the box; `npx shadcn add` works.
 - **CSS Modules, Sass/SCSS and PostCSS**: `*.module.css` / `*.module.scss` with scoped class names, Sass compiled in Rust, Lightning CSS for `@import` inlining, `url()` assets, vendor prefixes and minification.
 - **Fonts**: `next/font/google` and `next/font/local` compatible loaders; Google Fonts are downloaded at build time and self-hosted, with preloading.

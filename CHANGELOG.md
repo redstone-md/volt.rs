@@ -37,6 +37,13 @@
 - Nested objects next to files in a multipart action input are decoded from JSON fields.
 - Uploaded file names drop control characters, and `.`/`..` become empty. No-JavaScript submissions return only to local paths.
 - Form field grouping is linear in the number of fields.
+- Metadata files in `app/`: `favicon.ico`, `icon.*`, `apple-icon.*`, `opengraph-image.*` (with `.alt.txt`), `twitter-image.*`, `manifest.json` / `manifest.webmanifest`, `robots.txt` and `sitemap.xml` are served at their Next.js URLs (hashed URLs cached forever, plain ones with an ETag) and added to the metadata of every route below their segment, with sizes and types.
+- `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts` metadata routes, evaluated in QuickJS (`__VOLT__.metadataRoute`); `sitemap.ts` replaces the automatic sitemap and is merged with `#[sitemap]` providers. `MetadataRoute` types.
+- `app/global-error.tsx` replaces the root layout when it throws in the browser or while rendering the error page on the server, and is the server error page when there is no root `error.tsx`.
+- Nested `not-found.tsx` files handle `notFound()` during server rendering too, inside their layouts, with status 404 and `noindex`.
+- `useSelectedLayoutSegment` and `useSelectedLayoutSegments`, `useServerInsertedHTML` (injected into the head of server-rendered pages), and `unstable_noStore` / `connection` no-ops; `next/cache` and `next/server` resolve to `volt-rs/cache` and `volt-rs/server`.
+- `export const dynamic = "force-static"` caches one render per pathname without the query (also for routes with a Rust loader), `"error"` fails the build for routes with a Rust loader, and `dynamic` is read from layouts too. Other segment config exports (`fetchCache`, `runtime`, ...) are ignored.
+- Error and not-found boundaries reset on navigation instead of remounting, so layouts nested in them keep their state; templates remount when the segment below them changes, as in Next.js.
 
 ## 0.0.1
 
