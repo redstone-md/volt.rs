@@ -187,8 +187,9 @@ mod tests {
             error: None,
             build_id: String::new(),
             site: Site { name: String::new(), url: String::new() },
+            export: false,
         };
-        let head = Document { manifest: &manifest, route: None, state: &state, dev: false }.head();
+        let head = Document { manifest: &manifest, route: None, state: &state, dev: false, base_path: "" }.head();
         assert!(head.starts_with(
             "<link rel=\"preload\" href=\"/_volt/static/media/a-1.woff2\" as=\"font\" type=\"font/woff2\" crossorigin=\"\">"
         ));
