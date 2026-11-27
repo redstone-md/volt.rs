@@ -315,25 +315,64 @@ function slotNode(slot, state, params) {
   if (!route) return slot.default ? h(component(slot.default), { params }) : null;
   const props = { data: own.data, params: thenable(own.params ?? {}), searchParams: thenable(state.searchParams ?? {}) };
   const key = `${own.route}:${JSON.stringify(own.params ?? {})}`;
-  const page = h(component(route.page), props);
-  return wrap(route.segments, page, { state, params: props.params, values: own.params, resetKey: key });
+  const failed = own.error ? failure(route.segments, own.error) : null;
+  const options = { state, params: props.params, values: own.params, resetKey: key };
+  const node = failed
+    ? wrap(route.segments.slice(0, failed.depth + 1), failed.node, options)
+    : wrap(route.segments, h(component(route.page), props), options);
+  return h(SlotScope, { params: own.params, data: own.data }, node);
 }
 
 /**
- * Applies a client navigation result on top of the view it starts from: slots without a match keep what they
- * showed, and a `retain` result (an interception or a URL that only exists in slots) keeps the page as well.
+ * The innermost `not-found` or `error` file of a slot page whose loader failed, rendered in place of the page.
+ * The server only reports failures that such a file catches.
  */
-function settle(next, base) {
+function failure(segments, error) {
+  const field = error.notFound ? "notFound" : "error";
+  for (let depth = segments.length - 1; depth >= 0; depth--) {
+    const module = segments[depth][field];
+    if (!module) continue;
+    const props = error.notFound ? {} : { error, reset: () => location.reload() };
+    return { depth, node: h(component(module), props) };
+  }
+  return null;
+}
+
+/** Inside a slot, `useParams` adds the slot page's params to the page's and `useData` reads the slot's data. */
+function SlotScope({ params, data, children }) {
+  const context = useContext(RouterContext);
+  const value = useMemo(
+    () => context && { ...context, state: { ...context.state, params: { ...context.state.params, ...params }, data } },
+    [context, params, data],
+  );
+  return h(RouterContext.Provider, { value }, children);
+}
+
+/**
+ * Applies a client navigation result for the app URL `page` on top of the view it starts from: slots without a
+ * match keep what they showed, and a `retain` result (an interception or a URL that only exists in slots) keeps
+ * the page as well.
+ */
+function settle(next, base, page) {
   const slots = { ...next.state.slots };
   for (const [key, own] of Object.entries(slots)) {
     const before = base.state.slots?.[key];
     if (own.route === null && before?.route) slots[key] = before;
   }
-  if (!next.state.retain) return { ...next, state: { ...next.state, slots } };
+  if (!next.state.retain) return { ...next, state: { ...next.state, slots }, page };
   const { pathname, search, searchParams } = next.state;
   const state = { ...base.state, pathname, search, searchParams, slots: { ...base.state.slots, ...slots } };
-  return { ...base, state, key: base.key ?? base.state.pathname };
+  return { ...base, state, key: base.key ?? base.state.pathname, page: pageOf(base) };
 }
+
+/** The app URL of the page a view shows, which differs from the location while slots are retained. */
+const pageOf = (view) => view.page ?? `${view.state.pathname}${view.state.search ?? ""}`;
+
+/**
+ * History state of an entry. `from` and `page` restore an intercepted view on back and forward after a reload,
+ * when the in-memory view of the entry is gone.
+ */
+const entryState = (key, from, view) => ({ __volt: key, from, page: pageOf(view) });
 
 const historyKey = () => Math.random().toString(36).slice(2, 10);
 
@@ -497,7 +536,7 @@ export function App({ routes, shells = {}, initial }) {
       if (shallow && url.pathname === location.pathname) {
         inflight.current = null;
         routerEvents.emit("beforeHistoryChange", as, { shallow });
-        history[replace ? "replaceState" : "pushState"]({ __volt: key }, "", url.href);
+        history[replace ? "replaceState" : "pushState"]({ ...history.state, __volt: key }, "", url.href);
         const state = { ...current.current.state, search: url.search, searchParams: searchParams(url.search) };
         commit({ ...current.current, state }, url.hash ? { hash: url.hash.slice(1) } : target, event);
         return;
@@ -505,11 +544,12 @@ export function App({ routes, shells = {}, initial }) {
       const base = current.current;
       const from = base.state.route;
       let entered = false;
-      const enter = () => {
-        if (entered) return;
+      // The loading preview enters the history entry early; the final view then completes its state.
+      const enter = (state) => {
+        if (entered) return history.replaceState(state, "", url.href);
         entered = true;
         routerEvents.emit("beforeHistoryChange", as, { shallow });
-        history[replace ? "replaceState" : "pushState"]({ __volt: key }, "", url.href);
+        history[replace ? "replaceState" : "pushState"](state, "", url.href);
       };
       const request = load(path, url.search, fresh, from);
       let settled = false;
@@ -524,7 +564,7 @@ export function App({ routes, shells = {}, initial }) {
           (view) => {
             if (!view || settled || own !== ticket.current) return;
             previewed = true;
-            enter();
+            enter({ __volt: key, from });
             scroll.current = url.hash ? null : target;
             completing.current = null;
             setView(view);
@@ -545,12 +585,12 @@ export function App({ routes, shells = {}, initial }) {
       if (own !== ticket.current) return;
       inflight.current = null;
       if (next.redirect) return navigate(next.redirect, { replace: true, scroll: toTop });
-      const view = settle(next, base);
+      const view = settle(next, base, path + url.search);
       if (next.state.buildId !== buildId || kindOf(view.route) !== kindOf(base.route)) {
         location.href = url.href;
         return;
       }
-      enter();
+      enter(entryState(key, from, view));
       entries.current.set(key, { from, view });
       commit(view, url.hash ? { hash: url.hash.slice(1) } : previewed ? null : target, event);
     },
@@ -601,10 +641,17 @@ export function App({ routes, shells = {}, initial }) {
     routerEvents.emit("ready");
     controller.revalidate = revalidate;
     history.scrollRestoration = "manual";
-    if (!history.state?.__volt) history.replaceState({ __volt: historyKey() }, "", location.href);
-    if (!entries.current.has(history.state.__volt)) {
-      entries.current.set(history.state.__volt, { from: null, view: current.current });
-    }
+    // A document load shows the page itself, whatever the entry showed before a reload.
+    const initialKey = history.state?.__volt ?? historyKey();
+    history.replaceState({ __volt: initialKey }, "", location.href);
+    if (!entries.current.has(initialKey)) entries.current.set(initialKey, { from: null, view: current.current });
+    // The page under an intercepted view whose entry was created before a reload.
+    const restore = async (page) => {
+      if (!page) return null;
+      const [path, query] = page.split(/\?(.*)/s);
+      const view = await load(path, query ? `?${query}` : "", false, null);
+      return view.redirect || view.state.retain ? null : view;
+    };
     const onPopState = async (event) => {
       const key = event.state?.__volt;
       if (!key) return;
@@ -619,13 +666,17 @@ export function App({ routes, shells = {}, initial }) {
         const path = stripBase(location.pathname);
         if (path === null) return location.reload();
         const entry = entries.current.get(key);
-        const next = await load(path, location.search, false, entry?.from);
+        const from = entry ? entry.from : event.state.from;
+        const next = await load(path, location.search, false, from);
         if (own !== ticket.current) return;
         inflight.current = null;
         if (next.redirect || next.state.buildId !== buildId) return location.reload();
-        const view = settle(next, entry?.view ?? current.current);
+        const base = entry?.view ?? (next.state.retain ? await restore(event.state.page) : current.current);
+        if (own !== ticket.current) return;
+        if (!base) return location.reload();
+        const view = settle(next, base, path + location.search);
         if (kindOf(view.route) !== kindOf(current.current.route)) return location.reload();
-        entries.current.set(key, { from: entry?.from ?? null, view });
+        entries.current.set(key, { from: from ?? null, view });
         commit(view, { top: readScroll(key) }, change);
       } catch (error) {
         if (own !== ticket.current) return;
