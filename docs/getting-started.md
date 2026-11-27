@@ -27,7 +27,7 @@ cd my-app
 npm run dev
 ```
 
-Open http://localhost:3000. Edit `app/page.tsx` and the page reloads. Edit `server/main.rs` and the server recompiles, the typed client in `@volt/api` is regenerated and the page reloads.
+Open http://localhost:3000. Edit `app/page.tsx` and the change appears in place, with the page state kept (React Fast Refresh). Edit `server/main.rs` and the server recompiles, the typed client in `@volt/api` is regenerated and the page reloads.
 
 ## Project structure
 

@@ -104,7 +104,7 @@ export default function Home({ data }: PageProps<"/">) {
 - **Static prerendering** with `generateStaticParams`, `dynamicParams` and `getStaticPaths`, incremental static regeneration (stale-while-revalidate), on-demand `revalidate_path`, and **static export** (`volt export`) for any static host.
 - **Internationalized routing**: `[i18n] locales` with unprefixed default locale, `/de/...` prefixes, `Accept-Language` and cookie detection, `useLocale()`, `<Link locale>`, `ctx.locale()` in Rust, automatic `hreflang` tags and localized sitemaps.
 - `base_path` and `trailing_slash`, Brotli and gzip precompression, immutable asset caching, security headers, redirects and rewrites.
-- **Dev server** with live reload, CSS hot swap, Rust recompilation and an in-browser error overlay.
+- **Dev server** with React Fast Refresh (state-preserving component updates), CSS hot swap, Rust recompilation and an in-browser error overlay that keeps the page running.
 - **Instructions for coding agents** in every generated project (`AGENTS.md`) and [`llms.txt`](./llms.txt) for the framework itself.
 
 ## How it works
@@ -129,7 +129,7 @@ export default function Home({ data }: PageProps<"/">) {
 
 ## Status
 
-volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components and React Fast Refresh (dev uses full reloads). See [CHANGELOG.md](./CHANGELOG.md).
+volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components. See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Contributing
 
