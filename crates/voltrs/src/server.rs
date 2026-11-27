@@ -25,15 +25,17 @@ use crate::document::{Document, ERROR_ROUTE, NOT_FOUND_ROUTE, PageState, Site, S
 use crate::error::{Error, ErrorKind, Result};
 use crate::flash::ActionFlash;
 use crate::form::FormData;
+use crate::handlers::{Outcome, ScriptRequest, collect, origin};
 use crate::log;
 use crate::manifest::{Manifest, RouteEntry, STATIC_PREFIX, SlotRoute};
+use crate::matcher::{PathMatcher, Verdict};
 use crate::metadata::MetadataAssets;
 use crate::registry::{self, ActionDef, ApiDef, BoxFuture, LoaderDef, Payload};
 use crate::response::{IntoResponse, Response};
 use crate::router::{Params, RoutePattern, Router};
 use crate::seo::{self, MetadataRoute, Robots, SitemapEntry};
 use crate::slots::Slots;
-use crate::ssr::{Engine, EngineOptions, StreamEvent};
+use crate::ssr::{Engine, EngineOptions, FetchOptions, FetchRequest, Fetcher, StreamEvent};
 use crate::stream::PageStream;
 
 /// Header of client navigations naming the route the client navigates from, which decides interceptions.
@@ -53,6 +55,12 @@ struct Build {
     slots: Slots,
     assets: StaticAssets,
     metadata: MetadataAssets,
+    /// Route handlers (`route.ts`) by their pattern.
+    handlers: Router<usize>,
+    /// `GET` responses of `force-static` route handlers, by handler index.
+    prerendered: HashMap<usize, Response>,
+    /// Paths `middleware.ts` runs on, when there is one.
+    middleware: Option<PathMatcher>,
 }
 
 impl Build {
@@ -80,7 +88,41 @@ impl Build {
         let slots = Slots::new(&manifest.slots);
         let assets = StaticAssets::load(&out_dir.join("static"));
         let metadata = MetadataAssets::load(out_dir, &manifest.metadata);
-        Ok(Self { manifest, pages, fallbacks, intercepts, slots, assets, metadata })
+        let handlers = manifest.handlers.iter().enumerate().map(|(i, h)| (h.id.clone(), i)).collect();
+        let prerendered = Self::prerendered_handlers(&manifest, out_dir);
+        let middleware = match &manifest.middleware {
+            Some(entry) => Some(PathMatcher::new(&entry.matcher).map_err(Error::internal)?),
+            None => None,
+        };
+        Ok(Self { manifest, pages, fallbacks, intercepts, slots, assets, metadata, handlers, prerendered, middleware })
+    }
+
+    fn prerendered_handlers(manifest: &Manifest, out_dir: &std::path::Path) -> HashMap<usize, Response> {
+        let mut out = HashMap::new();
+        for (index, handler) in manifest.handlers.iter().enumerate() {
+            let Some(written) = &handler.prerendered else { continue };
+            let Ok(body) = std::fs::read(out_dir.join(&written.file)) else {
+                log::warn(&format!("missing prerendered response of {}", handler.id));
+                continue;
+            };
+            let mut response = Response::new(StatusCode::from_u16(written.status).unwrap_or(StatusCode::OK), body);
+            for (name, value) in &written.headers {
+                if let (Ok(name), Ok(value)) = (header::HeaderName::try_from(name), HeaderValue::try_from(value)) {
+                    response.headers.append(name, value);
+                }
+            }
+            out.insert(index, response);
+        }
+        out
+    }
+
+    /// The route handler answering `path`, unless a page pattern is more specific.
+    fn handler(&self, path: &str) -> Option<(usize, Params)> {
+        let (pattern, index, params) = self.handlers.find(path)?;
+        if self.pages.find(path).is_some_and(|(page, _, _)| !pattern.ranks_before(page)) {
+            return None;
+        }
+        Some((*index, params))
     }
 
     fn has_route(&self, route: MetadataRoute) -> bool {
@@ -210,6 +252,16 @@ impl RenderMode {
     }
 }
 
+/// What `middleware.ts` leaves of a request that goes on.
+enum Edge {
+    /// Continue with the request headers it replaced (`ctx`) and the app path and query it rewrote to (`target`).
+    Continue {
+        ctx: Option<Ctx>,
+        target: Option<String>,
+    },
+    Respond(Response),
+}
+
 /// How a page is requested: a document load, or a client navigation from the route the client shows.
 #[derive(Clone, Copy)]
 enum Navigation<'a> {
@@ -239,6 +291,8 @@ pub(crate) struct Server {
     bots: Option<regex::Regex>,
     #[cfg(feature = "images")]
     images: crate::images::Images,
+    /// Proxies middleware rewrites to other origins.
+    fetcher: Fetcher,
     dev: bool,
 }
 
@@ -253,6 +307,7 @@ impl Server {
             workers: config.workers(),
             memory_limit: config.server.memory_limit_mb * 1024 * 1024,
             dev,
+            fetch: crate::ssr::FetchOptions::from_config(&config.server),
         })?;
 
         let mut actions = HashMap::new();
@@ -282,6 +337,7 @@ impl Server {
             #[cfg(feature = "images")]
             images,
             cache: PageCache::shared(config.server.page_cache_mb * 1024 * 1024, config.i18n.clone()),
+            fetcher: Fetcher::new(FetchOptions::from_config(&config.server)),
             hub: dev.then(Hub::default),
             bots,
             config: Arc::new(config),
@@ -422,6 +478,20 @@ impl Server {
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into();
         }
+        let (ctx, path) = match self.edge(ctx, &with_query(&path, ctx.uri().query())).await {
+            Edge::Respond(response) => return response.into(),
+            Edge::Continue { ctx: replaced, target } => {
+                let ctx = replaced.unwrap_or_else(|| ctx.clone());
+                match target {
+                    Some(target) => {
+                        let uri = self.config.public_path(&target).parse().ok();
+                        (ctx.with_request(uri, None), split_query(&target).0.to_owned())
+                    }
+                    None => (ctx, path),
+                }
+            }
+        };
+        let ctx = &ctx;
         let (prefix, route_path) = self.config.i18n.split(&path);
         let detects = self.detects_locale(ctx, prefix, route_path);
         if let Some(response) = self.locale_redirect(ctx, prefix, &path, route_path, detects) {
@@ -433,6 +503,9 @@ impl Server {
         // they still answer when no page matches, so a localized link to `/api/x` or `/file.pdf` works.
         if prefix.is_none() || self.current().entry(&path).is_none() {
             if let Some(response) = self.api(ctx, &path).await {
+                return response.into();
+            }
+            if let Some(response) = self.route_handler(ctx, &path).await {
                 return response.into();
             }
             if matches!(*ctx.method(), Method::GET | Method::HEAD) {
@@ -565,9 +638,10 @@ impl Server {
         self.config.i18n.localize_href(locale, href)
     }
 
-    /// Whether an app path names an API route, a public file or an SEO file rather than a page.
+    /// Whether an app path names an API route, a route handler, a public file or an SEO file rather than a page.
     fn unlocalized(&self, path: &str) -> bool {
         self.apis.values().any(|router| router.find(path).is_some())
+            || self.current().handler(path).is_some()
             || safe_join(&self.config.public_dir(), path).is_some_and(|file| file.is_file())
             || self.current().metadata.contains(path)
             || self.serves_seo(path)
@@ -601,6 +675,146 @@ impl Server {
         }
         let allowed = self.apis.iter().any(|(_, router)| router.find(path).is_some());
         allowed.then(|| Response::text("Method Not Allowed").status(StatusCode::METHOD_NOT_ALLOWED))
+    }
+
+    /// Runs the `route.ts` handler matching `path`, or serves its prerendered `GET` response.
+    async fn route_handler(&self, ctx: &Ctx, path: &str) -> Option<Response> {
+        let build = self.current();
+        let (index, params) = build.handler(path)?;
+        if matches!(*ctx.method(), Method::GET | Method::HEAD)
+            && let Some(response) = build.prerendered.get(&index)
+        {
+            return Some(response.clone());
+        }
+        let id = &build.manifest.handlers[index].id;
+        Some(match self.run_handler(ctx, id, path, &params).await {
+            Ok(response) => response,
+            Err(error) => {
+                log::error(&format!("{} {path}: {}", ctx.method(), error.message()));
+                self.script_error(&error)
+            }
+        })
+    }
+
+    async fn run_handler(&self, ctx: &Ctx, route: &str, path: &str, params: &Params) -> Result<Response> {
+        let target = ctx.uri().path_and_query().map_or("/", |p| p.as_str()).to_owned();
+        let request =
+            ScriptRequest { route: Some(route), params: params.to_json(), ..ScriptRequest::new(ctx, &target, path) };
+        let events = self.engine.stream_with("handle", request.to_json()?, ctx.body().clone())?;
+        collect(events).await
+    }
+
+    /// Renders a `force-static` route handler's `GET` response at build time.
+    pub(crate) async fn prerender_handler(&self, id: &str) -> Result<Response> {
+        self.run_handler(&self.synthetic(id), id, id, &Params::default()).await
+    }
+
+    fn script_error(&self, error: &Error) -> Response {
+        let message = if self.dev { error.message() } else { "Internal Server Error" };
+        Response::text(message.to_owned()).status(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    /// Runs `middleware.ts` for `target` (an app path and query) when its matcher covers the path. Response
+    /// headers it adds go to the final response; a rewrite to another origin is proxied.
+    async fn edge(&self, ctx: &Ctx, target: &str) -> Edge {
+        let pass = Edge::Continue { ctx: None, target: None };
+        let build = self.current();
+        let Some(matcher) = build.middleware.as_ref().filter(|_| !target.starts_with("/_volt/")) else { return pass };
+        let path = split_query(target).0;
+        let matchers = match matcher.check(path) {
+            Verdict::No => return pass,
+            Verdict::Yes => &[][..],
+            Verdict::Ask(patterns) => patterns,
+        };
+        let public = self.config.public_path(target);
+        let request = ScriptRequest { matchers, ..ScriptRequest::new(ctx, &public, path) };
+        let response =
+            match request.to_json().and_then(|json| self.engine.stream_with("middleware", json, ctx.body().clone())) {
+                Ok(events) => collect(events).await,
+                Err(error) => Err(error),
+            };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                log::error(&format!("middleware {path}: {}", error.message()));
+                return Edge::Respond(self.script_error(&error));
+            }
+        };
+        let (rewrite, headers, request) = match Outcome::read(response) {
+            Outcome::Respond(response) => return Edge::Respond(response),
+            Outcome::Continue { rewrite, headers, request } => (rewrite, headers, request),
+        };
+        for (name, value) in &headers {
+            if let Ok(value) = value.to_str() {
+                ctx.set_header(name.as_str(), value);
+            }
+        }
+        let replaced = request.map(|headers| ctx.with_request(None, Some(headers)));
+        let Some(url) = rewrite else { return Edge::Continue { ctx: replaced, target: None } };
+        match self.local_target(ctx, &url) {
+            Some(target) => Edge::Continue { ctx: replaced, target: Some(target) },
+            None => Edge::Respond(self.proxy(replaced.as_ref().unwrap_or(ctx), &url).await),
+        }
+    }
+
+    /// App path and query of a same-origin URL, `None` for another origin.
+    fn local_target(&self, ctx: &Ctx, url: &str) -> Option<String> {
+        let public = match url.strip_prefix(&origin(ctx)) {
+            Some(rest) if rest.is_empty() || rest.starts_with(['/', '?']) => rest,
+            _ if url.starts_with('/') && !url.starts_with("//") => url,
+            _ => return None,
+        };
+        let (path, query) = split_query(public);
+        let app = self.config.app_path(if path.is_empty() { "/" } else { path })?;
+        Some(with_query(app, query))
+    }
+
+    /// Answers with the response of another origin, as `NextResponse.rewrite` to an external URL does.
+    async fn proxy(&self, ctx: &Ctx, url: &str) -> Response {
+        let headers = ctx
+            .headers()
+            .iter()
+            .filter(|(name, _)| *name != header::HOST && *name != header::CONNECTION)
+            .filter_map(|(name, value)| Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned())))
+            .collect();
+        let request =
+            FetchRequest { url: url.to_owned(), method: ctx.method().to_string(), headers, redirect: "manual".into() };
+        match self.fetcher.send(request, ctx.body().clone()).await {
+            Ok((head, body)) => {
+                let mut response =
+                    Response::new(StatusCode::from_u16(head.status).unwrap_or(StatusCode::BAD_GATEWAY), body);
+                for (name, value) in head.headers {
+                    let framing = ["content-length", "transfer-encoding", "connection"].contains(&name.as_str());
+                    if let (false, Ok(name), Ok(value)) =
+                        (framing, header::HeaderName::try_from(name), HeaderValue::try_from(value))
+                    {
+                        response.headers.append(name, value);
+                    }
+                }
+                response
+            }
+            Err(message) => {
+                log::error(&format!("rewrite to {url}: {message}"));
+                Response::text("Bad Gateway").status(StatusCode::BAD_GATEWAY)
+            }
+        }
+    }
+
+    /// A data request answered by middleware itself: redirects become client navigations, anything else
+    /// makes the client load the document.
+    fn edge_data(&self, ctx: &Ctx, response: Response) -> Response {
+        let location = response.headers.get(header::LOCATION).and_then(|v| v.to_str().ok());
+        let body = match location.filter(|_| response.status.is_redirection()) {
+            Some(location) => {
+                json!({ "redirect": self.local_target(ctx, location).unwrap_or_else(|| location.to_owned()) })
+            }
+            None => json!({ "document": true }),
+        };
+        let mut answer = Response::json(&body).header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        for cookie in response.headers.get_all(header::SET_COOKIE) {
+            answer.headers.append(header::SET_COOKIE, cookie.clone());
+        }
+        answer
     }
 
     async fn action(&self, ctx: &Ctx, name: &str) -> Response {
@@ -692,6 +906,13 @@ impl Server {
     }
 
     async fn data(self: &Arc<Self>, ctx: &Ctx, target: &str) -> Response {
+        let (ctx, target) = match self.edge(ctx, target).await {
+            Edge::Respond(response) => return self.edge_data(ctx, response),
+            Edge::Continue { ctx: replaced, target: rewritten } => {
+                (replaced.unwrap_or_else(|| ctx.clone()), rewritten.unwrap_or_else(|| target.to_owned()))
+            }
+        };
+        let (ctx, target) = (&ctx, target.as_str());
         let (pathname, search) = match target.split_once('?') {
             Some((p, s)) => (p.to_owned(), format!("?{s}")),
             None => (target.to_owned(), String::new()),
@@ -1431,6 +1652,22 @@ fn vary_on_locale(response: &mut Response) {
 
 fn not_found_text() -> Response {
     Response::text("Not Found").status(StatusCode::NOT_FOUND)
+}
+
+/// Splits `path?query` at the query; the hash is dropped.
+fn split_query(target: &str) -> (&str, Option<&str>) {
+    let target = target.split('#').next().unwrap_or(target);
+    match target.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (target, None),
+    }
+}
+
+fn with_query(path: &str, query: Option<&str>) -> String {
+    match query {
+        Some(query) if !query.is_empty() => format!("{path}?{query}"),
+        _ => path.to_owned(),
+    }
 }
 
 fn fill(destination: &str, params: &Params) -> String {

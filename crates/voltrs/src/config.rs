@@ -72,6 +72,11 @@ pub struct ServerConfig {
     pub streaming: bool,
     /// Case-insensitive regular expression of user agents that get the complete document instead of a stream.
     pub bots: String,
+    /// Hosts that `fetch` in server code may reach: `api.example.com`, `*.example.com`, `localhost:4000`,
+    /// or `*` for every host. Empty allows every host that resolves to a public address.
+    pub fetch_allow: Vec<String>,
+    /// Time limit of one `fetch` in server code, in seconds.
+    pub fetch_timeout_secs: u64,
 }
 
 /// Crawlers and link-preview fetchers that should see the whole page in one response.
@@ -89,6 +94,8 @@ impl Default for ServerConfig {
             body_limit_mb: 8,
             streaming: true,
             bots: DEFAULT_BOTS.into(),
+            fetch_allow: Vec::new(),
+            fetch_timeout_secs: 10,
         }
     }
 }

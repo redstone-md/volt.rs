@@ -11,6 +11,7 @@ mod export;
 mod fonts;
 mod media;
 mod metadata;
+mod middleware;
 mod new;
 mod pipeline;
 mod postcss;
@@ -212,7 +213,8 @@ fn routes(project: &Project) -> Result<()> {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-    for route in project.routes()?.iter().filter(|r| !r.is_special()) {
+    let found = project.routes()?;
+    for route in found.iter().filter(|r| !r.is_special()) {
         let kind = if info.loaders.contains(&route.id) {
             "loader"
         } else if route.is_dynamic() {
@@ -227,8 +229,22 @@ fn routes(project: &Project) -> Result<()> {
         let router = if route.is_pages() { "pages" } else { "app" };
         println!("  {:<32} {:<8} {:<6} {}", route.id, kind, router, log::paint("2", &file));
     }
+    for handler in routes::handlers(project.app_dir.as_deref(), &found)? {
+        println!(
+            "  {:<32} {:<8} {:<6} {}",
+            handler.id,
+            "handler",
+            "app",
+            log::paint("2", &project.relative(&handler.file))
+        );
+    }
     for api in &info.api {
         println!("  {:<32} {:<8}", api, "api");
+    }
+    if let Some(middleware) = middleware::Middleware::find(&project.root)? {
+        let matcher =
+            if middleware.matcher.is_empty() { "every path".to_owned() } else { middleware.matcher.join(" ") };
+        println!("  {:<32} {:<8} {}", "middleware", project.relative(&middleware.file), log::paint("2", &matcher));
     }
     Ok(())
 }

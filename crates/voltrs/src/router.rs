@@ -178,6 +178,11 @@ impl RoutePattern {
         (self.segments.iter().map(Segment::weight).collect(), std::cmp::Reverse(self.segments.len()))
     }
 
+    /// Whether a [`Router`] holding both patterns tries `self` first, or as early as `other`.
+    pub fn ranks_before(&self, other: &Self) -> bool {
+        self.specificity() <= other.specificity()
+    }
+
     pub fn matches(&self, path: &str) -> Option<Params> {
         let parts: Vec<String> = path
             .split('/')

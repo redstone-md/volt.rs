@@ -26,6 +26,7 @@ mod document;
 mod error;
 mod file;
 mod flash;
+mod handlers;
 #[cfg(feature = "images")]
 mod images;
 mod metadata;
@@ -40,6 +41,7 @@ pub mod config;
 pub mod form;
 pub mod log;
 pub mod manifest;
+pub mod matcher;
 pub mod registry;
 pub mod router;
 pub mod sdk;

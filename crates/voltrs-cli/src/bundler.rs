@@ -26,8 +26,9 @@ use string_wizard::{MagicString, SourceMapOptions};
 use crate::css::Stylesheet;
 use crate::fonts::{FONT_MODULE, Fonts};
 use crate::media::Media;
+use crate::middleware::Middleware;
 use crate::project::Project;
-use crate::routes::{Kind, Module, Route, Segment, Slot};
+use crate::routes::{Handler, Kind, Module, Route, Segment, Slot};
 use crate::styles::{ClassPart, CssModule, Styles};
 use crate::util::{hash, to_slash};
 
@@ -409,6 +410,9 @@ pub struct Bundle<'a> {
     document: Option<Module>,
     /// `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts`, imported by the server bundle only.
     metadata_routes: Vec<(voltrs::seo::MetadataRoute, PathBuf)>,
+    /// Route handlers and middleware, imported by the server bundle only.
+    handlers: Vec<Handler>,
+    middleware: Option<Middleware>,
     dev: bool,
     assets: Assets,
 }
@@ -424,7 +428,35 @@ impl<'a> Bundle<'a> {
     pub fn new(project: &'a Project, routes: &'a [Route], dev: bool, assets: Assets) -> Result<Self> {
         let document = crate::routes::document(project.pages_dir.as_deref());
         let metadata_routes = crate::metadata::routes(project.app_dir.as_deref())?;
-        Ok(Self { project, routes, document, metadata_routes, dev, assets })
+        let handlers = crate::routes::handlers(project.app_dir.as_deref(), routes)?;
+        let middleware = Middleware::find(&project.root)?;
+        Ok(Self { project, routes, document, metadata_routes, handlers, middleware, dev, assets })
+    }
+
+    pub fn handlers(&self) -> &[Handler] {
+        &self.handlers
+    }
+
+    pub fn middleware(&self) -> Option<&Middleware> {
+        self.middleware.as_ref()
+    }
+
+    /// Imports of the route handlers and middleware, and the `handlers` and `middleware` options of `createServer`.
+    fn scripts(&self) -> (String, String) {
+        let mut imports = String::new();
+        let mut table = Vec::new();
+        for (index, handler) in self.handlers.iter().enumerate() {
+            imports.push_str(&Self::import(&Module::File(handler.file.clone()), &format!("handler{index}")));
+            table.push(format!("{:?}: handler{index}", handler.id));
+        }
+        let middleware = match &self.middleware {
+            Some(middleware) => {
+                imports.push_str(&Self::import(&Module::File(middleware.file.clone()), "middleware"));
+                "middleware"
+            }
+            None => "undefined",
+        };
+        (imports, format!("handlers: {{ {} }}, middleware: {middleware}", table.join(", ")))
     }
 
     /// Names of the code-defined metadata routes, for the manifest.
@@ -547,10 +579,11 @@ impl<'a> Bundle<'a> {
             metadata_imports.push_str(&Self::import(&Module::File(path.clone()), &format!("meta{index}")));
             metadata.push(format!("{}: meta{index}", route.name()));
         }
+        let (script_imports, scripts) = self.scripts();
         modules.insert(
             SERVER_ENTRY.into(),
             format!(
-                "import {{ createServer }} from \"volt-rs/internal/server\";\n{}\n{document_import}{metadata_imports}createServer({{\n{}\n}}, {{ document: {document}, metadata: {{ {} }} }});\n",
+                "import {{ createServer }} from \"volt-rs/internal/server\";\n{}\n{document_import}{metadata_imports}{script_imports}createServer({{\n{}\n}}, {{ document: {document}, metadata: {{ {} }}, {scripts} }});\n",
                 imports.join("\n"),
                 table.join("\n"),
                 metadata.join(", ")

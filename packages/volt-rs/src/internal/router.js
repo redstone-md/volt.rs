@@ -483,6 +483,8 @@ export function App({ routes, shells = {}, initial }) {
         })
         .then((state) => {
           if (state.redirect) return { redirect: state.redirect };
+          // Middleware answered with a response of its own, which only a document load can show.
+          if (state.document) throw new Error(`${path} must be loaded as a document`);
           return state.retain ? { state } : createView(routes, state);
         });
       cache.current.set(key, { promise, at: Date.now() });

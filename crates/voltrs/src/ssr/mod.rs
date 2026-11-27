@@ -1,6 +1,10 @@
 //! React rendering on a pool of QuickJS workers.
 
+mod fetch;
+
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -13,6 +17,8 @@ use rquickjs::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
+
+pub use fetch::{FetchOptions, FetchRequest, FetchResponse, Fetcher};
 
 const POLYFILLS: &str = include_str!("polyfills.js");
 const RENDER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,6 +67,8 @@ pub enum StreamEvent {
 /// worker calls when the render runs past its deadline or waits on a promise nothing can resolve.
 struct Sink {
     events: Mutex<Option<mpsc::UnboundedSender<StreamEvent>>>,
+    /// Request body handed to the function as `sink.body`, a `Uint8Array`.
+    body: Bytes,
 }
 
 impl Sink {
@@ -85,6 +93,8 @@ pub struct EngineOptions {
     pub workers: usize,
     pub memory_limit: usize,
     pub dev: bool,
+    /// What `fetch` in server code may reach.
+    pub fetch: FetchOptions,
 }
 
 /// A pool of isolated QuickJS runtimes executing the server bundle.
@@ -146,8 +156,18 @@ impl Engine {
     /// Calls `globalThis.__VOLT__[method](payload, sink)`, where `sink.shell(json)` and `sink.write(bytes)`
     /// forward output as it is produced. Both return `false` once the receiver is dropped.
     pub fn stream(&self, method: &'static str, payload: String) -> Result<mpsc::UnboundedReceiver<StreamEvent>> {
+        self.stream_with(method, payload, Bytes::new())
+    }
+
+    /// [`Engine::stream`] with binary input, passed to the function as `sink.body` (a `Uint8Array`).
+    pub fn stream_with(
+        &self,
+        method: &'static str,
+        payload: String,
+        body: Bytes,
+    ) -> Result<mpsc::UnboundedReceiver<StreamEvent>> {
         let (events, rx) = mpsc::unbounded_channel();
-        let sink = Arc::new(Sink { events: Mutex::new(Some(events)) });
+        let sink = Arc::new(Sink { events: Mutex::new(Some(events)), body });
         self.send(Job { method, payload, reply: Reply::Stream(sink) })?;
         Ok(rx)
     }
@@ -193,12 +213,28 @@ impl Active<'_> {
     }
 }
 
+/// A finished `fetch`, delivered to `__volt_fetched` by the worker that started it.
+struct Fetched {
+    id: u32,
+    result: Result<(FetchResponse, Bytes), String>,
+}
+
+/// What a waiting worker woke up for.
+enum Wake {
+    Job(Job),
+    Fetched(Fetched),
+    Idle,
+}
+
 struct Worker {
     /// Owns the QuickJS heap the context lives in.
     _runtime: Runtime,
     context: Context,
     generation: u64,
     deadline: Arc<Mutex<Option<Instant>>>,
+    fetched: flume::Receiver<Fetched>,
+    /// Requests started by `fetch` whose response has not been delivered yet.
+    fetching: Rc<Cell<usize>>,
 }
 
 impl Worker {
@@ -247,12 +283,57 @@ impl Worker {
         })));
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
         let env = if options.dev { "development" } else { "production" };
+        let (done, fetched) = flume::unbounded();
+        let fetching = Rc::new(Cell::new(0));
+        let client = FetchClient { fetcher: Fetcher::new(options.fetch.clone()), done, fetching: fetching.clone() };
         context.with(|ctx| -> Result<(), String> {
-            install_host(&ctx, env).map_err(|e| describe(&ctx, e))?;
+            install_host(&ctx, env, client).map_err(|e| describe(&ctx, e))?;
             ctx.eval::<(), _>(POLYFILLS).map_err(|e| describe(&ctx, e))?;
             eval_file(&ctx, &code, bundle).map_err(|e| describe(&ctx, e))
         })?;
-        Ok(Self { _runtime: runtime, context, generation, deadline })
+        Ok(Self { _runtime: runtime, context, generation, deadline, fetched, fetching })
+    }
+
+    /// Resolves the promise of a finished `fetch` through `__volt_fetched(id, head, body, error)`.
+    fn complete<'js>(&self, ctx: &Ctx<'js>, fetched: Fetched) {
+        self.fetching.set(self.fetching.get().saturating_sub(1));
+        let delivered = self.guarded(|| -> rquickjs::Result<()> {
+            let callback: Function = ctx.globals().get("__volt_fetched")?;
+            let null = Value::new_null(ctx.clone());
+            match fetched.result {
+                Ok((head, body)) => {
+                    let head = serde_json::to_string(&head).unwrap_or_default();
+                    let body = TypedArray::<u8>::new(ctx.clone(), body.to_vec())?;
+                    callback.call((fetched.id, head, body, null))
+                }
+                Err(message) => callback.call((fetched.id, null.clone(), null, message)),
+            }
+        });
+        if let Err(error) = delivered {
+            crate::log::js("error", &describe(ctx, error));
+        }
+    }
+
+    /// Delivers every `fetch` that has finished; returns whether there was one.
+    fn deliver<'js>(&self, ctx: &Ctx<'js>) -> bool {
+        let mut any = false;
+        while let Ok(fetched) = self.fetched.try_recv() {
+            self.complete(ctx, fetched);
+            any = true;
+        }
+        any
+    }
+
+    /// Waits up to `timeout` for a finished `fetch` or, when `accepting`, a new job.
+    fn wait(&self, jobs: &flume::Receiver<Job>, accepting: bool, timeout: Duration) -> Wake {
+        if !accepting {
+            return self.fetched.recv_timeout(timeout).map_or(Wake::Idle, Wake::Fetched);
+        }
+        flume::Selector::new()
+            .recv(jobs, |job| job.map_or(Wake::Idle, Wake::Job))
+            .recv(&self.fetched, |fetched| fetched.map_or(Wake::Idle, Wake::Fetched))
+            .wait_timeout(timeout)
+            .unwrap_or(Wake::Idle)
     }
 
     /// Runs `first` and every job taken while it waits on timers, until all of them have settled.
@@ -274,6 +355,9 @@ impl Worker {
             };
             while !active.is_empty() {
                 self.guarded(|| while ctx.execute_pending_job() {});
+                if self.deliver(&ctx) {
+                    continue;
+                }
                 active = self.settle(&ctx, active);
                 if active.is_empty() {
                     break;
@@ -287,7 +371,7 @@ impl Worker {
                         continue;
                     }
                 };
-                if wait < 0 {
+                if wait < 0 && self.fetching.get() == 0 {
                     let reason = "the render awaits a promise nothing resolves";
                     let mut asked = false;
                     for job in &mut active {
@@ -306,12 +390,14 @@ impl Worker {
                     .map(|job| job.deadline.saturating_duration_since(Instant::now()))
                     .min()
                     .unwrap_or(RENDER_TIMEOUT);
-                let timeout = Duration::from_millis(wait as u64).min(until_deadline).max(Duration::from_millis(1));
+                // Without timers the worker waits for a `fetch` response, at most until the earliest deadline.
+                let timer = if wait < 0 { until_deadline } else { Duration::from_millis(wait as u64) };
+                let timeout = timer.min(until_deadline).max(Duration::from_millis(1));
                 let accepting = active.len() < MAX_ACTIVE && shared.generation() == self.generation;
-                match accepting.then(|| jobs.recv_timeout(timeout)) {
-                    Some(Ok(job)) => active.extend(self.start(&ctx, job)),
-                    Some(Err(flume::RecvTimeoutError::Timeout)) => {}
-                    _ => thread::sleep(timeout),
+                match self.wait(jobs, accepting, timeout) {
+                    Wake::Job(job) => active.extend(self.start(&ctx, job)),
+                    Wake::Fetched(fetched) => self.complete(&ctx, fetched),
+                    Wake::Idle => {}
                 }
             }
         });
@@ -392,6 +478,7 @@ impl Worker {
 /// The `{ shell, write }` object a streaming render reports its output to.
 fn sink_object<'js>(ctx: &Ctx<'js>, sink: &Arc<Sink>) -> rquickjs::Result<Object<'js>> {
     let object = Object::new(ctx.clone())?;
+    object.set("body", TypedArray::<u8>::new(ctx.clone(), sink.body.to_vec())?)?;
     let shell = sink.clone();
     object.set("shell", Function::new(ctx.clone(), move |meta: String| shell.send(StreamEvent::Shell(meta)))?)?;
     let write = sink.clone();
@@ -406,9 +493,38 @@ fn sink_object<'js>(ctx: &Ctx<'js>, sink: &Arc<Sink>) -> rquickjs::Result<Object
     Ok(object)
 }
 
-fn install_host<'js>(ctx: &Ctx<'js>, env: &str) -> rquickjs::Result<()> {
+/// Starts `fetch` requests for one worker and reports them back to it.
+struct FetchClient {
+    fetcher: Fetcher,
+    done: flume::Sender<Fetched>,
+    fetching: Rc<Cell<usize>>,
+}
+
+fn install_host<'js>(ctx: &Ctx<'js>, env: &str, client: FetchClient) -> rquickjs::Result<()> {
     let host = Object::new(ctx.clone())?;
     host.set("env", env)?;
+    let next = Cell::new(0u32);
+    // `fetch(request, body)` returns an id; the response arrives later through `__volt_fetched`.
+    host.set(
+        "fetch",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, request: String, body: Value<'js>| -> rquickjs::Result<u32> {
+            let request: FetchRequest = serde_json::from_str(&request)
+                .map_err(|e| rquickjs::Exception::throw_type(&ctx, &format!("invalid fetch request: {e}")))?;
+            let body = match TypedArray::<u8>::from_value(body) {
+                // SAFETY: the bytes are copied before any JavaScript runs again.
+                Ok(array) => unsafe { array.as_bytes() }.map(Bytes::copy_from_slice).unwrap_or_default(),
+                Err(_) => Bytes::new(),
+            };
+            let id = next.get().wrapping_add(1);
+            next.set(id);
+            client.fetching.set(client.fetching.get() + 1);
+            let done = client.done.clone();
+            client.fetcher.spawn(request, body, move |result| {
+                let _ = done.send(Fetched { id, result });
+            });
+            Ok(id)
+        })?,
+    )?;
     host.set(
         "log",
         Function::new(ctx.clone(), |level: String, message: String| {
@@ -493,6 +609,30 @@ globalThis.__VOLT__ = {
     });
   },
   stuck: () => new Promise(() => {}),
+  async fetched(url) {
+    const response = await fetch(url, { method: "POST", body: "ping", headers: { "x-a": "1" } });
+    return `${response.status} ${response.headers.get("x-b")} ${await response.text()}`;
+  },
+  async refused(url) {
+    return fetch(url).then(() => "allowed", (error) => error.message);
+  },
+  async web() {
+    const url = new URL("../c/./d?x=1#h", "https://a.test:443/p/q/r");
+    url.searchParams.append("y", "2 3");
+    const out = [url.href, url.host, url.origin];
+    const headers = new Headers([["Set-Cookie", "a=1"], ["set-cookie", "b=2"], ["X-A", "1"], ["x-a", "2"]]);
+    out.push(headers.get("x-a"), headers.getSetCookie().join("|"));
+    const json = Response.json({ ok: true }, { status: 201 });
+    out.push(json.status, json.headers.get("content-type"), JSON.stringify(await json.clone().json()));
+    const form = new FormData();
+    form.append("name", "volt");
+    form.append("file", new Blob([new Uint8Array([1, 2, 3])], { type: "application/octet-stream" }), "f.bin");
+    const parsed = await new Request("https://a.test/", { method: "POST", body: form }).formData();
+    out.push(parsed.get("name"), parsed.get("file").name, (await parsed.get("file").bytes()).join(","));
+    const urlencoded = await new Response(new URLSearchParams({ a: "b c" })).formData();
+    out.push(urlencoded.get("a"), Response.redirect("https://a.test/x", 307).headers.get("location"));
+    return out.join(" ");
+  },
   chunked() {
     const decoder = new TextDecoder();
     const bytes = new TextEncoder().encode("aé😀");
@@ -504,11 +644,56 @@ globalThis.__VOLT__ = {
 "#;
 
     fn engine(name: &str) -> Engine {
+        engine_with(name, FetchOptions::default())
+    }
+
+    fn engine_with(name: &str, fetch: FetchOptions) -> Engine {
         let dir = std::env::temp_dir().join(format!("volt-ssr-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bundle = dir.join("server.js");
         std::fs::write(&bundle, BUNDLE).unwrap();
-        Engine::start(EngineOptions { bundle, workers: 1, memory_limit: 64 * 1024 * 1024, dev: false }).unwrap()
+        Engine::start(EngineOptions { bundle, workers: 1, memory_limit: 64 * 1024 * 1024, dev: false, fetch }).unwrap()
+    }
+
+    /// Answers one HTTP request with the request's body and `x-a` header echoed back.
+    async fn echo_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !String::from_utf8_lossy(&request).contains("ping") {
+                let n = socket.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..n]);
+            }
+            let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            let echoed = if text.contains("x-a: 1") && text.starts_with("post / ") { "pong" } else { "bad" };
+            let response =
+                format!("HTTP/1.1 200 OK\r\nx-b: 2\r\ncontent-length: 4\r\nconnection: close\r\n\r\n{echoed}");
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}/")
+    }
+
+    #[tokio::test]
+    async fn fetches_allowed_hosts() {
+        let url = echo_server().await;
+        let engine = engine_with("fetch", FetchOptions { allow: vec!["127.0.0.1".into()], ..FetchOptions::default() });
+        assert_eq!(engine.call("fetched", url.clone()).await.unwrap(), "200 2 pong");
+        let refused = engine_with("refused", FetchOptions::default()).call("refused", url).await.unwrap();
+        assert!(refused.contains("non-public address"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn polyfills_fetch_types() {
+        let out = engine("web").call("web", String::new()).await.unwrap();
+        assert_eq!(
+            out,
+            "https://a.test/p/c/d?x=1&y=2+3#h a.test https://a.test 1, 2 a=1|b=2 201 application/json {\"ok\":true} \
+             volt f.bin 1,2,3 b c https://a.test/x"
+        );
     }
 
     #[tokio::test]

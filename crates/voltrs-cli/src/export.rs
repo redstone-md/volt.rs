@@ -45,6 +45,12 @@ impl<'a> Export<'a> {
         }
         out.extend(self.info.actions.iter().map(|a| format!("action `{a}`: server actions need the server")));
         out.extend(self.info.api.iter().map(|a| format!("{a}: API routes need the server")));
+        out.extend(self.manifest.handlers.iter().filter(|h| h.prerendered.is_none()).map(|h| {
+            format!("{}: route handlers need the server unless they export dynamic = \"force-static\"", h.id)
+        }));
+        if self.manifest.middleware.is_some() {
+            out.push("middleware.ts needs the server".to_owned());
+        }
         out
     }
 
@@ -102,6 +108,11 @@ impl<'a> Export<'a> {
         write(&out.join("404.html"), renderer.not_found().await.html.as_bytes())?;
         for (name, body) in renderer.files().await {
             write(&out.join(name), &body)?;
+        }
+        for handler in &self.manifest.handlers {
+            if let (Some(written), Some(stem)) = (&handler.prerendered, file_stem(&handler.id)) {
+                write(&out.join(stem), &std::fs::read(self.project.out_dir.join(&written.file))?)?;
+            }
         }
         for file in &self.manifest.metadata {
             let body = std::fs::read(self.project.out_dir.join(&file.file))?;

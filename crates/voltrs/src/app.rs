@@ -129,6 +129,11 @@ impl StaticRenderer {
         self.server.prerender(path).await
     }
 
+    /// The `GET` response of the route handler `id`, a static pattern such as `/feed.xml`.
+    pub async fn handler(&self, id: &str) -> Result<Response> {
+        self.server.prerender_handler(id).await
+    }
+
     pub async fn not_found(&self) -> Prerendered {
         self.server.prerender_not_found().await
     }

@@ -111,6 +111,21 @@ impl Ctx {
         Self { params: Arc::new(params), ..self.clone() }
     }
 
+    /// The same request at another URI or with other headers, as middleware rewrites it; the response
+    /// headers set so far stay shared.
+    pub(crate) fn with_request(&self, uri: Option<Uri>, headers: Option<HeaderMap>) -> Self {
+        let request = &self.request;
+        let parts = RequestParts {
+            method: request.method.clone(),
+            uri: uri.unwrap_or_else(|| request.uri.clone()),
+            headers: headers.unwrap_or_else(|| request.headers.clone()),
+            body: request.body.clone(),
+            remote: request.remote,
+            started: request.started,
+        };
+        Self { request: Arc::new(parts), ..self.clone() }
+    }
+
     pub(crate) fn with_locale(&self, locale: &str) -> Self {
         Self { locale: Some(Arc::from(locale)), ..self.clone() }
     }

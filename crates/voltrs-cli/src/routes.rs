@@ -540,7 +540,7 @@ impl PagesDir {
             if path.is_dir() {
                 if url.is_empty() && name == "api" {
                     voltrs::log::warn(
-                        "pages/api is ignored: API routes are Rust handlers (#[get], #[post], ...) in server/",
+                        "pages/api is ignored: write app/**/route.ts handlers or Rust handlers (#[get], #[post], ...)",
                     );
                     continue;
                 }
@@ -565,6 +565,56 @@ impl PagesDir {
         }
         Ok(())
     }
+}
+
+/// A route handler: `route.(ts|js)` exporting functions named after HTTP methods.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handler {
+    /// URL pattern, e.g. `/api/posts/[id]`.
+    pub id: String,
+    pub file: PathBuf,
+}
+
+/// Scans `app/` for route handlers. A folder cannot hold both a page and a handler, and a handler cannot
+/// answer the URL of a page in another route group.
+pub fn handlers(app_dir: Option<&Path>, routes: &[Route]) -> Result<Vec<Handler>> {
+    let mut found = BTreeMap::new();
+    if let Some(dir) = app_dir {
+        walk_handlers(dir, &Place::root(), &mut found)?;
+    }
+    for handler in found.values() {
+        let pattern = RoutePattern::parse(&handler.id);
+        if let Some(page) =
+            routes.iter().find(|r| r.intercept.is_none() && RoutePattern::parse(&r.id).same_paths(&pattern))
+        {
+            bail!("{:?} and the page {:?} both answer `{}`", handler.file, page.page, handler.id);
+        }
+    }
+    Ok(found.into_values().collect())
+}
+
+fn walk_handlers(dir: &Path, place: &Place, found: &mut BTreeMap<String, Handler>) -> Result<()> {
+    if let Some(file) = ["ts", "js"].iter().map(|ext| dir.join(format!("route.{ext}"))).find(|p| p.is_file()) {
+        if let Some(page) = find_file(dir, "page") {
+            bail!(
+                "{} and {} are in the same folder: a URL is either a page or a route handler",
+                page.display(),
+                file.display()
+            );
+        }
+        let id = place.route_id();
+        if let Some(existing) = found.insert(id.clone(), Handler { id: id.clone(), file: file.clone() }) {
+            bail!("two route handlers resolve to `{id}`: {:?} and {:?}", existing.file, file);
+        }
+    }
+    for child in sorted(dir)?.into_iter().filter(|p| p.is_dir()) {
+        let name = file_name(&child);
+        if skipped(&name) || interception(&name).is_some() {
+            continue;
+        }
+        walk_handlers(&child, &place.child(&name)?, found)?;
+    }
+    Ok(())
 }
 
 /// The document of a Pages Router project: `pages/_document` or the built-in one.
@@ -785,6 +835,25 @@ mod tests {
         let side = routes[0].slots()[0].1.entry("/shop");
         let item = side.routes.iter().find(|r| r.id == "/shop/@side/[id]").unwrap();
         assert!(item.not_found && !item.error);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scans_route_handlers() {
+        let dir = fixture(
+            "handlers",
+            &["page.tsx", "api/route.ts", "(v1)/api/posts/[id]/route.ts", "_lib/route.ts", "about/page.tsx"],
+        );
+        let routes = scan(Some(&dir), None).unwrap();
+        let found = handlers(Some(&dir), &routes).unwrap();
+        let ids: Vec<&str> = found.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["/api", "/api/posts/[id]"]);
+        std::fs::write(dir.join("about/route.ts"), "").unwrap();
+        assert!(handlers(Some(&dir), &routes).is_err());
+        std::fs::remove_file(dir.join("about/route.ts")).unwrap();
+        std::fs::create_dir_all(dir.join("(other)/about")).unwrap();
+        std::fs::write(dir.join("(other)/about/route.js"), "").unwrap();
+        assert!(handlers(Some(&dir), &routes).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

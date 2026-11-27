@@ -2,6 +2,7 @@ import { Fragment, createElement as h } from "react";
 import { renderToReadableStream, renderToString } from "react-dom/server";
 import DefaultDocument, { DocumentContext } from "../document.js";
 import { isNotFound, readRedirect } from "./errors.js";
+import { configs, handle, middleware } from "./handlers.js";
 import { localeFields, resolveProps, staticPaths } from "./pages.js";
 import { App, ERROR_ROUTE, NOT_FOUND_ROUTE, ServerInsertedHTMLContext, createView } from "./router.js";
 
@@ -265,6 +266,12 @@ export function createServer(routes, options = {}) {
         dynamic: module.dynamic === "force-dynamic" || module.revalidate === 0,
       });
     },
+    /** Runs a route handler (`route.ts`): `sink.shell(head)`, then `sink.write(bytes)` per body chunk. */
+    handle: (payload, sink) => handle(options.handlers ?? {}, payload, sink),
+    /** Runs `middleware.ts`, answering like `handle`; `NextResponse.next()` and `rewrite()` set marker headers. */
+    middleware: (payload, sink) => middleware(options.middleware ?? {}, payload, sink),
+    /** `dynamic`, `revalidate` and the methods of every route handler, for `volt build`. */
+    handlers: () => JSON.stringify(configs(options.handlers ?? {})),
     /** Pages Router props for a client navigation (`/_volt/data`). */
     async props(payload) {
       const state = JSON.parse(payload);

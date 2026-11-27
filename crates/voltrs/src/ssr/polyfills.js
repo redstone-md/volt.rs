@@ -193,47 +193,78 @@
     },
   };
 
+  const formEncode = (x) => encodeURIComponent(x).replace(/%20/g, "+").replace(/[!'()~]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  const formDecode = (x) => {
+    const s = x.replace(/\+/g, " ");
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
+
   class URLSearchParams {
     constructor(init = "") {
       this._ = [];
-      if (typeof init === "string") {
-        for (const part of init.replace(/^\?/, "").split("&")) {
-          if (!part) continue;
-          const [k, v = ""] = part.split("=");
-          const dec = (x) => decodeURIComponent(x.replace(/\+/g, " "));
-          this._.push([dec(k), dec(v)]);
+      this._url = null;
+      if (typeof init === "string") this._parse(init);
+      else if (init instanceof URLSearchParams) this._ = init._.map((e) => [...e]);
+      else if (init && typeof init[Symbol.iterator] === "function") {
+        for (const pair of init) {
+          const [k, v] = [...pair];
+          this._.push([String(k), String(v)]);
         }
-      } else if (init && typeof init[Symbol.iterator] === "function") {
-        for (const [k, v] of init) this._.push([String(k), String(v)]);
       } else if (init) {
         for (const k of Object.keys(init)) this._.push([k, String(init[k])]);
       }
+    }
+    _parse(text) {
+      this._ = [];
+      for (const part of String(text).replace(/^\?/, "").split("&")) {
+        if (!part) continue;
+        const index = part.indexOf("=");
+        const [k, v] = index < 0 ? [part, ""] : [part.slice(0, index), part.slice(index + 1)];
+        this._.push([formDecode(k), formDecode(v)]);
+      }
+    }
+    /** Writes changes back to the URL this object belongs to. */
+    _changed() {
+      if (this._url) this._url._search = this._.length ? `?${this}` : "";
     }
     get size() {
       return this._.length;
     }
     append(k, v) {
       this._.push([String(k), String(v)]);
+      this._changed();
     }
-    delete(k) {
-      this._ = this._.filter(([x]) => x !== k);
+    delete(k, v) {
+      this._ = this._.filter(([x, y]) => x !== String(k) || (v !== undefined && y !== String(v)));
+      this._changed();
     }
     get(k) {
-      const e = this._.find(([x]) => x === k);
+      const e = this._.find(([x]) => x === String(k));
       return e ? e[1] : null;
     }
     getAll(k) {
-      return this._.filter(([x]) => x === k).map(([, v]) => v);
+      return this._.filter(([x]) => x === String(k)).map(([, v]) => v);
     }
-    has(k) {
-      return this._.some(([x]) => x === k);
+    has(k, v) {
+      return this._.some(([x, y]) => x === String(k) && (v === undefined || y === String(v)));
     }
     set(k, v) {
-      this.delete(k);
-      this.append(k, v);
+      const key = String(k);
+      const index = this._.findIndex(([x]) => x === key);
+      if (index < 0) this._.push([key, String(v)]);
+      else {
+        this._[index] = [key, String(v)];
+        this._ = this._.filter(([x], i) => x !== key || i <= index);
+      }
+      this._changed();
     }
     sort() {
       this._.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+      this._changed();
     }
     forEach(fn, self) {
       for (const [k, v] of this._) fn.call(self, v, k, this);
@@ -251,43 +282,160 @@
       return this.entries();
     }
     toString() {
-      const enc = (x) => encodeURIComponent(x).replace(/%20/g, "+");
-      return this._.map(([k, v]) => `${enc(k)}=${enc(v)}`).join("&");
+      return this._.map(([k, v]) => `${formEncode(k)}=${formEncode(v)}`).join("&");
     }
   }
   g.URLSearchParams ??= URLSearchParams;
 
+  const DEFAULT_PORTS = { "http:": "80", "https:": "443", "ws:": "80", "wss:": "443" };
+
+  /** Resolves `.` and `..` segments of an absolute path. */
+  const normalizePath = (path) => {
+    const out = [];
+    const parts = path.split("/");
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const last = i === parts.length - 1;
+      if (part === "..") {
+        if (out.length > 1) out.pop();
+        if (last) out.push("");
+      } else if (part === ".") {
+        if (last) out.push("");
+      } else out.push(part);
+    }
+    const joined = out.join("/");
+    return joined.startsWith("/") ? joined : `/${joined}`;
+  };
+  const encodePath = (path) => path.replace(/[^A-Za-z0-9\-._~!$&'()*+,;=:@/%]/g, (c) => encodeURIComponent(c));
+
+  /** WHATWG URL for special schemes (`http`, `https`, ...) and opaque ones such as `data:` or `mailto:`. */
   class URL {
     constructor(input, base) {
-      const re = /^([a-z][a-z0-9+.-]*:)\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i;
-      let m = String(input).match(re);
-      if (!m && base !== undefined) {
-        const b = new URL(base);
-        const s = String(input);
-        const path = s.startsWith("/") ? s : b.pathname.replace(/[^/]*$/, "") + s;
-        m = `${b.origin}${path}`.match(re);
+      const text = String(input).trim();
+      const absolute = /^[a-z][a-z0-9+.-]*:/i.test(text);
+      if (!absolute) {
+        if (base === undefined) throw new TypeError(`Invalid URL: ${input}`);
+        const b = base instanceof URL ? base : new URL(base);
+        if (!b._special) throw new TypeError(`Invalid URL: ${input}`);
+        let resolved;
+        if (text.startsWith("//")) resolved = `${b.protocol}${text}`;
+        else if (text.startsWith("/")) resolved = `${b.origin}${text}`;
+        else if (text.startsWith("?")) resolved = `${b.origin}${b.pathname}${text}`;
+        else if (text.startsWith("#")) resolved = `${b.origin}${b.pathname}${b.search}${text}`;
+        else if (text === "") resolved = `${b.origin}${b.pathname}${b.search}`;
+        else resolved = `${b.origin}${b.pathname.replace(/[^/]*$/, "")}${text}`;
+        this._set(resolved);
+        return;
       }
-      if (!m) throw new TypeError(`Invalid URL: ${input}`);
-      this.protocol = m[1].toLowerCase();
-      this.host = m[2];
-      this.hostname = m[2].replace(/:\d+$/, "");
-      this.port = (m[2].match(/:(\d+)$/) || [])[1] || "";
-      this.pathname = m[3] || "/";
-      this.search = m[4] && m[4] !== "?" ? m[4] : "";
-      this.hash = m[5] || "";
-      this.searchParams = new g.URLSearchParams(this.search);
+      this._set(text);
+    }
+    _set(text) {
+      const special = text.match(/^([a-z][a-z0-9+.-]*:)\/\/(?:([^@/?#]*)@)?([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i);
+      if (special) {
+        this._special = true;
+        this._protocol = special[1].toLowerCase();
+        const [user = "", pass = ""] = (special[2] ?? "").split(":");
+        this.username = user;
+        this.password = pass;
+        this.host = special[3];
+        this._pathname = normalizePath(encodePath(special[4] || "/"));
+        this.search = special[5] ?? "";
+        this.hash = special[6] ?? "";
+        return;
+      }
+      const opaque = text.match(/^([a-z][a-z0-9+.-]*:)([^?#]*)(\?[^#]*)?(#.*)?$/i);
+      if (!opaque) throw new TypeError(`Invalid URL: ${text}`);
+      this._special = false;
+      this._protocol = opaque[1].toLowerCase();
+      this.username = "";
+      this.password = "";
+      this._hostname = "";
+      this._port = "";
+      this._pathname = opaque[2];
+      this.search = opaque[3] ?? "";
+      this.hash = opaque[4] ?? "";
+    }
+    get protocol() {
+      return this._protocol;
+    }
+    set protocol(value) {
+      const protocol = String(value).replace(/:?$/, ":").toLowerCase();
+      if (/^[a-z][a-z0-9+.-]*:$/.test(protocol)) this._protocol = protocol;
+    }
+    get hostname() {
+      return this._hostname;
+    }
+    set hostname(value) {
+      this._hostname = String(value).toLowerCase();
+    }
+    get port() {
+      return this._port;
+    }
+    set port(value) {
+      const port = String(value).replace(/\D.*$/, "");
+      this._port = port === DEFAULT_PORTS[this._protocol] ? "" : port;
+    }
+    get host() {
+      return this._port ? `${this._hostname}:${this._port}` : this._hostname;
+    }
+    set host(value) {
+      const match = String(value).match(/^(\[[^\]]*\]|[^:]*)(?::(\d*))?$/);
+      if (!match) return;
+      this.hostname = match[1];
+      this.port = match[2] ?? "";
+    }
+    get pathname() {
+      return this._pathname;
+    }
+    set pathname(value) {
+      const path = String(value);
+      this._pathname = this._special ? normalizePath(encodePath(path.startsWith("/") ? path : `/${path}`)) : path;
+    }
+    get search() {
+      return this._search;
+    }
+    set search(value) {
+      const search = String(value);
+      this._search = search === "" || search === "?" ? "" : search.startsWith("?") ? search : `?${search}`;
+      if (!this._params) {
+        this._params = new g.URLSearchParams(this._search);
+        this._params._url = this;
+      } else this._params._parse(this._search);
+    }
+    get searchParams() {
+      return this._params;
+    }
+    get hash() {
+      return this._hash;
+    }
+    set hash(value) {
+      const hash = String(value);
+      this._hash = hash === "" || hash === "#" ? "" : hash.startsWith("#") ? hash : `#${hash}`;
     }
     get origin() {
-      return `${this.protocol}//${this.host}`;
+      return this._special ? `${this._protocol}//${this.host}` : "null";
     }
     get href() {
-      return `${this.origin}${this.pathname}${this.search}${this.hash}`;
+      if (!this._special) return `${this._protocol}${this._pathname}${this._search}${this._hash}`;
+      const credentials = this.username ? `${this.username}${this.password ? `:${this.password}` : ""}@` : "";
+      return `${this._protocol}//${credentials}${this.host}${this._pathname}${this._search}${this._hash}`;
+    }
+    set href(value) {
+      this._set(String(value));
     }
     toString() {
       return this.href;
     }
     toJSON() {
       return this.href;
+    }
+    static canParse(input, base) {
+      try {
+        new URL(input, base);
+        return true;
+      } catch {
+        return false;
+      }
     }
   }
   g.URL ??= URL;
@@ -491,6 +639,478 @@
     }
   }
   g.ReadableStream ??= ReadableStream;
+
+  /** Bytes of a buffer source as a `Uint8Array` view. */
+  const toBytes = (value) =>
+    value instanceof ArrayBuffer
+      ? new Uint8Array(value)
+      : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  const concatBytes = (chunks) => {
+    const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+    let offset = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return out;
+  };
+  const utf8 = (text) => new g.TextEncoder().encode(text);
+  const fromUtf8 = (bytes) => new g.TextDecoder().decode(bytes);
+
+  class Blob {
+    constructor(parts = [], options = {}) {
+      const chunks = [];
+      for (const part of parts) {
+        if (part instanceof Blob) chunks.push(part._bytes);
+        else if (part instanceof ArrayBuffer || ArrayBuffer.isView(part)) chunks.push(toBytes(part).slice());
+        else chunks.push(utf8(String(part)));
+      }
+      this._bytes = concatBytes(chunks);
+      this.type = options.type ? String(options.type).toLowerCase() : "";
+    }
+    get size() {
+      return this._bytes.length;
+    }
+    slice(start = 0, end = this.size, type = "") {
+      const blob = new Blob([], { type });
+      blob._bytes = this._bytes.slice(start, end);
+      return blob;
+    }
+    async text() {
+      return fromUtf8(this._bytes);
+    }
+    async arrayBuffer() {
+      return this._bytes.slice().buffer;
+    }
+    async bytes() {
+      return this._bytes.slice();
+    }
+    stream() {
+      const bytes = this._bytes.slice();
+      return new g.ReadableStream({
+        start(controller) {
+          if (bytes.length) controller.enqueue(bytes);
+          controller.close();
+        },
+      });
+    }
+  }
+  g.Blob ??= Blob;
+  g.File ??= class File extends g.Blob {
+    constructor(parts, name, options = {}) {
+      super(parts, options);
+      this.name = String(name);
+      this.lastModified = options.lastModified ?? Date.now();
+    }
+  };
+
+  class FormData {
+    constructor() {
+      this._ = [];
+    }
+    _value(value, filename) {
+      if (!(value instanceof g.Blob)) return String(value);
+      if (filename === undefined && value instanceof g.File) return value;
+      return new g.File([value], filename ?? "blob", { type: value.type });
+    }
+    append(name, value, filename) {
+      this._.push([String(name), this._value(value, filename)]);
+    }
+    set(name, value, filename) {
+      this.delete(name);
+      this.append(name, value, filename);
+    }
+    delete(name) {
+      this._ = this._.filter(([k]) => k !== String(name));
+    }
+    get(name) {
+      const entry = this._.find(([k]) => k === String(name));
+      return entry ? entry[1] : null;
+    }
+    getAll(name) {
+      return this._.filter(([k]) => k === String(name)).map(([, v]) => v);
+    }
+    has(name) {
+      return this._.some(([k]) => k === String(name));
+    }
+    forEach(fn, self) {
+      for (const [k, v] of this._) fn.call(self, v, k, this);
+    }
+    keys() {
+      return this._.map(([k]) => k)[Symbol.iterator]();
+    }
+    values() {
+      return this._.map(([, v]) => v)[Symbol.iterator]();
+    }
+    entries() {
+      return this._.map((e) => [...e])[Symbol.iterator]();
+    }
+    [Symbol.iterator]() {
+      return this.entries();
+    }
+  }
+  g.FormData ??= FormData;
+
+  /** `multipart/form-data` body of a form, with its boundary. */
+  const multipart = (form) => {
+    const boundary = `----volt${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
+    const quote = (s) => s.replace(/"/g, "%22").replace(/\r?\n/g, "%0A");
+    const chunks = [];
+    for (const [name, value] of form) {
+      let head = `--${boundary}\r\nContent-Disposition: form-data; name="${quote(name)}"`;
+      if (typeof value === "string") {
+        chunks.push(utf8(`${head}\r\n\r\n${value}\r\n`));
+        continue;
+      }
+      head += `; filename="${quote(value.name)}"\r\nContent-Type: ${value.type || "application/octet-stream"}\r\n\r\n`;
+      chunks.push(utf8(head), value._bytes, utf8("\r\n"));
+    }
+    chunks.push(utf8(`--${boundary}--\r\n`));
+    return { bytes: concatBytes(chunks), type: `multipart/form-data; boundary=${boundary}` };
+  };
+
+  const indexOfBytes = (haystack, needle, from) => {
+    outer: for (let i = from; i <= haystack.length - needle.length; i++) {
+      for (let j = 0; j < needle.length; j++) if (haystack[i + j] !== needle[j]) continue outer;
+      return i;
+    }
+    return -1;
+  };
+
+  /** Parses a `multipart/form-data` body. */
+  const parseMultipart = (bytes, boundary) => {
+    const form = new g.FormData();
+    const delimiter = utf8(`--${boundary}`);
+    let start = indexOfBytes(bytes, delimiter, 0);
+    while (start >= 0) {
+      const partStart = start + delimiter.length + 2;
+      const end = indexOfBytes(bytes, delimiter, partStart);
+      if (end < 0 || bytes[start + delimiter.length] === 45) break;
+      const part = bytes.subarray(partStart, end - 2);
+      const split = indexOfBytes(part, utf8("\r\n\r\n"), 0);
+      const head = fromUtf8(part.subarray(0, split < 0 ? part.length : split));
+      const content = split < 0 ? new Uint8Array(0) : part.subarray(split + 4);
+      const name = head.match(/name="([^"]*)"/i)?.[1];
+      const filename = head.match(/filename="([^"]*)"/i)?.[1];
+      const type = head.match(/content-type:\s*([^\r\n]+)/i)?.[1] ?? "";
+      if (name !== undefined) {
+        form.append(name, filename === undefined ? fromUtf8(content) : new g.File([content], filename, { type }));
+      }
+      start = end;
+    }
+    return form;
+  };
+
+  const normalizeName = (name) => {
+    const text = String(name).toLowerCase();
+    if (!/^[!#$%&'*+\-.^_`|~0-9a-z]+$/.test(text)) throw new TypeError(`Invalid header name: ${name}`);
+    return text;
+  };
+  const normalizeValue = (value) => String(value).replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, "");
+
+  class Headers {
+    constructor(init) {
+      this._ = [];
+      if (init instanceof Headers) this._ = init._.map((e) => [...e]);
+      else if (init && typeof init[Symbol.iterator] === "function") {
+        for (const pair of init) {
+          const [name, value] = [...pair];
+          this.append(name, value);
+        }
+      } else if (init) for (const name of Object.keys(init)) this.append(name, init[name]);
+    }
+    append(name, value) {
+      this._.push([normalizeName(name), normalizeValue(value)]);
+    }
+    set(name, value) {
+      const key = normalizeName(name);
+      const index = this._.findIndex(([k]) => k === key);
+      if (index < 0) return this.append(name, value);
+      this._[index] = [key, normalizeValue(value)];
+      this._ = this._.filter(([k], i) => k !== key || i <= index);
+    }
+    delete(name) {
+      const key = normalizeName(name);
+      this._ = this._.filter(([k]) => k !== key);
+    }
+    get(name) {
+      const key = normalizeName(name);
+      const values = this._.filter(([k]) => k === key).map(([, v]) => v);
+      return values.length ? values.join(", ") : null;
+    }
+    getSetCookie() {
+      return this._.filter(([k]) => k === "set-cookie").map(([, v]) => v);
+    }
+    has(name) {
+      const key = normalizeName(name);
+      return this._.some(([k]) => k === key);
+    }
+    /** Sorted, combined entries as the Fetch standard iterates them; `set-cookie` values stay separate. */
+    entries() {
+      const names = [...new Set(this._.map(([k]) => k))].sort();
+      const out = [];
+      for (const name of names) {
+        if (name === "set-cookie") for (const value of this.getSetCookie()) out.push([name, value]);
+        else out.push([name, this.get(name)]);
+      }
+      return out[Symbol.iterator]();
+    }
+    keys() {
+      return [...this.entries()].map(([k]) => k)[Symbol.iterator]();
+    }
+    values() {
+      return [...this.entries()].map(([, v]) => v)[Symbol.iterator]();
+    }
+    forEach(fn, self) {
+      for (const [k, v] of this.entries()) fn.call(self, v, k, this);
+    }
+    [Symbol.iterator]() {
+      return this.entries();
+    }
+  }
+  g.Headers ??= Headers;
+
+  /** Turns a body init into bytes or a stream, with the content type it implies. */
+  const extractBody = (body) => {
+    if (body == null) return { bytes: null, stream: null, type: null };
+    if (typeof body === "string") return { bytes: utf8(body), type: "text/plain;charset=UTF-8" };
+    if (body instanceof g.URLSearchParams) {
+      return { bytes: utf8(body.toString()), type: "application/x-www-form-urlencoded;charset=UTF-8" };
+    }
+    if (body instanceof g.FormData) return multipart(body);
+    if (body instanceof g.Blob) return { bytes: body._bytes.slice(), type: body.type || null };
+    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return { bytes: toBytes(body).slice(), type: null };
+    if (body instanceof g.ReadableStream) return { stream: body, type: null };
+    return { bytes: utf8(String(body)), type: "text/plain;charset=UTF-8" };
+  };
+
+  const readStream = async (stream) => {
+    const chunks = [];
+    for await (const chunk of stream) {
+      chunks.push(typeof chunk === "string" ? utf8(chunk) : toBytes(chunk));
+    }
+    return concatBytes(chunks);
+  };
+
+  /** The body of a `Request` or `Response`: bytes, or a stream read once on demand. */
+  class Body {
+    _init(body, headers) {
+      const extracted = extractBody(body);
+      this._bytes = extracted.bytes ?? null;
+      this._stream = extracted.stream ?? null;
+      this._used = false;
+      if (extracted.type && !headers.has("content-type")) headers.set("content-type", extracted.type);
+    }
+    get bodyUsed() {
+      return this._used;
+    }
+    get body() {
+      if (this._stream) return this._stream;
+      if (this._bytes === null) return null;
+      const bytes = this._bytes;
+      this._stream = new g.ReadableStream({
+        start(controller) {
+          if (bytes.length) controller.enqueue(bytes);
+          controller.close();
+        },
+      });
+      this._bytes = null;
+      return this._stream;
+    }
+    async _consume() {
+      if (this._used) throw new TypeError("Body has already been consumed");
+      this._used = true;
+      if (this._stream) return readStream(this._stream);
+      return this._bytes ?? new Uint8Array(0);
+    }
+    async bytes() {
+      return (await this._consume()).slice();
+    }
+    async arrayBuffer() {
+      return (await this._consume()).slice().buffer;
+    }
+    async text() {
+      return fromUtf8(await this._consume());
+    }
+    async json() {
+      return JSON.parse(await this.text());
+    }
+    async blob() {
+      return new g.Blob([await this._consume()], { type: this.headers.get("content-type") ?? "" });
+    }
+    async formData() {
+      const type = this.headers.get("content-type") ?? "";
+      const bytes = await this._consume();
+      const boundary = type.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+      if (/^multipart\/form-data/i.test(type) && boundary) return parseMultipart(bytes, boundary[1] ?? boundary[2]);
+      if (!/^application\/x-www-form-urlencoded/i.test(type)) throw new TypeError("Could not parse content as FormData");
+      const form = new g.FormData();
+      for (const [k, v] of new g.URLSearchParams(fromUtf8(bytes))) form.append(k, v);
+      return form;
+    }
+    _cloneBody() {
+      if (this._used) throw new TypeError("Body has already been consumed");
+      if (!this._stream) return this._bytes ? this._bytes.slice() : null;
+      const [a, b] = teeStream(this._stream);
+      this._stream = a;
+      return b;
+    }
+  }
+
+  /** Two streams with the chunks of one; the source is read as either side pulls. */
+  const teeStream = (source) => {
+    const reader = source.getReader();
+    const queues = [[], []];
+    const controllers = [];
+    let reading = null;
+    const pull = (side) => {
+      if (queues[side].length) {
+        controllers[side].enqueue(queues[side].shift());
+        return;
+      }
+      reading ??= reader.read().then(({ done, value }) => {
+        reading = null;
+        for (const i of [0, 1]) {
+          if (done) controllers[i].close();
+          else if (i === side) controllers[i].enqueue(value);
+          else queues[i].push(value);
+        }
+      });
+      return reading;
+    };
+    const branch = (side) =>
+      new g.ReadableStream({
+        start(controller) {
+          controllers[side] = controller;
+        },
+        pull: () => pull(side),
+      });
+    return [branch(0), branch(1)];
+  };
+
+  const METHODS = ["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH"];
+
+  class Request extends Body {
+    constructor(input, init = {}) {
+      super();
+      const source = input instanceof Request ? input : null;
+      this.url = source ? source.url : new g.URL(String(input)).href;
+      const method = String(init.method ?? source?.method ?? "GET");
+      this.method = METHODS.includes(method.toUpperCase()) ? method.toUpperCase() : method;
+      this.headers = new g.Headers(init.headers ?? source?.headers);
+      this.redirect = init.redirect ?? source?.redirect ?? "follow";
+      this.signal = init.signal ?? source?.signal ?? new g.AbortController().signal;
+      this.cache = init.cache ?? source?.cache ?? "default";
+      this.credentials = init.credentials ?? source?.credentials ?? "same-origin";
+      this.mode = init.mode ?? source?.mode ?? "cors";
+      this.referrer = init.referrer ?? source?.referrer ?? "about:client";
+      this.integrity = init.integrity ?? "";
+      this.keepalive = init.keepalive ?? false;
+      this.duplex = init.duplex ?? "half";
+      const body = "body" in init ? init.body : source ? source._cloneBody() : null;
+      if (body != null && (this.method === "GET" || this.method === "HEAD")) {
+        throw new TypeError("Request with GET/HEAD method cannot have body");
+      }
+      this._init(body, this.headers);
+    }
+    clone() {
+      return new Request(this);
+    }
+  }
+  g.Request ??= Request;
+
+  const REDIRECTS = [301, 302, 303, 307, 308];
+
+  class Response extends Body {
+    constructor(body = null, init = {}) {
+      super();
+      const status = init.status ?? 200;
+      if (!Number.isInteger(status) || status < 200 || status > 599) {
+        throw new RangeError(`Response status ${status} is not in the range 200 to 599`);
+      }
+      this.status = status;
+      this.statusText = String(init.statusText ?? "");
+      this.headers = new g.Headers(init.headers);
+      this.type = "default";
+      this.url = init.url ?? "";
+      this.redirected = init.redirected ?? false;
+      if (body != null && [101, 204, 205, 304].includes(status)) {
+        throw new TypeError(`Response with status ${status} cannot have a body`);
+      }
+      this._init(body, this.headers);
+    }
+    get ok() {
+      return this.status >= 200 && this.status < 300;
+    }
+    clone() {
+      const response = new this.constructor(this._cloneBody(), this);
+      Object.assign(response, { type: this.type, url: this.url, redirected: this.redirected });
+      return response;
+    }
+    static json(data, init = {}) {
+      const text = JSON.stringify(data);
+      if (text === undefined) throw new TypeError("Value is not JSON serializable");
+      const headers = new g.Headers(init.headers);
+      if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      return new this(text, { ...init, headers });
+    }
+    static redirect(url, status = 302) {
+      if (!REDIRECTS.includes(status)) throw new RangeError(`Invalid redirect status ${status}`);
+      const location = url instanceof g.URL ? url.href : String(url);
+      return new this(null, { status, headers: { location } });
+    }
+    static error() {
+      const response = new this(null, { status: 200 });
+      response.status = 0;
+      response.type = "error";
+      return response;
+    }
+  }
+  g.Response ??= Response;
+
+  const pending = new Map();
+  const abortError = (signal) =>
+    signal.reason ?? Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+
+  /** `fetch` backed by the Rust HTTP client; `[server] fetch_allow` decides which hosts it reaches. */
+  g.fetch ??= async (input, init) => {
+    const request = new g.Request(input, init);
+    if (request.signal.aborted) throw abortError(request.signal);
+    const body = request._stream || request._bytes ? await request._consume() : null;
+    const head = { url: request.url, method: request.method, headers: request.headers._, redirect: request.redirect };
+    return new Promise((resolve, reject) => {
+      const id = host.fetch(JSON.stringify(head), body);
+      const onAbort = () => {
+        pending.delete(id);
+        reject(abortError(request.signal));
+      };
+      request.signal.addEventListener("abort", onAbort, { once: true });
+      pending.set(id, {
+        resolve,
+        reject,
+        done: () => request.signal.removeEventListener("abort", onAbort),
+      });
+    });
+  };
+  /** Called by the worker when the response of `fetch` request `id` arrived, or the request failed. */
+  g.__volt_fetched = (id, head, body, error) => {
+    const entry = pending.get(id);
+    if (!entry) return;
+    pending.delete(id);
+    entry.done();
+    if (error !== null) return entry.reject(new TypeError(error));
+    const meta = JSON.parse(head);
+    const empty = [101, 204, 205, 304].includes(meta.status);
+    const response = new g.Response(empty ? null : body, {
+      status: meta.status < 200 ? 200 : meta.status,
+      statusText: meta.statusText,
+      headers: meta.headers,
+      url: meta.url,
+      redirected: meta.redirected,
+    });
+    response.status = meta.status;
+    entry.resolve(response);
+  };
   g.process ??= { env: {} };
   g.process.env.NODE_ENV ??= host.env;
 })();

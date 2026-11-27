@@ -6,7 +6,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use voltrs::manifest::{ClientAssets, Manifest, RouteEntry, SlotEntry, prerender_file};
+use voltrs::manifest::{
+    ClientAssets, HandlerEntry, Manifest, PrerenderedResponse, RouteEntry, SlotEntry, prerender_file,
+};
 use voltrs::router::{Params, RoutePattern};
 use voltrs::sdk::{SERVER_INFO_FILE, Sdk, ServerInfo};
 use voltrs::ssr::{Engine, EngineOptions};
@@ -38,6 +40,14 @@ struct RouteConfig {
 
 fn enabled() -> bool {
     true
+}
+
+/// Route handler exports read from the server bundle by `__VOLT__.handlers()`.
+#[derive(serde::Deserialize)]
+struct HandlerConfig {
+    id: String,
+    methods: Vec<String>,
+    dynamic: String,
 }
 
 /// Result of `__VOLT__.staticParams(id)`: `generateStaticParams` or `getStaticPaths` output.
@@ -137,6 +147,8 @@ impl<'a> Pipeline<'a> {
             metadata,
             metadata_routes: bundle.metadata_routes(),
             slots: Self::slots(&routes),
+            handlers: bundle.handlers().iter().map(|h| HandlerEntry { id: h.id.clone(), prerendered: None }).collect(),
+            middleware: bundle.middleware().map(|m| m.entry()),
             error: None,
         };
         let fingerprint = format!("{}{}{:?}", manifest.server, manifest.client.entry, manifest.client.css);
@@ -144,10 +156,11 @@ impl<'a> Pipeline<'a> {
         manifest.save(&self.project.out_dir)?;
 
         if !self.dev {
-            self.apply_route_config(&mut manifest, &routes, info).await?;
+            let static_handlers = self.apply_route_config(&mut manifest, &routes, info).await?;
             manifest.save(&self.project.out_dir)?;
             if self.project.config.build.prerender || voltrs::config::is_export() {
                 self.prerender(&mut manifest, info).await?;
+                self.prerender_handlers(&mut manifest, &static_handlers).await?;
             }
             manifest.save(&self.project.out_dir)?;
             let compressed = crate::compress::precompress(&self.project.static_dir())?;
@@ -178,13 +191,20 @@ impl<'a> Pipeline<'a> {
     }
 
     /// Reads route exports (`revalidate`, `dynamic`, `dynamicParams`) and build-time paths
-    /// (`generateStaticParams`, `getStaticPaths`) from the built server bundle.
-    async fn apply_route_config(&self, manifest: &mut Manifest, routes: &[Route], info: &ServerInfo) -> Result<()> {
+    /// (`generateStaticParams`, `getStaticPaths`) from the built server bundle. Returns the route handlers
+    /// whose `GET` response is built once (`dynamic = "force-static"`).
+    async fn apply_route_config(
+        &self,
+        manifest: &mut Manifest,
+        routes: &[Route],
+        info: &ServerInfo,
+    ) -> Result<Vec<String>> {
         let engine = Engine::start(EngineOptions {
             bundle: self.project.out_dir.join(&manifest.server),
             workers: 1,
             memory_limit: self.project.config.server.memory_limit_mb * 1024 * 1024,
             dev: false,
+            fetch: voltrs::ssr::FetchOptions::from_config(&self.project.config.server),
         })
         .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
         let output = engine.call("routes", String::new()).await.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
@@ -248,6 +268,55 @@ impl<'a> Pipeline<'a> {
             entry.paths = params.resolve(&RoutePattern::parse(&route.id));
             entry.dynamic = loader && !entry.force_static;
         }
+        let output = engine.call("handlers", String::new()).await.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+        let handlers: Vec<HandlerConfig> = serde_json::from_str(&output).context("invalid route handler config")?;
+        let mut prerender = Vec::new();
+        for handler in handlers.into_iter().filter(|h| h.dynamic == "force-static" || h.dynamic == "error") {
+            if !handler.methods.iter().any(|m| m == "GET") {
+                voltrs::log::warn(&format!("{}: dynamic = \"{}\" without a GET handler", handler.id, handler.dynamic));
+            } else if RoutePattern::parse(&handler.id).is_dynamic() {
+                voltrs::log::warn(&format!("{}: only route handlers without params are prerendered", handler.id));
+            } else {
+                prerender.push(handler.id);
+            }
+        }
+        Ok(prerender)
+    }
+
+    /// Runs the `GET` handler of each `force-static` route handler and writes its response to `prerender/`.
+    async fn prerender_handlers(&self, manifest: &mut Manifest, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let renderer = voltrs::App::new()
+            .root(&self.project.root)
+            .static_renderer()
+            .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+        for id in ids {
+            let response = match renderer.handler(id).await {
+                Ok(response) if response.status.is_success() => response,
+                Ok(response) => {
+                    voltrs::log::warn(&format!("skipped prerendering {id}: status {}", response.status));
+                    continue;
+                }
+                Err(error) => anyhow::bail!("prerendering the route handler {id}: {}", error.message()),
+            };
+            let Some(file) = prerender_file(id, "body") else { continue };
+            let path = self.project.out_dir.join(&file);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, &response.body)?;
+            let headers = response
+                .headers
+                .iter()
+                .filter_map(|(name, value)| Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned())))
+                .collect();
+            if let Some(entry) = manifest.handlers.iter_mut().find(|h| &h.id == id) {
+                entry.prerendered = Some(PrerenderedResponse { status: response.status.as_u16(), headers, file });
+            }
+        }
+        voltrs::log::ready(&format!("prerendered {} route handlers", ids.len()));
         Ok(())
     }
 

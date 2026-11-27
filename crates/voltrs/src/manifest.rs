@@ -27,6 +27,12 @@ pub struct Manifest {
     /// Parallel route slots (`@name` folders) of every layout.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slots: Vec<SlotEntry>,
+    /// Route handlers (`app/**/route.ts`), run in QuickJS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handlers: Vec<HandlerEntry>,
+    /// `middleware.ts` (or `proxy.ts`), when the project has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub middleware: Option<MiddlewareEntry>,
     /// Set by `volt dev` when the last rebuild failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -103,6 +109,33 @@ pub struct Intercept {
     pub target: String,
     /// Directory key the navigation must start under for the interception to apply.
     pub scope: String,
+}
+
+/// A route handler: the `route.ts` of an `app/` directory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandlerEntry {
+    /// URL pattern, e.g. `/api/posts/[id]`.
+    pub id: String,
+    /// The `GET` response written by `volt build` for `dynamic = "force-static"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prerendered: Option<PrerenderedResponse>,
+}
+
+/// A response written at build time, with its body in a file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PrerenderedResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    /// Body file relative to the out dir, see [`prerender_file`].
+    pub file: String,
+}
+
+/// `middleware.ts`: which paths it runs on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MiddlewareEntry {
+    /// `config.matcher` patterns; empty runs it on every path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matcher: Vec<String>,
 }
 
 /// A parallel route slot: the `@name` folder of a layout.
