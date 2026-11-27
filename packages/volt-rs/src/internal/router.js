@@ -36,6 +36,9 @@ export function getRouterState() {
 
 const kindOf = (route) => route.kind ?? "app";
 
+/** Whether a view renders a Pages Router page. */
+export const isPagesView = (view) => kindOf(view.route) === "pages";
+
 const thenable = (value) => Object.assign(Promise.resolve(value), value);
 const component = (module) => module?.default ?? module;
 
