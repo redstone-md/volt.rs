@@ -18,6 +18,7 @@ This is a [volt.rs](https://github.com/redstone-md/volt.rs) app: React 19 pages,
 ## Layout
 
 - `app/` file-system routes: `page.tsx`, `layout.tsx`, `loading.tsx`, `error.tsx`, `not-found.tsx`, `template.tsx`. Segments: `[id]`, `[...slug]`, `[[...slug]]`, `(group)`. Folders starting with `_` are private.
+- Pages stream: wrap slow parts in `<Suspense>` (`use(promise)`, `dynamic()` from `volt-rs/dynamic`) and add `loading.tsx` to a segment for instant loading UI on navigation. Server timers are real; crawlers get the complete page.
 - `server/main.rs` Rust loaders, actions, API routes and shared state.
 - `components/ui/` shadcn/ui components. `lib/utils.ts` exports `cn()`.
 - `public/` static files served at `/`.

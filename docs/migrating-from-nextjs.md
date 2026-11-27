@@ -13,6 +13,7 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 | `export const metadata`, `generateMetadata`, `export const viewport` | same |
 | `params` / `searchParams` props (sync or awaited) | same |
 | `export const revalidate`, `export const dynamic = "force-dynamic"` | same, with stale-while-revalidate |
+| `<Suspense>`, `use(promise)`, `loading.tsx`, `next/dynamic` | streamed from the server; `loading.tsx` shows at once on navigation |
 | `generateStaticParams`, `dynamicParams`, `getStaticPaths` | same, evaluated at build time for routes without a Rust loader |
 | `output: "export"`, `basePath`, `trailingSlash` | `volt export`, `[build] base_path`, `[build] trailing_slash` |
 | Tailwind CSS, shadcn/ui, CSS imports, `@/*` alias | same |
@@ -70,7 +71,7 @@ export default function Post({ data }: PageProps<"/posts/[id]">) {
 
 ## Not supported yet
 
-- React Server Components and streaming. Every component renders on the server and hydrates in the browser.
+- React Server Components. Every component renders on the server (streaming Suspense boundaries) and hydrates in the browser; data that needs the server comes from Rust loaders, which run before rendering starts.
 - Parallel (`@slot`) and intercepting (`(.)`) routes.
 - `next/og`, edge runtime.
 - `next/font` metric-adjusted fallback fonts (`adjustFontFallback`) and the Google `axes` option.

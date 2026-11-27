@@ -11,9 +11,9 @@
  request ──► hyper ──► middleware ──► static / action / data / image / API / page
                                                                      │
                                                     Rust loader ──► QuickJS worker pool
-                                                                     │  React renderToString
+                                                                     │  React renderToReadableStream
                                                                      ▼
-                                                         HTML + state + modulepreload
+                                                shell + Suspense chunks, streamed with state + modulepreload
 ```
 
 ## Crates and packages
@@ -28,15 +28,27 @@
 
 ## Rendering
 
-The server bundle is evaluated once per worker in an isolated QuickJS runtime with a memory limit and a 10-second watchdog. A render call passes the page state as JSON; JavaScript resolves metadata, renders the layout tree with `renderToString` and returns HTML. Rust then inserts the stylesheet, `modulepreload` hints, the serialized state and the client entry. React 19 hoists `<title>`, `<meta>` and `<link>` into `<head>`.
+The server bundle is evaluated once per worker in an isolated QuickJS runtime with a memory limit and a 10-second watchdog per render. A render call passes the page state as JSON; JavaScript resolves metadata and renders the layout tree with `react-dom/server`'s `renderToReadableStream`. The polyfills give QuickJS what it needs for that: a WHATWG `ReadableStream`, UTF-8 `TextEncoder`/`TextDecoder`, `AbortController` and wall-clock timers. React 19 hoists `<title>`, `<meta>` and `<link>` into `<head>`.
+
+Three render methods share that code:
+
+- `stream(state, sink)` reports the shell to Rust (`sink.shell`, with the status code) as soon as it is ready, then hands every chunk React flushes to `sink.write`. Rust answers with the status and headers at the shell and sends the chunks as a chunked body backed by a channel from the worker thread. A splicer inserts the stylesheet and `modulepreload` hints before `</head>` and the serialized state and client entry before the final `</body>`, holding back a few bytes so that markers split across chunks are still found. When the client disconnects, writes fail and the render is aborted. Dynamic pages use it, and gzip is applied per chunk with a sync flush.
+- `document(state)` waits for `allReady` and returns the whole document: cached and prerendered pages, background regeneration and user agents matching `[server] bots`.
+- `render(state)` uses `renderToString`, with `[server] streaming = false`.
+
+`notFound()` and `redirect()` raised while the shell renders are recorded by `onError` and turned into the not-found page or a redirect before anything is sent, so the status code stays correct.
+
+A worker is an event loop: it calls the render function, runs QuickJS jobs and the earliest due timer, and while every render it holds is waiting on a timer it takes further jobs from the queue (up to 32), so a Suspense boundary waiting on a slow promise does not hold the worker.
 
 Pages Router routes run `getServerSideProps` / `getStaticProps` in the same render call, merge their props over the loader data and render the `_document` around the page tree, which goes into `<div id="__next">`; the props are returned to Rust so the serialized state matches. Client navigations call `__VOLT__.props` from `/_volt/data` for those routes.
 
-Workers are plain OS threads pulling jobs from a shared queue, so a slow render never blocks the async HTTP runtime. In development the pool reloads the bundle when the manifest changes.
+Workers are plain OS threads pulling jobs from a shared queue, so a slow render never blocks the async HTTP runtime. In development the pool reloads the bundle when the manifest changes, once the renders in flight have finished.
 
 ## Client
 
 The client entry hydrates the document, then owns navigation: links fetch `/_volt/data?path=...` (the route's loader result as JSON), import the route's chunk, resolve metadata and commit the new tree in a transition. Both server and client build the tree with the same code (`volt-rs/internal/router.js`), which is what makes hydration exact.
+
+Routes with a `loading` file in any segment also get a small shell chunk with their segments but no page. On navigation the client matches the URL against the route patterns, and if the data has not arrived when the shell chunk has, it commits the target layouts around a page that suspends (an urgent update, not a transition), so the nearest `loading` boundary shows; the real view replaces it in a transition once the data and the page chunk are there.
 
 ## Type bridge
 
@@ -44,4 +56,4 @@ The client entry hydrates the document, then owns navigation: links fetch `/_vol
 
 ## Builds
 
-rolldown bundles twice from the same virtual modules: one ESM build for browsers with a lazy chunk per route, and one single-file IIFE build for QuickJS (`react-dom/server.browser`). The volt plugin compiles CSS Modules and Sass with Lightning CSS and grass, rewrites `next/font` calls (parsed with oxc) into class names plus generated `@font-face` stylesheets, and collects every stylesheet in module evaluation order. They become one file: through Tailwind when a stylesheet imports it, otherwise through Lightning CSS (prefixes, minification), with optional PostCSS plugins, and relative `url()` assets copied to `static/media`. After bundling, `__VOLT__.routes()` reports route exports and `__VOLT__.staticParams(id)` evaluates `generateStaticParams` / `getStaticPaths`; static routes, `getStaticProps` pages and generated paths without loaders are rendered in-process and written to `.volt/prerender` with their route data (Pages Router props included). Static assets are precompressed with Brotli (quality 11) and gzip.
+rolldown bundles twice from the same virtual modules: one ESM build for browsers with a lazy chunk per route (plus a shell chunk per route with `loading` UI), and one single-file IIFE build for QuickJS (`react-dom/server.browser`). The volt plugin compiles CSS Modules and Sass with Lightning CSS and grass, rewrites `next/font` calls (parsed with oxc) into class names plus generated `@font-face` stylesheets, and collects every stylesheet in module evaluation order. They become one file: through Tailwind when a stylesheet imports it, otherwise through Lightning CSS (prefixes, minification), with optional PostCSS plugins, and relative `url()` assets copied to `static/media`. After bundling, `__VOLT__.routes()` reports route exports and `__VOLT__.staticParams(id)` evaluates `generateStaticParams` / `getStaticPaths`; static routes, `getStaticProps` pages and generated paths without loaders are rendered in-process and written to `.volt/prerender` with their route data (Pages Router props included). Static assets are precompressed with Brotli (quality 11) and gzip.

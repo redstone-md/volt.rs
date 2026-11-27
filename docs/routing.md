@@ -20,7 +20,7 @@ When several routes match, static segments win over dynamic ones, and dynamic on
 | --- | --- |
 | `layout.tsx` | Wraps the segment and its children. The root layout renders `<html>` and `<body>`. |
 | `page.tsx` | The UI of a route. |
-| `loading.tsx` | Suspense fallback for the segment. |
+| `loading.tsx` | Suspense fallback for the segment, shown at once on client navigation. See [Loading UI and streaming](#loading-ui-and-streaming). |
 | `error.tsx` | Error boundary. Receives `{ error, reset }`. |
 | `not-found.tsx` | Rendered for `notFound()` and, at the root, for unknown URLs. |
 | `template.tsx` | Like a layout, but remounted on navigation. |
@@ -70,6 +70,40 @@ router.prefetch("/settings");
 `<Link>` renders a plain `<a>`, so pages work without JavaScript. With JavaScript, navigation is client-side: volt fetches the target route's loader data from `/_volt/data` and its code chunk, then swaps the page without a full reload. Links prefetch when they enter the viewport and on hover. Scroll position is restored on back and forward.
 
 `next/link`, `next/navigation`, `next/image`, `next/script`, `next/head`, `next/form` and `next/dynamic` resolve to their volt equivalents, so existing components and shadcn blocks work unchanged.
+
+## Loading UI and streaming
+
+Dynamic pages stream. The server sends the shell (the layouts and everything outside pending `<Suspense>` boundaries, with their fallbacks) as soon as it is ready, then each boundary's HTML as it resolves, and React swaps it in before the page hydrates. Components can suspend with `use(promise)`, `React.lazy` or `dynamic()`:
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense, use } from "react";
+
+export const dynamic = "force-dynamic";
+
+function Stats({ stats }: { stats: Promise<string> }) {
+  return <p>{use(stats)}</p>;
+}
+
+export default function Dashboard() {
+  const stats = new Promise<string>((resolve) => setTimeout(() => resolve("42 orders"), 500));
+  return (
+    <Suspense fallback={<p>Loading stats…</p>}>
+      <Stats stats={stats} />
+    </Suspense>
+  );
+}
+```
+
+- `loading.tsx` wraps the segment's page in a Suspense boundary, so a page that suspends streams the loading UI first.
+- The status code comes from the shell: `notFound()` or `redirect()` raised before the shell is sent answers 404 or a redirect, even inside a boundary. Raised later, inside a boundary that already streamed its fallback, the page keeps its 200 and the browser shows the not-found page or follows the redirect.
+- The state and the client entry are written before `</body>`, after the last boundary, so the page hydrates once the stream is complete; `modulepreload` hints in the shell let the browser fetch the code meanwhile.
+- Crawlers and link-preview bots (`[server] bots`, a user-agent regex) get the complete document in one response, as do cached and prerendered pages, which wait for every boundary. `[server] streaming = false` renders every page with `renderToString` instead, where Suspense boundaries render their fallbacks.
+- Rust loaders run before rendering starts, so a page with a loader streams once its data is ready.
+
+`dynamic(() => import("./chart"))` from `volt-rs/dynamic` (or `next/dynamic`) starts loading when it is defined, so its content is server-rendered in place, or streamed once it resolves. `{ ssr: false }` renders `loading` on the server and loads the component in the browser after hydration.
+
+On client navigation (`<Link>`, `router.push` and `router.replace`) to a route that has a `loading.tsx` in any segment, the target's layouts and the nearest loading UI appear immediately while the loader data and the page chunk load, then the page replaces it. Navigations to routes without `loading.tsx` keep the current page on screen until the next one is ready (a React transition), and prefetched routes swap in at once.
 
 ## Not found and redirects
 

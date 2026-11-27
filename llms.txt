@@ -7,6 +7,7 @@ Key facts:
 - Pages are React components in `app/` (App Router) or `pages/` (Pages Router, with `getServerSideProps`, `getStaticProps` and `next/router`). Server code is Rust in `server/main.rs` using the `voltrs` crate.
 - `#[loader("/route")]` returns the page `data` prop. `#[action]` functions are called from React via the generated `@volt/api` module. `#[get("/api/x")]` defines JSON endpoints.
 - `#[model]` structs are serialized with camelCase fields and exported as TypeScript interfaces.
+- Pages stream Suspense boundaries from the server (`use(promise)`, `lazy`, `next/dynamic`); `loading.tsx` shows at once on client navigation.
 - Not supported: React Server Components, async components, `"use server"`, parallel and intercepting routes.
 - Styling: Tailwind CSS v4, CSS Modules (`*.module.css`, `*.module.scss`), Sass, PostCSS, and `next/font/google` / `next/font/local` (also `volt-rs/font/*`).
 

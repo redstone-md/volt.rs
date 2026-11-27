@@ -16,6 +16,8 @@ memory_limit_mb = 256             # heap limit per render worker
 compress = true                   # gzip dynamic responses
 page_cache_mb = 50                # memory for pages cached on demand (LRU); build-time pages are not counted
 body_limit_mb = 8                 # largest request body (actions, API routes, uploads), 413 above
+streaming = true                  # stream dynamic pages with Suspense; false renders with renderToString
+bots = "(bot|crawler|spider)\\b|facebookexternalhit"  # user agents (regex, case-insensitive) that get complete pages
 
 [build]
 minify = true
@@ -51,6 +53,8 @@ destination = "/docs/introduction"
 ```
 
 Unknown keys are rejected, so typos fail loudly.
+
+`[server] streaming` and `bots` are described in [Loading UI and streaming](routing.md#loading-ui-and-streaming). The default `bots` pattern covers the common search engine crawlers and link-preview fetchers (Googlebot, Bingbot, Slurp, facebookexternalhit, Twitterbot, Slackbot, WhatsApp, Lighthouse and others); an empty string streams to every client. An invalid pattern fails `volt build` and the server start.
 
 `base_path` and `trailing_slash` are applied to routing, links, assets, redirects, the sitemap and `volt export`; see [static generation](static-generation.md#base-path-and-trailing-slashes). Redirect and rewrite sources and destinations are written without the base path.
 

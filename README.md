@@ -89,6 +89,7 @@ export default function Home({ data }: PageProps<"/">) {
 - **App Router conventions**: `page`, `layout`, `loading`, `error`, `not-found`, `template`; `[slug]`, `[...slug]`, `[[...slug]]`, `(groups)`, `_private` folders.
 - **Pages Router** next to it: `pages/`, `_app`, `_document`, `404`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` and `next/router` with router events.
 - **Server-side rendering** of React 19 with hydration, then client-side navigation with prefetching, scroll restoration and per-route code splitting.
+- **Streaming SSR**: the shell goes out first and each `<Suspense>` boundary (`use(promise)`, `lazy`, `next/dynamic`) streams in as it resolves; crawlers get the complete page. `loading.tsx` shows instantly on client navigation.
 - **Rust loaders, server actions and API routes** with a generated, fully typed TypeScript client.
 - **Forms that work without JavaScript**: `<Form action={...}>` posts natively (multipart, so file uploads too) and upgrades to in-place submission with pending state, `useFormStatus` and `useActionState`.
 - **File uploads and validation**: `File` fields in `#[model]` inputs, `ctx.multipart()` in API routes, `Error::validation` field errors, and `ctx.revalidate_path` to refresh cached pages and client route data after a mutation.
@@ -124,7 +125,7 @@ export default function Home({ data }: PageProps<"/">) {
 
 ## Status
 
-volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components and streaming, parallel and intercepting routes, and React Fast Refresh (dev uses full reloads). See [CHANGELOG.md](./CHANGELOG.md).
+volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components, parallel and intercepting routes, and React Fast Refresh (dev uses full reloads). See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Contributing
 

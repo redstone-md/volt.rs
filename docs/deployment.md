@@ -54,6 +54,8 @@ Restart=always
 
 volt speaks HTTP/1.1 and HTTP/2 (h2c). Put TLS in front with nginx, Caddy or a load balancer. Forward `Host` (or `X-Forwarded-Host`): server actions compare it with the request `Origin` to block cross-site calls.
 
+Dynamic pages stream with chunked transfer encoding. Proxies that buffer responses hold the shell back until the page is complete: streamed pages carry `X-Accel-Buffering: no`, which nginx honours; turn buffering off in other proxies.
+
 ## Caching
 
 | Response | Cache-Control |
