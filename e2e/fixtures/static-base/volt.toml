@@ -1,0 +1,12 @@
+[site]
+name = "static-base"
+url = "https://base.example"
+
+[build]
+base_path = "/docs"
+trailing_slash = true
+
+[[redirects]]
+source = "/old"
+destination = "/about"
+permanent = true
