@@ -1,6 +1,7 @@
 //! Static file serving: hashed build assets from memory, `public/` from disk.
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -66,6 +67,8 @@ pub fn accepts(headers: &HeaderMap) -> (bool, bool) {
 
 struct Asset {
     body: Bytes,
+    /// Content hash, for revalidated development assets.
+    etag: Option<HeaderValue>,
     gzip: Option<Bytes>,
     brotli: Option<Bytes>,
     content_type: &'static str,
@@ -109,15 +112,35 @@ impl StaticAssets {
                 std::fs::read(PathBuf::from(name)).ok().map(Bytes::from)
             };
             let key = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            let etag = self.revalidate.then(|| {
+                let mut hasher = DefaultHasher::new();
+                body.hash(&mut hasher);
+                HeaderValue::from_str(&format!("W/\"{:016x}\"", hasher.finish())).ok()
+            });
             self.files.insert(
                 key,
-                Asset { gzip: sibling(".gz"), brotli: sibling(".br"), content_type: mime(&path), body: body.into() },
+                Asset {
+                    gzip: sibling(".gz"),
+                    brotli: sibling(".br"),
+                    content_type: mime(&path),
+                    etag: etag.flatten(),
+                    body: body.into(),
+                },
             );
         }
     }
 
     pub fn serve(&self, key: &str, headers: &HeaderMap) -> Option<Response> {
         let asset = self.files.get(key)?;
+        if let Some(etag) = &asset.etag
+            && headers.get(header::IF_NONE_MATCH) == Some(etag)
+        {
+            return Some(
+                Response::empty(StatusCode::NOT_MODIFIED)
+                    .header(header::ETAG, etag.clone())
+                    .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+            );
+        }
         let (br, gzip) = accepts(headers);
         let (body, encoding) = match (&asset.brotli, &asset.gzip) {
             (Some(body), _) if br => (body.clone(), Some("br")),
@@ -136,6 +159,9 @@ impl StaticAssets {
             .header(header::VARY, HeaderValue::from_static("Accept-Encoding"));
         if let Some(encoding) = encoding {
             response.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
+        }
+        if let Some(etag) = &asset.etag {
+            response.headers.insert(header::ETAG, etag.clone());
         }
         Some(response)
     }
@@ -168,6 +194,27 @@ pub async fn serve_public(root: &Path, url_path: &str, headers: &HeaderMap) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revalidates_development_assets() {
+        let dir = std::env::temp_dir().join(format!("volt-assets-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("js")).unwrap();
+        std::fs::write(dir.join("js/main.js"), "export {};").unwrap();
+        let none = HeaderMap::new();
+        let production = StaticAssets::load(&dir, false).serve("js/main.js", &none).unwrap();
+        assert!(production.headers.get(header::ETAG).is_none());
+
+        let assets = StaticAssets::load(&dir, true);
+        let first = assets.serve("js/main.js", &none).unwrap();
+        assert_eq!(first.status, StatusCode::OK);
+        assert_eq!(first.headers[header::CACHE_CONTROL], "no-cache");
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, first.headers[header::ETAG].clone());
+        assert_eq!(assets.serve("js/main.js", &headers).unwrap().status, StatusCode::NOT_MODIFIED);
+        headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static("\"other\""));
+        assert_eq!(assets.serve("js/main.js", &headers).unwrap().status, StatusCode::OK);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn rejects_traversal() {
