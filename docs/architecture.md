@@ -4,7 +4,7 @@
             ┌────────────────────────── volt build / volt dev ───────────────────────────┐
             │  app/**  ──►  route scanner  ──►  rolldown (oxc)  ──►  client chunks (ESM)   │
             │                                   │                  server bundle (IIFE) │
-            │  app/globals.css  ──►  Tailwind CLI  ──►  app-[hash].css                    │
+            │  *.css / *.scss / fonts  ──►  Tailwind or Lightning CSS  ──►  app-[hash].css │
             │  server/main.rs  ──►  cargo  ──►  binary  ──►  --emit-sdk  ──►  @volt/api     │
             └────────────────────────────────────────────────────────────────────────────┘
 
@@ -44,4 +44,4 @@ The client entry hydrates the document, then owns navigation: links fetch `/_vol
 
 ## Builds
 
-rolldown bundles twice from the same virtual modules: one ESM build for browsers with a lazy chunk per route, and one single-file IIFE build for QuickJS (`react-dom/server.browser`). Imported CSS is collected in execution order and handed to Tailwind. After bundling, `__VOLT__.routes()` reports route exports and `__VOLT__.staticParams(id)` evaluates `generateStaticParams` / `getStaticPaths`; static routes, `getStaticProps` pages and generated paths without loaders are rendered in-process and written to `.volt/prerender` with their route data (Pages Router props included). Static assets are precompressed with Brotli (quality 11) and gzip.
+rolldown bundles twice from the same virtual modules: one ESM build for browsers with a lazy chunk per route, and one single-file IIFE build for QuickJS (`react-dom/server.browser`). The volt plugin compiles CSS Modules and Sass with Lightning CSS and grass, rewrites `next/font` calls (parsed with oxc) into class names plus generated `@font-face` stylesheets, and collects every stylesheet in module evaluation order. They become one file: through Tailwind when a stylesheet imports it, otherwise through Lightning CSS (prefixes, minification), with optional PostCSS plugins, and relative `url()` assets copied to `static/media`. After bundling, `__VOLT__.routes()` reports route exports and `__VOLT__.staticParams(id)` evaluates `generateStaticParams` / `getStaticPaths`; static routes, `getStaticProps` pages and generated paths without loaders are rendered in-process and written to `.volt/prerender` with their route data (Pages Router props included). Static assets are precompressed with Brotli (quality 11) and gzip.

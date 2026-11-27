@@ -31,7 +31,6 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 | `app/sitemap.ts` | automatic, plus Rust `#[sitemap]` providers |
 | `revalidatePath()` after an action | `ctx.revalidate_path()` / `voltrs::revalidate_path()` for cached pages; `<Form>` refreshes the current page automatically, or `router.refresh()` |
 | `cookies()`, `headers()` | `ctx.cookie()`, `ctx.header()`, `ctx.set_cookie()` |
-| `next/font` | `@fontsource/*` packages or `@font-face` in CSS |
 
 ## Example
 
@@ -71,6 +70,7 @@ export default function Post({ data }: PageProps<"/posts/[id]">) {
 
 - React Server Components and streaming. Every component renders on the server and hydrates in the browser.
 - Parallel (`@slot`) and intercepting (`(.)`) routes.
-- `next/font`, `next/og`, edge runtime.
+- `next/og`, edge runtime.
+- `next/font` metric-adjusted fallback fonts (`adjustFontFallback`) and the Google `axes` option.
 - Pages Router `getInitialProps`, i18n routing and `req`/`res` in `getServerSideProps` (see [Pages Router](./pages-router.md#not-supported)).
 - File uploads in actions (multipart bodies).

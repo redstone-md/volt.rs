@@ -92,8 +92,10 @@ export default function Home({ data }: PageProps<"/">) {
 - **Rust loaders, server actions and API routes** with a generated, fully typed TypeScript client.
 - **Forms that work without JavaScript**: `<Form action={...}>` posts natively and upgrades to in-place submission with pending state.
 - **Metadata API** (`metadata`, `generateMetadata`, `viewport`, Open Graph, Twitter, robots, alternates, verification), JSON-LD, automatic `sitemap.xml`, `robots.txt` and `llms.txt`.
-- **Next.js imports work**: `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`.
+- **Next.js imports work**: `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/font/google`, `next/font/local`.
 - **Tailwind CSS v4 and shadcn/ui** out of the box; `npx shadcn add` works.
+- **CSS Modules, Sass/SCSS and PostCSS**: `*.module.css` / `*.module.scss` with scoped class names, Sass compiled in Rust, Lightning CSS for `@import` inlining, `url()` assets, vendor prefixes and minification.
+- **Fonts**: `next/font/google` and `next/font/local` compatible loaders; Google Fonts are downloaded at build time and self-hosted, with preloading.
 - **Images**: `<Image>` with `srcset`, lazy loading, priority preloading and on-demand resizing.
 - **Static prerendering** with `generateStaticParams`, `dynamicParams` and `getStaticPaths`, incremental static regeneration (stale-while-revalidate), on-demand `revalidate_path`, and **static export** (`volt export`) for any static host.
 - `base_path` and `trailing_slash`, Brotli and gzip precompression, immutable asset caching, security headers, redirects and rewrites.
@@ -121,7 +123,7 @@ export default function Home({ data }: PageProps<"/">) {
 
 ## Status
 
-volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components and streaming, parallel and intercepting routes, `next/font`, multipart uploads in actions, and React Fast Refresh (dev uses full reloads). See [CHANGELOG.md](./CHANGELOG.md).
+volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components and streaming, parallel and intercepting routes, multipart uploads in actions, and React Fast Refresh (dev uses full reloads). See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Contributing
 

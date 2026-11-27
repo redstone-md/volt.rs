@@ -12,6 +12,12 @@
 - `<Image>` serves original files when `[images] optimize = false`.
 - `revalidate = 0` renders on every request; the page cache keeps on-demand pages within `[server] page_cache_mb` (LRU).
 - `volt dev` no longer rebuilds on events of the `.volt` directory itself.
+- CSS Modules: `*.module.css`, `*.module.scss` and `*.module.sass` export scoped class names, including `composes`.
+- Sass and SCSS stylesheets compiled with grass; `@use` and `@import` resolve relative to the file and `node_modules`.
+- Lightning CSS processing of non-Tailwind CSS: `@import` inlining, vendor prefixes and syntax lowering for the `browserslist` targets, minification in production.
+- Relative `url()` references in CSS (including Tailwind output) are copied to the build with content hashes.
+- `next/font/google` and `next/font/local` (also `volt-rs/font/*`): build-time `@font-face` generation, self-hosted Google Fonts cached in `.volt/cache/fonts`, font preloading for the root layout.
+- PostCSS: projects with a `postcss.config.*` and `postcss` installed run their plugins; Tailwind also compiles through `@tailwindcss/postcss` when its CLI is not installed.
 
 ## 0.0.1
 
