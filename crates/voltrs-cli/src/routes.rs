@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use voltrs::router::RoutePattern;
 
+use crate::metadata::File;
+
 const EXTENSIONS: [&str; 4] = ["tsx", "ts", "jsx", "js"];
 pub const NOT_FOUND: &str = "/_not-found";
 pub const ERROR: &str = "/_error";
@@ -24,17 +26,24 @@ pub struct Segment {
     pub error: Option<Module>,
     pub not_found: Option<Module>,
     pub template: Option<Module>,
+    /// Directory names from the app root to this segment, groups and dynamic segments included.
+    pub path: Vec<String>,
+    /// Metadata files (`icon.png`, `opengraph-image.jpg`, ...) applying to every route below.
+    pub files: Vec<File>,
 }
 
 impl Segment {
-    fn read(dir: &Path) -> Self {
-        Self {
+    fn read(dir: &Path, path: Vec<String>) -> Result<Self> {
+        let url: String = path.iter().map(|part| format!("/{part}")).collect();
+        Ok(Self {
             layout: find(dir, "layout"),
             loading: find(dir, "loading"),
             error: find(dir, "error"),
             not_found: find(dir, "not-found"),
             template: find(dir, "template"),
-        }
+            files: File::scan(dir, &url, path.is_empty())?,
+            path,
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -43,6 +52,7 @@ impl Segment {
             && self.error.is_none()
             && self.not_found.is_none()
             && self.template.is_none()
+            && self.files.is_empty()
     }
 
     pub fn modules(&self) -> [(&'static str, Option<&Module>); 5] {
@@ -72,6 +82,12 @@ pub struct Route {
     pub kind: Kind,
     pub segments: Vec<Segment>,
     pub page: Module,
+    /// Directory names from the app root to the page, for `useSelectedLayoutSegment`.
+    pub path: Vec<String>,
+    /// Metadata files next to the page; they take precedence over the page's own metadata.
+    pub files: Vec<File>,
+    /// `app/global-error.tsx`, rendered instead of the root layout when it fails.
+    pub global_error: Option<Module>,
 }
 
 impl Route {
@@ -89,7 +105,12 @@ impl Route {
 }
 
 fn find(dir: &Path, name: &str) -> Option<Module> {
-    EXTENSIONS.iter().map(|ext| dir.join(format!("{name}.{ext}"))).find(|p| p.is_file()).map(Module::File)
+    find_file(dir, name).map(Module::File)
+}
+
+/// The script `name.(tsx|ts|jsx|js)` in `dir`.
+pub fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    EXTENSIONS.iter().map(|ext| dir.join(format!("{name}.{ext}"))).find(|p| p.is_file())
 }
 
 fn skipped(name: &str) -> bool {
@@ -103,7 +124,7 @@ fn skipped(name: &str) -> bool {
 /// Scans the app and pages directories into routes, adding the not-found and error pseudo routes.
 pub fn scan(app_dir: Option<&Path>, pages_dir: Option<&Path>) -> Result<Vec<Route>> {
     let mut found = BTreeMap::new();
-    let app = app_dir.map(AppDir::new);
+    let app = app_dir.map(AppDir::new).transpose()?;
     let pages = pages_dir.map(PagesDir::new);
     if let Some(app) = &app {
         app.walk(&app.dir, "", &mut vec![app.root.clone()], &mut found)?;
@@ -120,7 +141,15 @@ pub fn scan(app_dir: Option<&Path>, pages_dir: Option<&Path>) -> Result<Vec<Rout
     }
     let mut routes: Vec<Route> = found.into_values().collect();
     routes.push(special(NOT_FOUND, app.as_ref(), pages.as_ref(), |s| s.not_found.clone(), &["404"], "NotFound"));
-    routes.push(special(ERROR, app.as_ref(), pages.as_ref(), |s| s.error.clone(), &["500", "_error"], "ErrorPage"));
+    let error = match &app {
+        // Without a root `error.tsx`, failures render `global-error.tsx` in place of the whole document.
+        Some(app) if app.root.error.is_none() && app.global_error.is_some() => {
+            let page = app.global_error.clone().unwrap_or(Module::Builtin("ErrorPage"));
+            Route { segments: Vec::new(), ..app.route(ERROR, page) }
+        }
+        _ => special(ERROR, app.as_ref(), pages.as_ref(), |s| s.error.clone(), &["500", "_error"], "ErrorPage"),
+    };
+    routes.push(error);
     Ok(routes)
 }
 
@@ -148,34 +177,62 @@ fn special(
         (None, Some(pages)) => {
             pages.route(id, Module::Builtin(if builtin == "NotFound" { "PagesNotFound" } else { "PagesError" }))
         }
-        (None, None) => Route { id: id.into(), kind: Kind::App, segments: Vec::new(), page: Module::Builtin(builtin) },
+        (None, None) => Route {
+            id: id.into(),
+            kind: Kind::App,
+            segments: Vec::new(),
+            page: Module::Builtin(builtin),
+            path: Vec::new(),
+            files: Vec::new(),
+            global_error: None,
+        },
     }
 }
 
 struct AppDir {
     dir: PathBuf,
     root: Segment,
+    global_error: Option<Module>,
 }
 
 impl AppDir {
-    fn new(dir: &Path) -> Self {
-        let mut root = Segment::read(dir);
+    fn new(dir: &Path) -> Result<Self> {
+        let mut root = Segment::read(dir, Vec::new())?;
         if root.layout.is_none() {
             root.layout = Some(Module::Builtin("RootLayout"));
         }
-        Self { dir: dir.to_path_buf(), root }
+        Ok(Self { dir: dir.to_path_buf(), root, global_error: find(dir, "global-error") })
     }
 
     fn route(&self, id: &str, page: Module) -> Route {
-        let shell = Segment { layout: self.root.layout.clone(), ..Segment::default() };
-        Route { id: id.into(), kind: Kind::App, segments: vec![shell], page }
+        let shell = Segment { layout: self.root.layout.clone(), files: self.root.files.clone(), ..Segment::default() };
+        Route {
+            id: id.into(),
+            kind: Kind::App,
+            segments: vec![shell],
+            page,
+            path: Vec::new(),
+            files: Vec::new(),
+            global_error: self.global_error.clone(),
+        }
     }
 
     fn walk(&self, dir: &Path, url: &str, stack: &mut Vec<Segment>, found: &mut BTreeMap<String, Route>) -> Result<()> {
         if let Some(page) = find(dir, "page") {
             let id = RoutePattern::parse(url).as_str().to_owned();
-            let segments = stack.iter().filter(|s| !s.is_empty()).cloned().collect();
-            let route = Route { id: id.clone(), kind: Kind::App, segments, page };
+            let mut segments = stack.clone();
+            let own = segments.last_mut().map(|s| std::mem::take(&mut s.files)).unwrap_or_default();
+            segments.retain(|s| !s.is_empty());
+            let path = stack.last().map(|s| s.path.clone()).unwrap_or_default();
+            let route = Route {
+                id: id.clone(),
+                kind: Kind::App,
+                segments,
+                page,
+                path,
+                files: own,
+                global_error: self.global_error.clone(),
+            };
             if let Some(existing) = found.insert(id.clone(), route) {
                 bail!("two pages resolve to `{id}`: {:?}", existing.page);
             }
@@ -185,7 +242,9 @@ impl AppDir {
             if skipped(&name) {
                 continue;
             }
-            stack.push(Segment::read(&child));
+            let mut path = stack.last().map(|s| s.path.clone()).unwrap_or_default();
+            path.push(name.clone());
+            stack.push(Segment::read(&child, path)?);
             self.walk(&child, &format!("{url}/{name}"), stack, found)?;
             stack.pop();
         }
@@ -207,7 +266,15 @@ impl PagesDir {
     }
 
     fn route(&self, id: &str, page: Module) -> Route {
-        Route { id: id.into(), kind: Kind::Pages { app: self.app.clone() }, segments: Vec::new(), page }
+        Route {
+            id: id.into(),
+            kind: Kind::Pages { app: self.app.clone() },
+            segments: Vec::new(),
+            page,
+            path: Vec::new(),
+            files: Vec::new(),
+            global_error: None,
+        }
     }
 
     fn walk(&self, dir: &Path, url: &str, found: &mut BTreeMap<String, Route>) -> Result<()> {
@@ -294,6 +361,37 @@ mod tests {
         assert_eq!(ids, vec!["/", "/about", "/blog/[slug]", NOT_FOUND, ERROR]);
         let blog = routes.iter().find(|r| r.id == "/blog/[slug]").unwrap();
         assert_eq!(blog.segments.len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collects_segment_paths_metadata_files_and_global_error() {
+        let dir = fixture(
+            "conventions",
+            &[
+                "page.tsx",
+                "icon.png",
+                "global-error.tsx",
+                "(shop)/cart/page.tsx",
+                "blog/opengraph-image.png",
+                "blog/[slug]/page.tsx",
+            ],
+        );
+        let routes = scan(Some(&dir), None).unwrap();
+        let route = |id: &str| routes.iter().find(|r| r.id == id).unwrap();
+        let home = route("/");
+        assert_eq!(home.files.len(), 1);
+        assert!(home.segments[0].files.is_empty());
+        let post = route("/blog/[slug]");
+        assert_eq!(post.path, vec!["blog", "[slug]"]);
+        assert_eq!(post.segments.iter().map(|s| s.path.join("/")).collect::<Vec<_>>(), vec!["", "blog"]);
+        assert_eq!(post.segments[1].files[0].route, "/blog/opengraph-image.png");
+        assert_eq!(route("/cart").path, vec!["(shop)", "cart"]);
+        let global = Some(Module::File(dir.join("global-error.tsx")));
+        assert!(routes.iter().all(|r| r.global_error == global));
+        let error = route(ERROR);
+        assert!(error.segments.is_empty());
+        assert_eq!(Some(error.page.clone()), global);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

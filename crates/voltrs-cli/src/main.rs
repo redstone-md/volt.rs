@@ -10,6 +10,7 @@ mod env;
 mod export;
 mod fonts;
 mod media;
+mod metadata;
 mod new;
 mod pipeline;
 mod postcss;

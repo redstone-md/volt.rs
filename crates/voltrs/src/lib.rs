@@ -19,7 +19,6 @@
 //! ```
 
 mod app;
-mod assets;
 mod cache;
 mod context;
 mod dev;
@@ -29,11 +28,13 @@ mod file;
 mod flash;
 #[cfg(feature = "images")]
 mod images;
+mod metadata;
 mod multipart;
 mod response;
 mod server;
 mod stream;
 
+pub mod assets;
 pub mod config;
 pub mod form;
 pub mod log;

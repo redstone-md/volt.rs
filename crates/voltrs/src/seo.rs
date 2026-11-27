@@ -1,6 +1,6 @@
-//! `sitemap.xml`, `robots.txt` and `llms.txt` generation.
+//! `sitemap.xml`, `robots.txt`, `llms.txt` and code-defined metadata routes.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::config::Config;
 use crate::types::{Type, TypeScript};
@@ -70,6 +70,111 @@ impl Type for SitemapEntry {
         ts.named("SitemapEntry", |_| {
             "export interface SitemapEntry { url: string; lastModified?: string | null; changeFrequency?: string | null; priority?: number | null }".into()
         })
+    }
+}
+
+/// A metadata route defined in code: the default export of `app/<name>.(ts|js)`, evaluated per request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataRoute {
+    Sitemap,
+    Robots,
+    Manifest,
+}
+
+impl MetadataRoute {
+    pub const ALL: [Self; 3] = [Self::Sitemap, Self::Robots, Self::Manifest];
+
+    /// File stem in `app/`, also the name passed to `__VOLT__.metadataRoute`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sitemap => "sitemap",
+            Self::Robots => "robots",
+            Self::Manifest => "manifest",
+        }
+    }
+
+    /// The URL it is served at, relative to the base path.
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Sitemap => "/sitemap.xml",
+            Self::Robots => "/robots.txt",
+            Self::Manifest => "/manifest.webmanifest",
+        }
+    }
+
+    pub fn from_path(path: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|route| route.path() == path)
+    }
+}
+
+/// Accepts a single value or an array, as Next.js metadata objects do.
+fn one_or_many<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Vec<T>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany<T> {
+        One(T),
+        Many(Vec<T>),
+    }
+    Ok(match Option::<OneOrMany<T>>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(OneOrMany::One(value)) => vec![value],
+        Some(OneOrMany::Many(values)) => values,
+    })
+}
+
+/// The object returned by `app/robots.ts`, as in Next.js.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Robots {
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub rules: Vec<RobotsRule>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub sitemap: Vec<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RobotsRule {
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub user_agent: Vec<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub allow: Vec<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub disallow: Vec<String>,
+    #[serde(default)]
+    pub crawl_delay: Option<f64>,
+}
+
+impl Robots {
+    pub fn render(&self) -> String {
+        let mut text = String::new();
+        for rule in &self.rules {
+            if rule.user_agent.is_empty() {
+                text.push_str("User-Agent: *\n");
+            }
+            for agent in &rule.user_agent {
+                text.push_str(&format!("User-Agent: {agent}\n"));
+            }
+            for path in &rule.allow {
+                text.push_str(&format!("Allow: {path}\n"));
+            }
+            for path in &rule.disallow {
+                text.push_str(&format!("Disallow: {path}\n"));
+            }
+            if let Some(delay) = rule.crawl_delay {
+                text.push_str(&format!("Crawl-delay: {delay}\n"));
+            }
+            text.push('\n');
+        }
+        if let Some(host) = &self.host {
+            text.push_str(&format!("Host: {host}\n"));
+        }
+        for sitemap in &self.sitemap {
+            text.push_str(&format!("Sitemap: {sitemap}\n"));
+        }
+        text
     }
 }
 
@@ -150,5 +255,18 @@ mod tests {
         assert!(xml.contains("<loc>https://volt.rs/blog?a=1&amp;b=2</loc>"));
         assert!(xml.contains("<priority>0.8</priority>"));
         assert!(robots(&config).contains("Sitemap: https://volt.rs/sitemap.xml"));
+    }
+
+    #[test]
+    fn renders_code_robots() {
+        let robots: Robots = serde_json::from_str(
+            r#"{"rules":[{"userAgent":"*","allow":"/","disallow":["/admin","/tmp"]},{"userAgent":["a","b"],"crawlDelay":2}],"sitemap":"https://x.dev/sitemap.xml","host":"https://x.dev"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            robots.render(),
+            "User-Agent: *\nAllow: /\nDisallow: /admin\nDisallow: /tmp\n\nUser-Agent: a\nUser-Agent: b\nCrawl-delay: 2\n\nHost: https://x.dev\nSitemap: https://x.dev/sitemap.xml\n"
+        );
+        assert_eq!(MetadataRoute::from_path("/manifest.webmanifest"), Some(MetadataRoute::Manifest));
     }
 }

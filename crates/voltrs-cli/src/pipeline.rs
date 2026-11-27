@@ -104,10 +104,12 @@ impl<'a> Pipeline<'a> {
         let media = Media::new(self.project.static_dir().join("media"), self.project.config.static_prefix());
         let styles = Arc::new(Styles::new(self.project, media.clone())?);
         let fonts = Arc::new(Fonts::new(media.clone(), self.project.cache_dir()));
-        let bundle = Bundle::new(self.project, &routes, self.dev, Assets { media, styles: styles.clone(), fonts });
+        let bundle = Bundle::new(self.project, &routes, self.dev, Assets { media, styles: styles.clone(), fonts })?;
         let (server, client) = tokio::join!(bundle.server(), bundle.client());
         let (server, client) = (server?, client?);
         let css = Css::new(self.project, &styles, !self.dev).build(&server.css)?;
+        let files = routes.iter().flat_map(|r| r.segments.iter().flat_map(|s| &s.files).chain(&r.files));
+        let metadata = crate::metadata::write(files, &self.project.out_dir)?;
 
         let mut manifest = Manifest {
             build_id: String::new(),
@@ -129,6 +131,8 @@ impl<'a> Pipeline<'a> {
                     ..RouteEntry::default()
                 })
                 .collect(),
+            metadata,
+            metadata_routes: bundle.metadata_routes(),
             error: None,
         };
         let fingerprint = format!("{}{}{:?}", manifest.server, manifest.client.entry, manifest.client.css);
@@ -182,6 +186,21 @@ impl<'a> Pipeline<'a> {
                 entry.dynamic = true;
                 continue;
             }
+            match config.dynamic.as_str() {
+                "error" if loader => anyhow::bail!(
+                    "{} exports dynamic = \"error\" but has a Rust loader, which reads the request; \
+                     use \"force-static\" to cache its output anyway",
+                    config.id
+                ),
+                "force-static" | "error" => {
+                    entry.force_static = true;
+                    entry.dynamic = false;
+                }
+                "auto" => {}
+                other => {
+                    voltrs::log::warn(&format!("{}: unknown `dynamic` value {other:?}, using \"auto\"", config.id))
+                }
+            }
             entry.revalidate = config.revalidate;
             if !route.is_dynamic() {
                 entry.paths = vec![route.id.clone()];
@@ -201,7 +220,7 @@ impl<'a> Pipeline<'a> {
             };
             entry.dynamic_params &= params.dynamic_params.unwrap_or(true);
             entry.paths = params.resolve(&RoutePattern::parse(&route.id));
-            entry.dynamic = loader;
+            entry.dynamic = loader && !entry.force_static;
         }
         Ok(())
     }

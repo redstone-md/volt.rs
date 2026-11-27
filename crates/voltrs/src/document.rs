@@ -24,6 +24,12 @@ pub struct PageState {
     /// Result of a no-JavaScript action submission, for `useActionState` (`{ action, data | error }`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<Value>,
+    /// Index of the route segment whose `not-found.tsx` replaces its children after `notFound()`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_found: Option<usize>,
+    /// Set when `global-error.tsx` replaced the whole document because the root layout failed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub global_error: bool,
     pub build_id: String,
     pub site: Site,
     /// Set by `volt export`: the client reads route data from `/_volt/data/<path>.json` files.
@@ -67,6 +73,8 @@ pub struct Document<'a> {
     pub state: &'a PageState,
     pub dev: bool,
     pub base_path: &'a str,
+    /// HTML collected by `useServerInsertedHTML` during rendering.
+    pub inserted: &'a str,
 }
 
 impl Document<'_> {
@@ -95,6 +103,7 @@ impl Document<'_> {
         for css in &client.css {
             head.push_str(&format!("<link rel=\"stylesheet\" href=\"{css}\">"));
         }
+        head.push_str(self.inserted);
         let chunks = self.route.map(|r| r.chunks.as_slice()).unwrap_or_default();
         for chunk in std::iter::once(&client.entry).chain(&client.preload).chain(chunks) {
             head.push_str(&format!("<link rel=\"modulepreload\" href=\"{chunk}\">"));
@@ -302,11 +311,15 @@ mod tests {
             status: 200,
             error: None,
             action: None,
+            not_found: None,
+            global_error: false,
             build_id: String::new(),
             site: Site { name: String::new(), url: String::new() },
             export: false,
         };
-        let head = Document { manifest: &manifest, route: None, state: &state, dev: false, base_path: "" }.head();
+        let head =
+            Document { manifest: &manifest, route: None, state: &state, dev: false, base_path: "", inserted: "" }
+                .head();
         assert!(head.starts_with(
             "<link rel=\"preload\" href=\"/_volt/static/media/a-1.woff2\" as=\"font\" type=\"font/woff2\" crossorigin=\"\">"
         ));

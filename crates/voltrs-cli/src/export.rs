@@ -99,6 +99,13 @@ impl<'a> Export<'a> {
         for (name, body) in renderer.files().await {
             write(&out.join(name), &body)?;
         }
+        // Metadata files in dynamic segments have no single URL, so only static ones are exported.
+        for file in self.manifest.metadata.iter().filter(|f| !RoutePattern::parse(&f.route).is_dynamic()) {
+            write(
+                &out.join(file.route.trim_start_matches('/')),
+                &std::fs::read(self.project.out_dir.join(&file.file))?,
+            )?;
+        }
         Ok(pages)
     }
 

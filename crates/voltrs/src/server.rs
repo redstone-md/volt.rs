@@ -27,21 +27,23 @@ use crate::flash::ActionFlash;
 use crate::form::FormData;
 use crate::log;
 use crate::manifest::{Manifest, RouteEntry, STATIC_PREFIX};
+use crate::metadata::MetadataAssets;
 use crate::registry::{self, ActionDef, ApiDef, BoxFuture, LoaderDef, Payload};
 use crate::response::{IntoResponse, Response};
 use crate::router::{Params, RoutePattern, Router};
-use crate::seo::{self, SitemapEntry};
+use crate::seo::{self, MetadataRoute, Robots, SitemapEntry};
 use crate::ssr::{Engine, EngineOptions, StreamEvent};
 use crate::stream::PageStream;
 
 pub type Middleware = Arc<dyn Fn(Ctx) -> BoxFuture<Option<Response>> + Send + Sync>;
 type HyperResponse = hyper::Response<Either<Full<Bytes>, Either<EventStream, PageStream>>>;
 
-/// A loaded build: manifest, page routes and static assets.
+/// A loaded build: manifest, page routes, static assets and `app/` metadata files.
 struct Build {
     manifest: Manifest,
     pages: Router<usize>,
     assets: StaticAssets,
+    metadata: MetadataAssets,
 }
 
 impl Build {
@@ -60,12 +62,18 @@ impl Build {
             .map(|(i, r)| (r.id.clone(), i))
             .collect();
         let assets = StaticAssets::load(&out_dir.join("static"));
-        Ok(Self { manifest, pages, assets })
+        let metadata = MetadataAssets::load(out_dir, &manifest.metadata);
+        Ok(Self { manifest, pages, assets, metadata })
+    }
+
+    fn has_route(&self, route: MetadataRoute) -> bool {
+        self.manifest.metadata_routes.iter().any(|name| name == route.name())
     }
 }
 
 /// Answer of the render methods; a streamed shell reports the same fields without `html`.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Rendered {
     #[serde(default)]
     html: String,
@@ -80,6 +88,13 @@ struct Rendered {
     /// The render ran out of time and left its pending Suspense boundaries to the browser.
     #[serde(default)]
     incomplete: bool,
+    /// HTML returned by `useServerInsertedHTML` callbacks, for the head.
+    #[serde(default)]
+    head: String,
+    #[serde(default)]
+    not_found: Option<usize>,
+    #[serde(default)]
+    global_error: bool,
     #[serde(flatten)]
     hints: CacheHints,
 }
@@ -377,6 +392,9 @@ impl Server {
             return response.into();
         }
         if matches!(*ctx.method(), Method::GET | Method::HEAD) {
+            if let Some(response) = self.current().metadata.serve(&path, ctx.uri().query(), ctx.headers()) {
+                return response;
+            }
             if let Some(response) = serve_public(&self.config.public_dir(), &path, ctx.headers()).await {
                 return response.into();
             }
@@ -581,25 +599,51 @@ impl Server {
 
     async fn seo(&self, ctx: &Ctx, path: &str) -> Option<Response> {
         let seo = &self.config.seo;
-        match path {
-            "/robots.txt" if seo.robots => Some(Response::text(seo::robots(&self.config))),
-            "/sitemap.xml" if seo.sitemap => {
-                let xml = seo::sitemap(&self.config, &self.sitemap_entries(ctx).await);
-                Some(Response::with_type(StatusCode::OK, "application/xml", xml))
+        let build = self.current();
+        let code = MetadataRoute::from_path(path).filter(|route| build.has_route(*route));
+        let response = match (path, code) {
+            ("/robots.txt", Some(route)) => self.metadata_route(route).await.and_then(|value| {
+                let robots: Robots = serde_json::from_value(value)?;
+                Ok(Response::text(robots.render()))
+            }),
+            ("/manifest.webmanifest", Some(route)) => self
+                .metadata_route(route)
+                .await
+                .map(|value| Response::with_type(StatusCode::OK, "application/manifest+json", value.to_string())),
+            ("/robots.txt", None) if seo.robots => Ok(Response::text(seo::robots(&self.config))),
+            ("/sitemap.xml", _) if seo.sitemap || code.is_some() => self.sitemap_entries(ctx).await.map(|entries| {
+                Response::with_type(StatusCode::OK, "application/xml", seo::sitemap(&self.config, &entries))
+            }),
+            ("/llms.txt", _) if seo.llms => {
+                self.sitemap_entries(ctx).await.map(|entries| Response::text(seo::llms(&self.config, &entries)))
             }
-            "/llms.txt" if seo.llms => Some(Response::text(seo::llms(&self.config, &self.sitemap_entries(ctx).await))),
-            _ => None,
-        }
+            _ => return None,
+        };
+        Some(response.unwrap_or_else(|error| {
+            log::error(&format!("{path}: {}", error.message()));
+            Response::text("Internal Server Error").status(StatusCode::INTERNAL_SERVER_ERROR)
+        }))
     }
 
-    async fn sitemap_entries(&self, ctx: &Ctx) -> Vec<SitemapEntry> {
+    /// Evaluates the default export of `app/sitemap.ts`, `app/robots.ts` or `app/manifest.ts`.
+    async fn metadata_route(&self, route: MetadataRoute) -> Result<Value> {
+        let output = self.engine.call("metadataRoute", route.name().to_owned()).await?;
+        Ok(serde_json::from_str(&output)?)
+    }
+
+    /// Sitemap URLs: `app/sitemap.ts` when present, else every known path, followed by the `#[sitemap]` providers.
+    async fn sitemap_entries(&self, ctx: &Ctx) -> Result<Vec<SitemapEntry>> {
         let build = self.current();
         let mut entries: Vec<SitemapEntry> = Vec::new();
-        for route in build.manifest.routes.iter().filter(|r| !r.id.starts_with("/_")) {
-            if !route.paths.is_empty() {
-                entries.extend(route.paths.iter().map(|p| SitemapEntry::new(p.clone())));
-            } else if !RoutePattern::parse(&route.id).is_dynamic() {
-                entries.push(SitemapEntry::new(route.id.clone()));
+        if build.has_route(MetadataRoute::Sitemap) {
+            entries = serde_json::from_value(self.metadata_route(MetadataRoute::Sitemap).await?)?;
+        } else {
+            for route in build.manifest.routes.iter().filter(|r| !r.id.starts_with("/_")) {
+                if !route.paths.is_empty() {
+                    entries.extend(route.paths.iter().map(|p| SitemapEntry::new(p.clone())));
+                } else if !RoutePattern::parse(&route.id).is_dynamic() {
+                    entries.push(SitemapEntry::new(route.id.clone()));
+                }
             }
         }
         for provider in registry::sitemaps() {
@@ -608,7 +652,7 @@ impl Server {
                 Err(error) => log::error(&format!("sitemap provider failed: {}", error.message())),
             }
         }
-        entries
+        Ok(entries)
     }
 
     async fn page(self: &Arc<Self>, ctx: &Ctx, path: &str) -> Reply {
@@ -670,8 +714,9 @@ impl Server {
         let build = self.current();
         let entry = build.entry(path);
         let is_static = entry.is_some_and(|e| self.is_static_route(e));
-        // `getStaticProps` cannot see the query, so one entry per pathname serves every query string.
-        let (query, search) = if is_static {
+        // `getStaticProps` and `force-static` pages cannot see the query, so one entry per pathname serves
+        // every query string.
+        let (query, search) = if is_static || entry.is_some_and(|e| e.force_static) {
             ("", String::new())
         } else {
             (ctx.query_string(), ctx.uri().query().map(|q| format!("?{q}")).unwrap_or_default())
@@ -786,12 +831,12 @@ impl Server {
         Prerendered { path: path.to_owned(), status: page.response.status, html, data, revalidate: None }
     }
 
-    /// `robots.txt`, `sitemap.xml` and `llms.txt` as enabled in `[seo]`.
+    /// `robots.txt`, `sitemap.xml`, `llms.txt` and `manifest.webmanifest`, as enabled in `[seo]` or defined in `app/`.
     pub(crate) async fn generated_files(&self) -> Vec<(String, Bytes)> {
         let ctx = self.synthetic("/");
         let mut files = Vec::new();
-        for name in ["/robots.txt", "/sitemap.xml", "/llms.txt"] {
-            if let Some(response) = self.seo(&ctx, name).await {
+        for name in ["/robots.txt", "/sitemap.xml", "/llms.txt", "/manifest.webmanifest"] {
+            if let Some(response) = self.seo(&ctx, name).await.filter(|r| r.status == StatusCode::OK) {
                 files.push((name.trim_start_matches('/').to_owned(), response.body));
             }
         }
@@ -824,6 +869,8 @@ impl Server {
             return Err(Error::not_found());
         }
         let route = pattern.as_str().to_owned();
+        // `force-static` pages render once per pathname, so they cannot see the query.
+        let search = if build.manifest.routes[*index].force_static { "" } else { search };
         let ctx = ctx.with_params(params.clone());
         let data = match self.loaders.get(&route) {
             Some(loader) => (loader.handler)(ctx).await?,
@@ -864,6 +911,8 @@ impl Server {
             status,
             error,
             action: None,
+            not_found: None,
+            global_error: false,
             build_id: self.current().manifest.build_id.clone(),
             site: Site { name: self.config.site.name.clone(), url: self.config.site_url().to_owned() },
             export: crate::config::is_export(),
@@ -951,6 +1000,8 @@ impl Server {
         if let Some(data) = &rendered.data {
             state.data = data.clone();
         }
+        state.not_found = rendered.not_found;
+        state.global_error = rendered.global_error;
         let route = build.manifest.route(&state.route);
         let mut hints = rendered.hints;
         // A Rust loader sees the request (cookies, headers), so its output must never be shared.
@@ -963,6 +1014,7 @@ impl Server {
             state: &state,
             dev: self.dev,
             base_path: self.config.base_path(),
+            inserted: &rendered.head,
         };
         let (html, stream) = match output {
             Output::Streamed(events) => {

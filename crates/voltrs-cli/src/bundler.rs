@@ -38,7 +38,7 @@ const MEDIA: [&str; 13] =
 const SCRIPTS: [&str; 8] = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
 
 /// Next.js import paths served by the volt runtime.
-const COMPAT: [(&str, &str); 13] = [
+const COMPAT: [(&str, &str); 15] = [
     ("next/link", "volt-rs/link"),
     ("next/navigation", "volt-rs/navigation"),
     ("next/router", "volt-rs/router"),
@@ -49,6 +49,8 @@ const COMPAT: [(&str, &str); 13] = [
     ("next/head", "volt-rs/head"),
     ("next/form", "volt-rs/form"),
     ("next/dynamic", "volt-rs/dynamic"),
+    ("next/cache", "volt-rs/cache"),
+    ("next/server", "volt-rs/server"),
     ("next/font/google", "volt-rs/font/google"),
     ("next/font/local", "volt-rs/font/local"),
     ("next", "volt-rs"),
@@ -343,6 +345,8 @@ pub struct Bundle<'a> {
     routes: &'a [Route],
     /// Pages Router document, imported by the server bundle only.
     document: Option<Module>,
+    /// `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts`, imported by the server bundle only.
+    metadata_routes: Vec<(voltrs::seo::MetadataRoute, PathBuf)>,
     dev: bool,
     assets: Assets,
 }
@@ -355,9 +359,15 @@ pub struct Assets {
 }
 
 impl<'a> Bundle<'a> {
-    pub fn new(project: &'a Project, routes: &'a [Route], dev: bool, assets: Assets) -> Self {
+    pub fn new(project: &'a Project, routes: &'a [Route], dev: bool, assets: Assets) -> Result<Self> {
         let document = crate::routes::document(project.pages_dir.as_deref());
-        Self { project, routes, document, dev, assets }
+        let metadata_routes = crate::metadata::routes(project.app_dir.as_deref())?;
+        Ok(Self { project, routes, document, metadata_routes, dev, assets })
+    }
+
+    /// Names of the code-defined metadata routes, for the manifest.
+    pub fn metadata_routes(&self) -> Vec<String> {
+        self.metadata_routes.iter().map(|(route, _)| route.name().to_owned()).collect()
     }
 
     /// Imports a route module as the namespace `name`.
@@ -399,8 +409,18 @@ impl<'a> Bundle<'a> {
         self.route_key(index).replacen("volt:route/", "volt:shell/", 1)
     }
 
+    /// `files: {...}` of a route module: metadata from the files of a segment at `path`.
+    fn files_field(&self, files: &[crate::metadata::File], path: &[String]) -> Option<String> {
+        let manifest = path
+            .is_empty()
+            .then(|| self.metadata_routes.iter().find(|(r, _)| *r == voltrs::seo::MetadataRoute::Manifest))
+            .flatten()
+            .map(|(route, _)| *route);
+        crate::metadata::head(files, self.project.config.base_path(), manifest).map(|head| format!("files: {head}"))
+    }
+
     /// Route modules: `{ segments, page }`, with `page: null` for a navigation shell.
-    fn route_module(route: &Route, client: bool, with_page: bool) -> String {
+    fn route_module(&self, route: &Route, client: bool, with_page: bool) -> String {
         let mut imports = String::new();
         let mut names = 0;
         let mut module = |module: &Module| -> String {
@@ -413,16 +433,23 @@ impl<'a> Bundle<'a> {
             .segments
             .iter()
             .map(|segment| {
-                let fields: Vec<String> = segment
+                let mut fields: Vec<String> = segment
                     .modules()
                     .into_iter()
                     .filter_map(|(key, m)| m.map(|m| format!("{key}: {}", module(m))))
                     .collect();
+                fields.push(format!("path: {}", serde_json::json!(segment.path)));
+                fields.extend(self.files_field(&segment.files, &segment.path));
                 format!("{{ {} }}", fields.join(", "))
             })
             .collect();
         let shell = match &route.kind {
-            Kind::App => String::new(),
+            Kind::App => {
+                let mut fields = vec![format!("path: {}", serde_json::json!(route.path))];
+                fields.extend(self.files_field(&route.files, &route.path));
+                fields.extend(route.global_error.as_ref().map(|m| format!("globalError: {}", module(m))));
+                format!("{}, ", fields.join(", "))
+            }
             Kind::Pages { app } => format!("kind: \"pages\", app: {}, ", module(app)),
         };
         let page = if !with_page {
@@ -442,7 +469,7 @@ impl<'a> Bundle<'a> {
             .routes
             .iter()
             .enumerate()
-            .map(|(i, route)| (self.route_key(i), Self::route_module(route, client, true)))
+            .map(|(i, route)| (self.route_key(i), self.route_module(route, client, true)))
             .collect();
         let lazy: Vec<String> = self
             .routes
@@ -453,7 +480,7 @@ impl<'a> Bundle<'a> {
         let mut shells = Vec::new();
         for (index, route) in self.routes.iter().enumerate() {
             if client && !route.is_pages() && route.segments.iter().any(|s| s.loading.is_some()) {
-                modules.insert(self.shell_key(index), Self::route_module(route, client, false));
+                modules.insert(self.shell_key(index), self.route_module(route, client, false));
                 shells.push(format!("  {:?}: () => import({:?}),", route.id, self.shell_key(index)));
             }
         }
@@ -472,12 +499,19 @@ impl<'a> Bundle<'a> {
             Some(module) => (Self::import(module, "doc"), "doc"),
             None => (String::new(), "undefined"),
         };
+        let mut metadata_imports = String::new();
+        let mut metadata = Vec::new();
+        for (index, (route, path)) in self.metadata_routes.iter().enumerate() {
+            metadata_imports.push_str(&Self::import(&Module::File(path.clone()), &format!("meta{index}")));
+            metadata.push(format!("{}: meta{index}", route.name()));
+        }
         modules.insert(
             SERVER_ENTRY.into(),
             format!(
-                "import {{ createServer }} from \"volt-rs/internal/server\";\n{}\n{document_import}createServer({{\n{}\n}}, {{ document: {document} }});\n",
+                "import {{ createServer }} from \"volt-rs/internal/server\";\n{}\n{document_import}{metadata_imports}createServer({{\n{}\n}}, {{ document: {document}, metadata: {{ {} }} }});\n",
                 imports.join("\n"),
-                table.join("\n")
+                table.join("\n"),
+                metadata.join(", ")
             ),
         );
         modules

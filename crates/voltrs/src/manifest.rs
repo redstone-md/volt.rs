@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const STATIC_PREFIX: &str = "/_volt/static/";
+/// Copies of the `app/` metadata files, relative to the out dir.
+pub const METADATA_DIR: &str = "metadata";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +18,12 @@ pub struct Manifest {
     pub server: String,
     pub client: ClientAssets,
     pub routes: Vec<RouteEntry>,
+    /// Metadata files of `app/` (`icon.png`, `opengraph-image.jpg`, `robots.txt`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<MetadataFile>,
+    /// Metadata routes defined in code (`app/sitemap.ts`, ...), by name: see [`crate::seo::MetadataRoute`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_routes: Vec<String>,
     /// Set by `volt dev` when the last rebuild failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -30,6 +38,17 @@ pub struct ClientAssets {
     /// Font files preloaded on every page (fonts declared by the root layout).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fonts: Vec<String>,
+}
+
+/// A metadata file of `app/`, served at its Next.js URL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataFile {
+    /// URL pattern relative to the base path, e.g. `/blog/[slug]/opengraph-image.png`.
+    pub route: String,
+    /// The copy served, relative to the out dir.
+    pub file: String,
+    /// Content hash; head tags reference the file as `<route>?<hash>`, which is cached forever.
+    pub hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +78,10 @@ pub struct RouteEntry {
     /// Pages Router `getStaticProps` page: HTML and props are cached per pathname and shared by every visitor.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub static_props: bool,
+    /// `dynamic = "force-static"` (or `"error"`): one cached render per pathname, even with a Rust loader,
+    /// and empty `searchParams`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_static: bool,
 }
 
 impl Default for RouteEntry {
@@ -73,6 +96,7 @@ impl Default for RouteEntry {
             dynamic_params: true,
             pages: false,
             static_props: false,
+            force_static: false,
         }
     }
 }
