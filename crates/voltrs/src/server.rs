@@ -403,7 +403,7 @@ impl Server {
         }
         if matches!(*ctx.method(), Method::GET | Method::HEAD) {
             if let Some(response) = self.current().metadata.serve(&path, ctx.uri().query(), ctx.headers()) {
-                return response;
+                return response.into();
             }
             if let Some(response) = serve_public(&self.config.public_dir(), &path, ctx.headers()).await {
                 return response.into();
