@@ -3,7 +3,8 @@
 ## 0.0.2
 
 - Streaming SSR: dynamic pages render with `renderToReadableStream` in QuickJS and stream the shell, then every Suspense boundary as it resolves (`use(promise)`, `React.lazy`, `dynamic()`), with gzip flushed per chunk. `notFound()` and `redirect()` raised before the shell set the status code. Cached and prerendered pages and crawlers (`[server] bots`) get the complete document with every boundary resolved; `[server] streaming = false` keeps `renderToString`.
-- A render worker interleaves renders that wait on timers, and server timers follow the wall clock.
+- A render worker interleaves up to 8 renders that wait on timers, and server timers follow the wall clock. A render that passes its 10-second deadline or waits on a promise nothing resolves is aborted: the document is completed with the pending boundaries rendered in the browser, and it is not cached.
+- `TextEncoder` and `TextDecoder` in the server runtime are native, and complete documents are collected in Rust instead of being decoded in JavaScript.
 - `dynamic()` server-renders its content in place and honours `ssr: false`.
 - Client navigation to a route with `loading.tsx` shows the target layouts and loading UI at once while the loader data and page chunk load.
 - Pages Router next to the App Router: `pages/` routes, `_app`, `_document` (`next/document`), `404`, `500` / `_error`, `getServerSideProps`, `getStaticProps` with `revalidate`, `getStaticPaths` prerendering, Rust loader props merged into page props, and `next/router` (`volt-rs/router`) with `useRouter`, `withRouter`, the `Router` singleton and router events.

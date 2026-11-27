@@ -33,12 +33,16 @@ The server bundle is evaluated once per worker in an isolated QuickJS runtime wi
 Three render methods share that code:
 
 - `stream(state, sink)` reports the shell to Rust (`sink.shell`, with the status code) as soon as it is ready, then hands every chunk React flushes to `sink.write`. Rust answers with the status and headers at the shell and sends the chunks as a chunked body backed by a channel from the worker thread. A splicer inserts the stylesheet and `modulepreload` hints before `</head>` and the serialized state and client entry before the final `</body>`, holding back a few bytes so that markers split across chunks are still found. When the client disconnects, writes fail and the render is aborted. Dynamic pages use it, and gzip is applied per chunk with a sync flush.
-- `document(state)` waits for `allReady` and returns the whole document: cached and prerendered pages, background regeneration and user agents matching `[server] bots`.
+- `document(state, sink)` waits for `allReady`, then writes the whole document to the sink the same way; Rust collects the chunks into one response. It serves cached and prerendered pages, background regeneration and user agents matching `[server] bots`.
 - `render(state)` uses `renderToString`, with `[server] streaming = false`.
 
 `notFound()` and `redirect()` raised while the shell renders are recorded by `onError` and turned into the not-found page or a redirect before anything is sent, so the status code stays correct.
 
-A worker is an event loop: it calls the render function, runs QuickJS jobs and the earliest due timer, and while every render it holds is waiting on a timer it takes further jobs from the queue (up to 32), so a Suspense boundary waiting on a slow promise does not hold the worker.
+A worker is an event loop: it calls the render function, runs QuickJS jobs and the earliest due timer, and while every render it holds is waiting on a timer it takes further jobs from the queue, so a Suspense boundary waiting on a slow promise does not hold the worker. It holds at most 8 renders: whatever they do after their timers runs on that one thread, so further jobs stay in the shared queue, where idle workers take them, and a render's 10-second deadline starts when a worker takes it.
+
+When a render passes its deadline, or waits on a promise nothing can resolve (no timer left), the worker calls `sink.abort`, which aborts React's render: the document is completed with the boundaries still pending marked for client rendering, so the page stays well-formed and hydration renders them in the browser. Such a page is never cached and is not prerendered. A render that does not finish within 2 seconds of the abort fails: before the shell it answers with the error page, after it the streamed document is closed as it is.
+
+`TextEncoder` and `TextDecoder` call into Rust for the UTF-8 conversion, since React encodes every piece of markup it writes.
 
 Pages Router routes run `getServerSideProps` / `getStaticProps` in the same render call, merge their props over the loader data and render the `_document` around the page tree, which goes into `<div id="__next">`; the props are returned to Rust so the serialized state matches. Client navigations call `__VOLT__.props` from `/_volt/data` for those routes.
 

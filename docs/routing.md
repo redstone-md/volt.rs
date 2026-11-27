@@ -73,6 +73,8 @@ router.prefetch("/settings");
 
 ## Loading UI and streaming
 
+> **Rust loaders run before rendering starts.** On the first request, a page with a `#[loader]` sends nothing, not even its `loading.tsx`, until the loader has returned; Next.js would stream the loading UI at once. Client navigations to such a page do show `loading.tsx` immediately (see below). To stream slow data on the first request, keep the loader fast and suspend on the slow part inside the page.
+
 Dynamic pages stream. The server sends the shell (the layouts and everything outside pending `<Suspense>` boundaries, with their fallbacks) as soon as it is ready, then each boundary's HTML as it resolves, and React swaps it in before the page hydrates. Components can suspend with `use(promise)`, `React.lazy` or `dynamic()`:
 
 ```tsx
@@ -99,7 +101,7 @@ export default function Dashboard() {
 - The status code comes from the shell: `notFound()` or `redirect()` raised before the shell is sent answers 404 or a redirect, even inside a boundary. Raised later, inside a boundary that already streamed its fallback, the page keeps its 200 and the browser shows the not-found page or follows the redirect.
 - The state and the client entry are written before `</body>`, after the last boundary, so the page hydrates once the stream is complete; `modulepreload` hints in the shell let the browser fetch the code meanwhile.
 - Crawlers and link-preview bots (`[server] bots`, a user-agent regex) get the complete document in one response, as do cached and prerendered pages, which wait for every boundary. `[server] streaming = false` renders every page with `renderToString` instead, where Suspense boundaries render their fallbacks.
-- Rust loaders run before rendering starts, so a page with a loader streams once its data is ready.
+- A render has 10 seconds. A boundary still pending then, or waiting on a promise that can never resolve, is left to the browser: the server completes the document with that boundary marked for client rendering, and React renders it after hydration. Such a page is never cached.
 
 `dynamic(() => import("./chart"))` from `volt-rs/dynamic` (or `next/dynamic`) starts loading when it is defined, so its content is server-rendered in place, or streamed once it resolves. `{ ssr: false }` renders `loading` on the server and loads the component in the browser after hydration.
 
