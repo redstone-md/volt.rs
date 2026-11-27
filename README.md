@@ -90,7 +90,8 @@ export default function Home({ data }: PageProps<"/">) {
 - **Pages Router** next to it: `pages/`, `_app`, `_document`, `404`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` and `next/router` with router events.
 - **Server-side rendering** of React 19 with hydration, then client-side navigation with prefetching, scroll restoration and per-route code splitting.
 - **Rust loaders, server actions and API routes** with a generated, fully typed TypeScript client.
-- **Forms that work without JavaScript**: `<Form action={...}>` posts natively and upgrades to in-place submission with pending state.
+- **Forms that work without JavaScript**: `<Form action={...}>` posts natively (multipart, so file uploads too) and upgrades to in-place submission with pending state, `useFormStatus` and `useActionState`.
+- **File uploads and validation**: `File` fields in `#[model]` inputs, `ctx.multipart()` in API routes, `Error::validation` field errors, and `ctx.revalidate_path` to refresh cached pages and client route data after a mutation.
 - **Metadata API** (`metadata`, `generateMetadata`, `viewport`, Open Graph, Twitter, robots, alternates, verification), JSON-LD, automatic `sitemap.xml`, `robots.txt` and `llms.txt`.
 - **Next.js imports work**: `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/font/google`, `next/font/local`.
 - **Tailwind CSS v4 and shadcn/ui** out of the box; `npx shadcn add` works.
@@ -123,7 +124,7 @@ export default function Home({ data }: PageProps<"/">) {
 
 ## Status
 
-volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components and streaming, parallel and intercepting routes, multipart uploads in actions, and React Fast Refresh (dev uses full reloads). See [CHANGELOG.md](./CHANGELOG.md).
+volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components and streaming, parallel and intercepting routes, and React Fast Refresh (dev uses full reloads). See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Contributing
 

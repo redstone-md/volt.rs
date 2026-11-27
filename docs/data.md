@@ -95,7 +95,42 @@ import Form, { useFormPending } from "volt-rs/form";
 </Form>
 ```
 
-`<Form>` renders a real `<form method="post">`. Without JavaScript the browser posts it, the action runs and the user is redirected back. With JavaScript it submits in place, exposes the pending state through `useFormPending()` and re-runs the route loader afterwards so the page shows fresh data. Form fields are parsed into the input struct: numbers, booleans (checkboxes), optional fields and repeated keys (`tags[]`) are converted to their Rust types.
+`<Form>` renders a real `<form method="post" enctype="multipart/form-data">`. Without JavaScript the browser posts it, the action runs and the user is redirected back (to a hidden `redirect` field if present, else the referring page). With JavaScript it submits in place, exposes the pending state through `useFormPending()` and `useFormStatus()` from `react-dom`, and re-runs the route loader afterwards so the page shows fresh data (`refresh={false}` turns that off). Form fields are parsed into the input struct: numbers, booleans (checkboxes), optional fields, repeated keys (`tags[]`) and files are converted to their Rust types. Pass `encType` to override the encoding of no-JavaScript posts.
+
+`<Form>` also accepts a plain function, such as a `useActionState` dispatcher, and then renders an ordinary React form action.
+
+### File uploads
+
+Add `File` fields to the input model:
+
+```rust
+#[model]
+struct NewPhoto {
+    caption: String,
+    photo: File,              // required
+    thumbnail: Option<File>,  // a file input left empty becomes None
+    attachments: Vec<File>,   // <input type="file" multiple>
+}
+
+#[action]
+async fn add_photo(ctx: Ctx, input: NewPhoto) -> Result<Photo> {
+    let File { filename, content_type, bytes, .. } = input.photo;
+    ctx.state::<Storage>().save(&filename, &content_type, bytes).await
+}
+```
+
+```tsx
+<Form action={addPhoto}>
+  <input name="caption" />
+  <input type="file" name="photo" accept="image/*" required />
+  <input type="file" name="attachments" multiple />
+  <button type="submit">Upload</button>
+</Form>
+```
+
+`File` has `name` (the field), `filename` (without directory), `content_type` and `bytes` (`bytes::Bytes`, no copy of the request body), plus `len()`. In TypeScript the field is `File | Blob`, so `addPhoto({ caption, photo: blob })` works from code as well: inputs that contain files, and `FormData` with files, are sent as `multipart/form-data`; everything else stays urlencoded or JSON. Multipart inputs must be flat (strings, numbers, booleans, files and arrays of those). Serializing a `File` (for example when it is echoed back) produces its metadata and `size`, never the contents.
+
+Request bodies, uploads included, are limited by `[server] body_limit_mb` (default 8); larger requests get `413 Payload Too Large`.
 
 ### From code
 
@@ -107,12 +142,88 @@ import { useRouter } from "volt-rs/navigation";
 const comment = await addComment({ post, body });
 router.refresh();
 
-const { run, pending, error, data } = useAction(addComment, { refresh: true });
+const { run, pending, error, data, fieldErrors } = useAction(addComment, { refresh: true });
 ```
 
-Errors become an `ActionError` with `status` and `message`. Client errors (4xx) keep their message; server errors show a generic message in production and are logged.
+Errors become an `ActionError` with `status`, `message` and, for validation errors, `fieldErrors`. Client errors (4xx) keep their message; server errors show a generic message in production and are logged.
 
 Actions are protected against cross-site requests: calls whose `Origin` does not match the host are rejected.
+
+### useActionState and useFormStatus
+
+Actions follow the React 19 calling convention: when called with two arguments (`previousState, formData`) the last one is the input, so React's own hooks work with them directly:
+
+```tsx
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
+
+function Submit() {
+  const { pending } = useFormStatus();
+  return <button disabled={pending}>Send</button>;
+}
+
+const [comment, formAction] = useActionState(addComment, null);
+<form action={formAction}>...<Submit /></form>;
+```
+
+`volt-rs/actions` exports a `useActionState` with the same signature that also catches `ActionError`: it keeps the previous state and returns the error as a fourth element, so validation errors render next to the fields instead of reaching the error boundary.
+
+```tsx
+import { useActionState } from "volt-rs/actions";
+
+const [comment, formAction, pending, error] = useActionState(addComment, null);
+
+<form action={formAction}>
+  <textarea name="body" />
+  {error?.fieldErrors?.body?.map((message) => <p key={message}>{message}</p>)}
+  <button disabled={pending}>Send</button>
+</form>;
+```
+
+`<form action={addComment}>` and forms using a `useActionState` dispatcher are server-rendered with the action's URL, so they post (multipart) without JavaScript as well; the action runs and the user is redirected back. The returned state is only available with JavaScript, and the previous state is not sent to the Rust action.
+
+### Validation errors
+
+```rust
+#[action]
+async fn sign_up(input: SignUp) -> Result<User> {
+    let mut errors = Vec::new();
+    if input.name.trim().is_empty() {
+        errors.push(("name", "Name is required"));
+    }
+    if input.password.len() < 8 {
+        errors.push(("password", "At least 8 characters"));
+    }
+    if !errors.is_empty() {
+        return Err(Error::validation(errors));
+    }
+    /* ... */
+}
+```
+
+`Error::validation` answers `422` with `{ "error": { "status": 422, "message": "Validation failed", "fieldErrors": { "name": ["Name is required"] } } }`. Repeated fields collect several messages. In React it is `ActionError.fieldErrors`, `useAction().fieldErrors` and the `error` of `useActionState`. A no-JavaScript post shows the messages on a plain error page with a link back.
+
+### Revalidation
+
+An action (or API route) can tell the app which data it changed:
+
+```rust
+#[action]
+async fn add_comment(ctx: Ctx, input: NewComment) -> Result<Comment> {
+    let comment = ctx.state::<Db>().insert_comment(&input).await?;
+    ctx.revalidate_path(&format!("/blog/{}", input.post)); // a path, or a pattern like "/blog/[slug]"
+    Ok(comment)
+}
+```
+
+| Rust | Effect |
+| --- | --- |
+| `ctx.revalidate_path("/blog/[slug]")` | drops server-cached pages (prerendered or `revalidate`) whose path matches, and sends an `x-volt-revalidate` hint |
+| `ctx.revalidate_prefix("/blog")` | the same for a path and everything below it |
+| `ctx.revalidate()` | the same for every path |
+| `ctx.set_cookie(...)` in an action | revalidates everything, so the next navigation sees the new cookie |
+
+The client runtime reads the hint after every action call: it drops prefetched route data for matching paths and, if the current page matches, re-runs its loader before the action's promise resolves. `<Form>` and `useAction({ refresh: true })` then skip their own refresh, so the loader runs once.
 
 ## API routes
 
@@ -122,6 +233,13 @@ For JSON endpoints, webhooks and anything not driven by React:
 #[get("/api/posts")]
 async fn list(ctx: Ctx) -> Result<Json<Vec<Post>>> {
     Ok(Json(ctx.state::<Db>().posts().await?))
+}
+
+#[post("/api/avatar")]
+async fn avatar(ctx: Ctx) -> Result<Json<Value>> {
+    let form = ctx.multipart()?;
+    let file = form.file("avatar").ok_or_else(|| Error::bad_request("missing avatar"))?;
+    Ok(Json(json!({ "size": file.len(), "type": file.content_type })))
 }
 
 #[post("/api/webhook/[provider]")]
@@ -144,7 +262,9 @@ Every loader, action and handler can take `ctx: Ctx` as its first argument.
 | `ctx.query::<T>()` / `ctx.query_param("q")` | query string |
 | `ctx.header("user-agent")` / `ctx.headers()` | request headers |
 | `ctx.cookie("session")` | cookie value |
-| `ctx.json::<T>()` / `ctx.form::<T>()` / `ctx.body()` | request body |
+| `ctx.json::<T>()` / `ctx.form::<T>()` / `ctx.body()` | request body (`form` reads urlencoded and multipart, files included) |
+| `ctx.multipart()` | `FormData`: `text("note")`, `file("photo")`, `files("attachments")`, `iter()`, `decode::<T>()` |
+| `ctx.revalidate()` / `ctx.revalidate_path("/x")` / `ctx.revalidate_prefix("/x")` | purge cached pages and client route data |
 | `ctx.state::<T>()` | shared state |
 | `ctx.set_cookie(Cookie::new("session", id))` | adds `Set-Cookie` |
 | `ctx.set_header(name, value)` / `ctx.set_status(code)` | response headers and status |
@@ -176,6 +296,7 @@ Middleware runs before routing for every request; returning `Some(response)` ans
 | `Error::bad_request(msg)` | 400 |
 | `Error::unauthorized(msg)` | 401 |
 | `Error::forbidden(msg)` | 403 |
+| `Error::validation([(field, msg)])` | 422 with `fieldErrors` |
 | `not_found()` | 404, renders `not-found.tsx` |
 | `Error::conflict(msg)` | 409 |
 | `redirect("/x")` | 303 (`Error::permanent_redirect` for 308) |

@@ -23,6 +23,11 @@
 - PostCSS: projects with a `postcss.config.*` and `postcss` installed run their plugins; Tailwind also compiles through `@tailwindcss/postcss` when its CLI is not installed.
 - `volt start` hands its process over to the Rust server, so stopping it also stops the server.
 - Fractional numbers in page data keep their exact value between the HTML and `/_volt/data`.
+- File uploads: `multipart/form-data` bodies for actions and API routes, a `voltrs::File` type for `#[model]` fields (`File`, `Option<File>`, `Vec<File>`), `ctx.multipart()` and `[server] body_limit_mb`.
+- `createAction` sends files as multipart, `<Form>` posts `multipart/form-data` without JavaScript, and `<form action={action}>` works without JavaScript too.
+- React 19 action hooks: actions work with React's `useActionState` and `useFormStatus`; `volt-rs/actions` adds a `useActionState` that returns action errors.
+- `Error::validation` answers 422 with `fieldErrors`, exposed as `ActionError.fieldErrors`, `useAction().fieldErrors` and the `useActionState` error.
+- `ctx.revalidate()`, `ctx.revalidate_path()` and `ctx.revalidate_prefix()` also drop matching route data on the client, refreshing the current route when it matches. Actions that set cookies revalidate automatically.
 
 ## 0.0.1
 

@@ -45,7 +45,8 @@ This is a [volt.rs](https://github.com/redstone-md/volt.rs) app: React 19 pages,
    import Form from "volt-rs/form";
    <Form action={addTodo}><input name="title" /></Form>
    ```
-   `<Form>` works without JavaScript and refreshes the route data after success. Outside forms call `await addTodo({ title })` and then `useRouter().refresh()`.
+   `<Form>` works without JavaScript and refreshes the route data after success. Outside forms call `await addTodo({ title })` and then `useRouter().refresh()`, or call `ctx.revalidate_path("/todos")` in the action so the client refreshes matching routes itself. `useFormStatus` (react-dom) and `useActionState` (`volt-rs/actions`, returns `[state, formAction, pending, error]`) work with actions.
+   File uploads: add a `file: File` (or `Option<File>`, `Vec<File>`) field to the input model and an `<input type="file" name="file" />` to the form. API routes read uploads with `ctx.multipart()`. Bodies are limited by `[server] body_limit_mb` (default 8).
 3. Types shared with TypeScript are `#[model]` structs or enums. Fields become camelCase. `Option<T>` becomes an optional field.
 4. JSON APIs: `#[get("/api/x")]`, `#[post(...)]`, `#[put(...)]`, `#[patch(...)]`, `#[delete(...)]` returning `Json<T>`, `String` or `Response`.
 
@@ -59,7 +60,7 @@ This is a [volt.rs](https://github.com/redstone-md/volt.rs) app: React 19 pages,
 - Pages Router: a `pages/` directory (`index.tsx`, `[slug].tsx`, `_app.tsx`, `_document.tsx`, `404.tsx`) works next to `app/`; a URL may not exist in both. Page props are the Rust loader output (spread when it is an object) merged with `getServerSideProps` / `getStaticProps` props. Use `next/router` (`volt-rs/router`) and `next/document` (`volt-rs/document`) there. `getStaticProps` must not rely on a Rust loader that reads the request (such pages are never cached). `pages/api` is ignored: write Rust handlers.
 - Metadata: export `metadata` or `generateMetadata` from a page or layout. The root layout sets `title.template`.
 - Images: `volt-rs/image` (`<Image src="/photo.jpg" width={800} height={600} alt="" />`) resizes local images on demand.
-- Rust errors: `Error::bad_request("...")`, `not_found()`, `redirect("/login")`, or `?` on any error (becomes a 500).
+- Rust errors: `Error::bad_request("...")`, `Error::validation([("title", "Required")])` (422, read `error.fieldErrors` in React), `not_found()`, `redirect("/login")`, or `?` on any error (becomes a 500).
 - Shared state: register with `App::new().state(value)` and read with `ctx.state::<T>()`.
 - Static pages: dynamic routes export `generateStaticParams()` (from the page or a parent layout) to be prerendered by `npm run build`; add `export const dynamicParams = false` to answer other params with 404. `export const revalidate = 60` re-renders a cached page in the background after 60 seconds; `revalidate = 0` renders on every request. Generators run in QuickJS at build time: no Node APIs, no network. Pages with a Rust loader are never prerendered.
 - After a mutation, purge cached pages with `ctx.revalidate_path("/posts/[slug]")` or `ctx.revalidate_prefix("/posts")`.

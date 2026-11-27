@@ -91,7 +91,7 @@ async fn publish(ctx: Ctx, post: Post) -> Result<()> {
 }
 ```
 
-`voltrs::revalidate_path` and `voltrs::revalidate_prefix` do the same without a `Ctx`, for every server running in the process. Paths are app paths without `base_path`; all query string variants of a path are purged. The next request renders the page again and caches the result.
+The `Ctx` methods also send the client runtime a hint to drop its matching route data (see [revalidation](data.md#revalidation)). `voltrs::revalidate_path` and `voltrs::revalidate_prefix` do the same without a `Ctx`, for every server running in the process. Paths are app paths without `base_path`; all query string variants of a path are purged. The next request renders the page again and caches the result.
 
 ## Static export
 

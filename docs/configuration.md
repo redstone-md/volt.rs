@@ -15,6 +15,7 @@ workers = 0                       # QuickJS render workers, 0 = number of CPUs
 memory_limit_mb = 256             # heap limit per render worker
 compress = true                   # gzip dynamic responses
 page_cache_mb = 50                # memory for pages cached on demand (LRU); build-time pages are not counted
+body_limit_mb = 8                 # largest request body (actions, API routes, uploads), 413 above
 
 [build]
 minify = true
