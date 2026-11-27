@@ -377,6 +377,8 @@ export function App({ routes, shells = {}, initial }) {
         status: 200,
         error: undefined,
         action: undefined,
+        notFound: undefined,
+        globalError: undefined,
       };
       return { route: { ...(module.default ?? module), page: PENDING_PAGE }, state, metadata: current.current.metadata };
     },
