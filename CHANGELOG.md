@@ -3,6 +3,8 @@
 ## 0.0.2
 
 - Pages Router next to the App Router: `pages/` routes, `_app`, `_document` (`next/document`), `404`, `500` / `_error`, `getServerSideProps`, `getStaticProps` with `revalidate`, `getStaticPaths` prerendering, Rust loader props merged into page props, and `next/router` (`volt-rs/router`) with `useRouter`, `withRouter`, the `Router` singleton and router events.
+- `next` and `next/*` imports type-check through `volt-rs/env`.
+- `[server] page_cache` bounds the in-memory page cache.
 
 ## 0.0.1
 

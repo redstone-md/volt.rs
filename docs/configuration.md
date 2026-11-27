@@ -14,6 +14,7 @@ port = 3000
 workers = 0                       # QuickJS render workers, 0 = number of CPUs
 memory_limit_mb = 256             # heap limit per render worker
 compress = true                   # gzip dynamic responses
+page_cache = 1000                 # pages rendered at runtime kept in memory (prerendered pages always are)
 
 [build]
 minify = true

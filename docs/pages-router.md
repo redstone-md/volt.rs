@@ -69,8 +69,9 @@ export const getServerSideProps: GetServerSideProps = async ({ params, query, re
 ```
 
 - `getServerSideProps(context)` runs on every request and every client navigation. The context has `params`, `query` (search params merged with params) and `resolvedUrl`; `req`, `res`, locales and preview data are not available. Use a Rust loader for cookies, headers and database access.
-- `getStaticProps({ params })` runs at build time when the page is prerendered. A numeric `revalidate` re-renders the page on the first request after that many seconds. Pages that also have a Rust loader cannot be prerendered by the CLI and run `getStaticProps` per request.
-- `getStaticPaths()` lists the concrete paths of a dynamic `getStaticProps` page, as `{ params }` objects or strings. They are prerendered at build. With `fallback: false` other paths are 404; with `true` or `"blocking"` they render on the first request and are cached (both behave like `"blocking"`: there is no fallback state).
+- `getStaticProps({ params })` runs at build time when the page is prerendered. A numeric `revalidate` re-renders the page on the first request after that many seconds. The HTML and its props are cached per pathname (the query string is ignored, as `getStaticProps` cannot see it) and client navigations receive the cached props instead of running `getStaticProps` again. In development it runs on every request.
+- A page with `getStaticProps` and a Rust loader is rendered per request and sent with private cache headers, because the loader can read cookies and headers; `volt build` warns about it. Use `getServerSideProps` or drop `getStaticProps` on such pages.
+- `getStaticPaths()` lists the concrete paths of a dynamic `getStaticProps` page, as `{ params }` objects or strings. They are prerendered at build. With `fallback: false` other paths are 404; with `true` or `"blocking"` they render on the first request and are cached (both behave like `"blocking"`: there is no fallback state). In production `getStaticPaths` runs once per render worker; the page cache keeps at most `[server] page_cache` pages rendered at runtime (prerendered pages are not counted) and evicts the oldest.
 - All three may return `{ notFound: true }` or `{ redirect: { destination, permanent } }` (or `statusCode`).
 
 Browser chunks import only the page's default export, so tree-shaking drops `getServerSideProps`, `getStaticProps` and `getStaticPaths` from them; modules imported by those functions are dropped too unless they have side effects. Keep secrets in Rust loaders all the same.
@@ -113,7 +114,7 @@ The default export is the `Router` singleton with the same fields, usable outsid
 
 ## Types
 
-`next` (`volt-rs`) exports `NextPage`, `GetServerSideProps`, `GetStaticProps`, `GetStaticPaths`, their context and result types, `InferGetServerSidePropsType` and `InferGetStaticPropsType`; `next/app` exports `AppProps` and the default `App` class.
+`next` (`volt-rs`) exports `NextPage`, `GetServerSideProps`, `GetStaticProps`, `GetStaticPaths`, their context and result types, `InferGetServerSidePropsType` and `InferGetStaticPropsType`; `next/app` exports `AppProps` and the default `App` class. The `next` and `next/*` module declarations come with `volt-rs/env` (listed in the template `tsconfig.json` under `types`), so these imports type-check without installing Next.js.
 
 ## Not supported
 

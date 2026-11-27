@@ -55,11 +55,11 @@ volt speaks HTTP/1.1 and HTTP/2 (h2c). Put TLS in front with nginx, Caddy or a l
 | Response | Cache-Control |
 | --- | --- |
 | `/_volt/static/*` | `public, max-age=31536000, immutable` |
-| prerendered pages | `public, max-age=0, s-maxage=31536000, stale-while-revalidate` |
+| prerendered pages, `getStaticProps` pages without a Rust loader | `public, max-age=0, s-maxage=31536000, stale-while-revalidate` |
 | dynamic pages | `private, no-cache, no-store, max-age=0, must-revalidate` |
 | `public/*` | `public, max-age=0, must-revalidate` with ETag |
 | `/_volt/image` | `public, max-age=86400, stale-while-revalidate=604800` with ETag |
 
-Pages that export `revalidate = <seconds>` are cached in memory for that long.
+Pages that export `revalidate = <seconds>` are cached in memory for that long. Besides prerendered pages, the cache keeps at most `[server] page_cache` pages (default 1000) and evicts the oldest first.
 
 The server shuts down gracefully on SIGTERM and SIGINT, finishing in-flight requests for up to 10 seconds.

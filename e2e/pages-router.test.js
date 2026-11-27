@@ -138,6 +138,47 @@ await check("pages/api is not served", async () => {
   assert.equal(response.status, 404);
 });
 
+const stamp = (html) => /data-testid="rendered-at">([\d.]+)</.exec(html)?.[1];
+const data = (path) => fetch(`${base}/_volt/data?path=${encodeURIComponent(path)}`).then((r) => r.json());
+
+await check("client navigation reuses the props of the static HTML", async () => {
+  const html = await fetch(`${base}/static`).then((r) => r.text());
+  const state = await data("/static");
+  assert.equal(String(state.data.renderedAt), stamp(html));
+  const fresh = await data("/items/nav");
+  const later = await fetch(`${base}/items/nav`).then((r) => r.text());
+  assert.equal(String(fresh.data.renderedAt), stamp(later));
+});
+
+await check("getStaticProps with a request-dependent loader is never shared", async () => {
+  const as = (user) => fetch(`${base}/who`, { headers: { cookie: `user=${user}` } });
+  const alice = await as("alice");
+  assert.match(alice.headers.get("cache-control"), /private/);
+  assert.match(await alice.text(), /alice/);
+  const bob = await as("bob");
+  assert.match(bob.headers.get("cache-control"), /private/);
+  const body = await bob.text();
+  assert.match(body, /bob/);
+  assert.doesNotMatch(body, /alice/);
+});
+
+await check("static pages are cached per pathname and the cache is bounded", async () => {
+  const get = (path) => fetch(`${base}${path}`).then((r) => r.text()).then(stamp);
+  const first = await get("/items/a");
+  assert.equal(await get("/items/a?x=1"), first);
+  assert.equal(await get("/items/a?x=2"), first);
+  for (const id of ["b", "c", "d"]) await get(`/items/${id}`);
+  assert.notEqual(await get("/items/a"), first, "oldest entry evicted beyond page_cache");
+});
+
+await check("an app router page with an #__next element hydrates in place", async () => {
+  await page.goto(`${base}/hydrate`, { waitUntil: "networkidle" });
+  assert.equal(await page.locator("#__next").count(), 1);
+  assert.equal(await page.evaluate(() => document.querySelector("#__next").parentElement.tagName), "BODY");
+  await page.click("button:has-text('count 0')");
+  await page.locator("button", { hasText: "count 1" }).waitFor();
+});
+
 await check("no runtime or hydration errors", async () => {
   assert.deepEqual(errors, []);
 });
