@@ -16,11 +16,13 @@
 - Sass and SCSS stylesheets compiled with grass; `@use` and `@import` resolve relative to the file and `node_modules`.
 - Lightning CSS processing of non-Tailwind CSS: `@import` inlining, vendor prefixes and syntax lowering for the `browserslist` targets, minification in production.
 - Relative `url()` references in CSS (including Tailwind output) are copied to the build with content hashes.
-- `next/font/google` and `next/font/local` (also `volt-rs/font/*`): build-time `@font-face` generation, self-hosted Google Fonts cached in `.volt/cache/fonts`, font preloading for the root layout.
+- `next/font/google` and `next/font/local` (also `volt-rs/font/*`): build-time `@font-face` generation, self-hosted Google Fonts cached in `.volt/cache/fonts`, font preloading for the root layout (or `pages/_app` in the Pages Router).
 - Remote `@import`s are moved to the top of the combined stylesheet, `@import` of plain CSS from Sass and CSS modules is inlined, and relative `url()`s in Sass partials resolve relative to the partial.
 - Sass and CSS module compile errors show their message and location; importing a CSS module always includes its CSS.
 - Google fonts without `weight` fail with a clear error when the family catalog cannot be read; the cached catalog is refreshed weekly.
 - PostCSS: projects with a `postcss.config.*` and `postcss` installed run their plugins; Tailwind also compiles through `@tailwindcss/postcss` when its CLI is not installed.
+- `volt start` hands its process over to the Rust server, so stopping it also stops the server.
+- Fractional numbers in page data keep their exact value between the HTML and `/_volt/data`.
 
 ## 0.0.1
 

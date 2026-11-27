@@ -117,7 +117,7 @@ Each call becomes `{ className, style: { fontFamily, fontWeight?, fontStyle? }, 
 
 Options must be literals (strings, numbers, arrays, objects) because they are evaluated at build time, and the loader must be called directly (`const inter = Inter({...})`).
 
-Fonts declared by the root layout or a module it imports are preloaded on every page with `<link rel="preload" as="font" crossorigin>`; for Google fonts only the requested `subsets` are preloaded, and nothing is preloaded when `subsets` is omitted. Set `preload: false` to opt out.
+Fonts declared by the root layout (`pages/_app` in the Pages Router) or a module it imports are preloaded on every page with `<link rel="preload" as="font" crossorigin>`; for Google fonts only the requested `subsets` are preloaded, and nothing is preloaded when `subsets` is omitted. Set `preload: false` to opt out.
 
 Not supported: the metric-adjusted fallback fonts that Next.js generates (`adjustFontFallback` is accepted and ignored) and Google variable axes other than weight (`axes`).
 
