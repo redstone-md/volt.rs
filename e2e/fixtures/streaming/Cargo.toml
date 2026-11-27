@@ -1,0 +1,15 @@
+[package]
+name = "streaming"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "streaming"
+path = "server/main.rs"
+
+[dependencies]
+voltrs = "0.0.1"
+tokio = { version = "1", features = ["time"] }
+
+[workspace]
