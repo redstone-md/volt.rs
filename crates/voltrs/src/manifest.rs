@@ -46,6 +46,9 @@ pub struct RouteEntry {
     /// Rendered by the Pages Router: data requests also run `getServerSideProps` / `getStaticProps`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pages: bool,
+    /// Pages Router `getStaticProps` page: HTML and props are cached per pathname and shared by every visitor.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub static_props: bool,
     /// Concrete paths of a dynamic route prerendered from `getStaticPaths`, mapped to their HTML files.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub static_paths: BTreeMap<String, String>,
@@ -60,6 +63,11 @@ impl RouteEntry {
             .into_iter()
             .chain(self.static_paths.iter().map(|(path, file)| (path.as_str(), file.as_str())))
     }
+}
+
+/// The props file written next to a prerendered Pages Router HTML file.
+pub fn props_file(html_file: &str) -> String {
+    format!("{}.json", html_file.strip_suffix(".html").unwrap_or(html_file))
 }
 
 impl Manifest {

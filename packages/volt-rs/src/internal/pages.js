@@ -41,11 +41,25 @@ const normalize = (path) => {
   }
 };
 
-/** Runs `getStaticPaths` and returns concrete URLs. */
-export async function staticPaths(page, pattern) {
+// In production `getStaticPaths` runs once per worker, like once per build in Next.js; development reruns it.
+const pathsCache = new WeakMap();
+
+async function runStaticPaths(page, pattern) {
   const result = (await page.getStaticPaths({})) ?? {};
   const paths = (result.paths ?? []).map((entry) => (typeof entry === "string" ? entry : fillPattern(pattern, entry.params)));
   return { paths, fallback: result.fallback ?? false };
+}
+
+/** Runs `getStaticPaths` and returns concrete URLs. */
+export function staticPaths(page, pattern) {
+  if (process.env.NODE_ENV !== "production") return runStaticPaths(page, pattern);
+  let pending = pathsCache.get(page);
+  if (!pending) {
+    pending = runStaticPaths(page, pattern);
+    pending.catch(() => pathsCache.delete(page));
+    pathsCache.set(page, pending);
+  }
+  return pending;
 }
 
 function settle(result, base, isStatic, name) {

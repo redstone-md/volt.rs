@@ -91,6 +91,7 @@ export function createServer(routes, options = {}) {
           id,
           revalidate: null,
           dynamic: typeof page.getServerSideProps === "function" ? "force-dynamic" : "auto",
+          static: typeof page.getStaticProps === "function" && typeof page.getServerSideProps !== "function",
           paths: prerenderable ? (await staticPaths(page, id)).paths : [],
         });
       }

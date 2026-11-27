@@ -16,14 +16,14 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::assets::{StaticAssets, compressible, serve_public};
-use crate::cache::PageCache;
+use crate::cache::{CachedPage, PUBLIC_PAGE, PageCache};
 use crate::config::Config;
 use crate::context::{Ctx, RequestParts, State};
 use crate::dev::{EventStream, Hub};
 use crate::document::{Document, ERROR_ROUTE, NOT_FOUND_ROUTE, PageState, Site, error_overlay};
 use crate::error::{Error, ErrorKind, Result};
 use crate::log;
-use crate::manifest::{Manifest, STATIC_PREFIX};
+use crate::manifest::{Manifest, RouteEntry, STATIC_PREFIX};
 use crate::registry::{self, ActionDef, ApiDef, BoxFuture, LoaderDef, Payload};
 use crate::response::{IntoResponse, Response};
 use crate::router::{Params, RoutePattern, Router};
@@ -100,10 +100,11 @@ struct PropsResult {
     redirect: Option<RenderedRedirect>,
 }
 
-/// A rendered page with the caching hints its data functions returned.
+/// A rendered page with the caching hints and props its data functions returned.
 struct Page {
     response: Response,
     hints: CacheHints,
+    data: Option<Value>,
 }
 
 /// HTML produced by [`Server::prerender`].
@@ -111,6 +112,8 @@ pub struct Prerendered {
     pub html: String,
     /// `revalidate` seconds returned by `getStaticProps`.
     pub revalidate: Option<u64>,
+    /// Pages Router props, served to client navigations instead of rerunning `getStaticProps`.
+    pub data: Option<Value>,
 }
 
 pub(crate) struct Server {
@@ -166,7 +169,7 @@ impl Server {
         let server = Arc::new(Self {
             #[cfg(feature = "images")]
             images,
-            cache: PageCache::default(),
+            cache: PageCache::new(config.server.page_cache),
             hub: dev.then(Hub::default),
             config: Arc::new(config),
             state: Arc::new(state),
@@ -396,7 +399,10 @@ impl Server {
         };
         let pathname = self.rewrite(&pathname);
         let resolved = match self.resolve(ctx, &pathname, &search).await {
-            Ok(state) => self.with_props(state).await,
+            Ok(state) => match self.static_props(ctx, &state).await {
+                Some(data) => Ok(PageState { data, ..state }),
+                None => self.with_props(state).await,
+            },
             Err(error) => Err(error),
         };
         let state = match resolved {
@@ -409,6 +415,22 @@ impl Server {
             },
         };
         Response::json(&state).header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))
+    }
+
+    /// Props of a `getStaticProps` page from the page cache, rendering the page first on a miss, so that
+    /// navigations show the same data as the cached HTML.
+    async fn static_props(&self, ctx: &Ctx, state: &PageState) -> Option<Value> {
+        let build = self.current();
+        if self.dev || !build.manifest.route(&state.route).is_some_and(|r| self.is_static_route(r)) {
+            return None;
+        }
+        let page = self.serve_page(ctx, &state.pathname).await;
+        if page.response.status == StatusCode::OK { page.data } else { None }
+    }
+
+    /// Whether a route renders the same HTML for everyone: a `getStaticProps` page without a Rust loader.
+    fn is_static_route(&self, route: &RouteEntry) -> bool {
+        route.static_props && !self.loaders.contains_key(&route.id)
     }
 
     /// Runs the Pages Router data functions of the resolved route for a client navigation.
@@ -467,17 +489,22 @@ impl Server {
         if !matches!(*ctx.method(), Method::GET | Method::HEAD) {
             return Response::text("Method Not Allowed").status(StatusCode::METHOD_NOT_ALLOWED).into();
         }
-        let key = format!("{path}?{}", ctx.query_string());
         let build = self.current();
         let entry = build.pages.find(path).map(|(_, index, _)| &build.manifest.routes[*index]);
-        let cached_route =
-            entry.is_some_and(|e| e.prerendered.is_some() || e.revalidate.is_some() || !e.static_paths.is_empty());
+        let is_static = entry.is_some_and(|e| self.is_static_route(e));
+        // `getStaticProps` cannot see the query, so one entry per pathname serves every query string.
+        let (key, search) = if is_static {
+            (format!("{path}?"), String::new())
+        } else {
+            (format!("{path}?{}", ctx.query_string()), ctx.uri().query().map(|q| format!("?{q}")).unwrap_or_default())
+        };
+        let cached_route = is_static
+            || entry.is_some_and(|e| e.prerendered.is_some() || e.revalidate.is_some() || !e.static_paths.is_empty());
         if !self.dev
             && let Some(hit) = self.cache.get(&key)
         {
             return hit.into();
         }
-        let search = ctx.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
         let state = match self.resolve(ctx, path, &search).await {
             Ok(state) => state,
             Err(error) => match error.kind() {
@@ -490,7 +517,7 @@ impl Server {
         let page = self.render(&build, state).await;
         if !self.dev && page.response.status == StatusCode::OK && (cached_route || page.hints.is_static) {
             let ttl = page.hints.revalidate.or(entry.and_then(|e| e.revalidate)).map(Duration::from_secs);
-            self.cache.put(key, &page.response, ttl);
+            self.cache.put(key, CachedPage { response: page.response.clone(), data: page.data.clone() }, ttl);
         }
         page
     }
@@ -514,6 +541,7 @@ impl Server {
                 StatusCode::OK => Ok(Prerendered {
                     html: String::from_utf8_lossy(&page.response.body).into_owned(),
                     revalidate: page.hints.revalidate,
+                    data: page.data,
                 }),
                 status => Err(Error::internal(format!("prerender returned {status}"))),
             };
@@ -613,20 +641,25 @@ impl Server {
         if let Some(route) = rendered.route {
             state.route = route;
         }
-        if let Some(data) = rendered.data {
-            state.data = data;
+        if let Some(data) = &rendered.data {
+            state.data = data.clone();
         }
         let route = build.manifest.route(&state.route);
+        let mut hints = rendered.hints;
+        // A Rust loader sees the request (cookies, headers), so its output must never be shared.
+        if self.loaders.contains_key(&state.route) {
+            hints = CacheHints::default();
+        }
         let html = Document { manifest: &build.manifest, route, state: &state, dev: self.dev }.render(&rendered.html);
         let status = StatusCode::from_u16(rendered.status).unwrap_or(StatusCode::OK);
-        let cache = if route.is_some_and(|r| r.prerendered.is_some()) || rendered.hints.is_static {
-            "public, max-age=0, s-maxage=31536000, stale-while-revalidate"
+        let cache = if route.is_some_and(|r| r.prerendered.is_some()) || hints.is_static {
+            PUBLIC_PAGE
         } else {
             "private, no-cache, no-store, max-age=0, must-revalidate"
         };
         let response =
             Response::html(html).status(status).header(header::CACHE_CONTROL, HeaderValue::from_static(cache));
-        Ok(Page { response, hints: rendered.hints })
+        Ok(Page { response, hints, data: rendered.data })
     }
 
     /// Security headers, configured headers and on-the-fly gzip.
@@ -665,7 +698,13 @@ impl Server {
 
 impl From<Response> for Page {
     fn from(response: Response) -> Self {
-        Self { response, hints: CacheHints::default() }
+        Self { response, hints: CacheHints::default(), data: None }
+    }
+}
+
+impl From<CachedPage> for Page {
+    fn from(page: CachedPage) -> Self {
+        Self { response: page.response, hints: CacheHints::default(), data: page.data }
     }
 }
 

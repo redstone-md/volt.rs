@@ -23,6 +23,9 @@ struct RouteConfig {
     /// Concrete paths from a Pages Router `getStaticPaths`.
     #[serde(default)]
     paths: Vec<String>,
+    /// A Pages Router page with `getStaticProps`.
+    #[serde(default, rename = "static")]
+    is_static: bool,
 }
 
 pub struct Pipeline<'a> {
@@ -79,7 +82,7 @@ impl<'a> Pipeline<'a> {
         manifest.save(&self.project.out_dir)?;
 
         if !self.dev {
-            let static_paths = self.apply_route_config(&mut manifest).await?;
+            let static_paths = self.apply_route_config(&mut manifest, info).await?;
             if self.project.config.build.prerender {
                 self.prerender(&mut manifest, &routes, info, &static_paths).await?;
             }
@@ -92,7 +95,11 @@ impl<'a> Pipeline<'a> {
     }
 
     /// Reads `revalidate` and `dynamic` exports from the built server bundle and returns `getStaticPaths` results.
-    async fn apply_route_config(&self, manifest: &mut Manifest) -> Result<HashMap<String, Vec<String>>> {
+    async fn apply_route_config(
+        &self,
+        manifest: &mut Manifest,
+        info: &ServerInfo,
+    ) -> Result<HashMap<String, Vec<String>>> {
         let engine = Engine::start(EngineOptions {
             bundle: self.project.out_dir.join(&manifest.server),
             workers: 1,
@@ -107,6 +114,13 @@ impl<'a> Pipeline<'a> {
             if let Some(route) = manifest.routes.iter_mut().find(|r| r.id == config.id) {
                 route.revalidate = config.revalidate;
                 route.dynamic |= config.dynamic == "force-dynamic";
+                route.static_props = config.is_static;
+            }
+            if config.is_static && info.loaders.contains(&config.id) {
+                voltrs::log::warn(&format!(
+                    "{} has getStaticProps and a Rust loader: it renders per request and is never cached",
+                    config.id
+                ));
             }
             if !config.paths.is_empty() {
                 static_paths.insert(config.id, config.paths);
@@ -160,6 +174,12 @@ impl<'a> Pipeline<'a> {
             }
             std::fs::write(&path, page.html)?;
             let file = format!("prerender/{name}");
+            if let Some(data) = &page.data {
+                std::fs::write(
+                    self.project.out_dir.join(voltrs::manifest::props_file(&file)),
+                    serde_json::to_vec(data)?,
+                )?;
+            }
             if let Some(entry) = owners.get(&url).and_then(|id| manifest.routes.iter_mut().find(|r| &r.id == id)) {
                 if entry.id == url {
                     entry.prerendered = Some(file);

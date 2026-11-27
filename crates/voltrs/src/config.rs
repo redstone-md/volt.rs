@@ -56,11 +56,13 @@ pub struct ServerConfig {
     /// Per-worker heap limit in megabytes.
     pub memory_limit_mb: usize,
     pub compress: bool,
+    /// Pages rendered at runtime kept in the in-memory page cache, on top of the prerendered ones.
+    pub page_cache: usize,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { host: "0.0.0.0".into(), port: 3000, workers: 0, memory_limit_mb: 256, compress: true }
+        Self { host: "0.0.0.0".into(), port: 3000, workers: 0, memory_limit_mb: 256, compress: true, page_cache: 1000 }
     }
 }
 
