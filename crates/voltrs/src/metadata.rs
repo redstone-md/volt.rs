@@ -92,4 +92,27 @@ mod tests {
         assert_eq!(assets.serve("/blog/x/opengraph-image.png", None, &conditional).unwrap().status, 304);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn serves_files_below_catch_alls() {
+        let dir = std::env::temp_dir().join(format!("volt-metadata-catch-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("metadata")).unwrap();
+        std::fs::write(dir.join("metadata/a.png"), b"a").unwrap();
+        std::fs::write(dir.join("metadata/b.png"), b"b").unwrap();
+        let entries = [
+            MetadataFile { route: "/docs/[...slug]/icon.png".into(), file: "metadata/a.png".into(), hash: "a".into() },
+            MetadataFile {
+                route: "/shop/[[...rest]]/icon.png".into(),
+                file: "metadata/b.png".into(),
+                hash: "b".into(),
+            },
+        ];
+        let assets = MetadataAssets::load(&dir, &entries);
+        let headers = HeaderMap::new();
+        assert_eq!(&assets.serve("/docs/a/b/icon.png", None, &headers).unwrap().body[..], b"a");
+        assert!(assets.serve("/docs/icon.png", None, &headers).is_none());
+        assert_eq!(&assets.serve("/shop/icon.png", None, &headers).unwrap().body[..], b"b");
+        assert_eq!(&assets.serve("/shop/x/y/icon.png", None, &headers).unwrap().body[..], b"b");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

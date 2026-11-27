@@ -172,7 +172,7 @@ impl RoutePattern {
             .collect();
         let mut params = Vec::new();
         let mut index = 0;
-        for segment in &self.segments {
+        for (position, segment) in self.segments.iter().enumerate() {
             match segment {
                 Segment::Static(expected) => {
                     if parts.get(index) != Some(expected) {
@@ -185,14 +185,17 @@ impl RoutePattern {
                     index += 1;
                 }
                 Segment::CatchAll(name) | Segment::OptionalCatchAll(name) => {
-                    let rest = parts[index.min(parts.len())..].to_vec();
+                    // Segments after a catch-all (metadata files such as `[...slug]/icon.png`) take the last parts.
+                    let after = self.segments.len() - position - 1;
+                    let end = parts.len().checked_sub(after)?.max(index);
+                    let rest = parts[index..end].to_vec();
                     if rest.is_empty() && matches!(segment, Segment::CatchAll(_)) {
                         return None;
                     }
                     if !rest.is_empty() {
                         params.push((name.clone(), ParamValue::Many(rest)));
                     }
-                    index = parts.len();
+                    index = end;
                 }
             }
         }
@@ -305,6 +308,18 @@ mod tests {
         let opt = RoutePattern::parse("/shop/[[...rest]]");
         assert!(opt.matches("/shop").is_some());
         assert_eq!(opt.matches("/shop/x%20y").unwrap().get("rest"), Some("x y"));
+    }
+
+    #[test]
+    fn matches_segments_after_catch_alls() {
+        let icon = RoutePattern::parse("/docs/[...slug]/icon.png");
+        assert_eq!(icon.matches("/docs/a/b/icon.png").unwrap().get_all("slug"), vec!["a", "b"]);
+        assert!(icon.matches("/docs/icon.png").is_none());
+        assert!(icon.matches("/docs/a/b").is_none());
+        let optional = RoutePattern::parse("/shop/[[...rest]]/opengraph-image.png");
+        assert!(optional.matches("/shop/opengraph-image.png").unwrap().get("rest").is_none());
+        assert_eq!(optional.matches("/shop/x/opengraph-image.png").unwrap().get("rest"), Some("x"));
+        assert!(optional.matches("/opengraph-image.png").is_none());
     }
 
     #[test]

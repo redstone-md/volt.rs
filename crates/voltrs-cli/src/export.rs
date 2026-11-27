@@ -1,5 +1,6 @@
 //! `volt export`: writes the prerendered build as a static site.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -99,14 +100,37 @@ impl<'a> Export<'a> {
         for (name, body) in renderer.files().await {
             write(&out.join(name), &body)?;
         }
-        // Metadata files in dynamic segments have no single URL, so only static ones are exported.
-        for file in self.manifest.metadata.iter().filter(|f| !RoutePattern::parse(&f.route).is_dynamic()) {
-            write(
-                &out.join(file.route.trim_start_matches('/')),
-                &std::fs::read(self.project.out_dir.join(&file.file))?,
-            )?;
+        for file in &self.manifest.metadata {
+            let body = std::fs::read(self.project.out_dir.join(&file.file))?;
+            for url in self.metadata_urls(&file.route) {
+                write(&out.join(url.trim_start_matches('/')), &body)?;
+            }
         }
         Ok(pages)
+    }
+
+    /// Concrete URLs of a metadata file: its route when static, else one per exported page below its segment.
+    fn metadata_urls(&self, route: &str) -> BTreeSet<String> {
+        let pattern = RoutePattern::parse(route);
+        if !pattern.is_dynamic() {
+            return BTreeSet::from([pattern.as_str().to_owned()]);
+        }
+        let dir = pattern.as_str().rsplit_once('/').map_or("", |(dir, _)| dir);
+        let mut urls = BTreeSet::new();
+        for entry in &self.manifest.routes {
+            let id = RoutePattern::parse(&entry.id);
+            if id.as_str() != dir && !id.as_str().starts_with(&format!("{dir}/")) {
+                continue;
+            }
+            for path in &entry.prerendered {
+                let Some(params) = id.matches(path) else { continue };
+                let url = pattern.fill(&params);
+                if !url.split('/').any(|part| part == ".." || part == ".") {
+                    urls.insert(url);
+                }
+            }
+        }
+        urls
     }
 
     /// `export_dir` is emptied before writing, so refuse anything that holds project files.

@@ -154,9 +154,18 @@ pub fn write<'a>(files: impl IntoIterator<Item = &'a File>, out_dir: &Path) -> R
     let dir = out_dir.join(METADATA_DIR);
     crate::util::reset_dir(&dir)?;
     let mut entries = BTreeMap::new();
+    // Every route repeats the files of its parent segments, so the same file shows up many times.
+    let mut sources: BTreeMap<&str, &Path> = BTreeMap::new();
     for file in files {
-        if entries.contains_key(&file.route) {
-            continue;
+        match sources.insert(&file.route, &file.source) {
+            Some(existing) if existing == file.source => continue,
+            Some(existing) => bail!(
+                "two metadata files resolve to `{}`: {} and {}; keep one",
+                file.route,
+                existing.display(),
+                file.source.display()
+            ),
+            None => {}
         }
         let name = format!("{}.{}", file.hash, file.ext);
         std::fs::copy(&file.source, dir.join(&name))
@@ -226,6 +235,21 @@ mod tests {
         let entries = write(&files, &out).unwrap();
         assert_eq!(entries[0].route, "/blog/[slug]/icon.svg");
         assert!(out.join(&entries[0].file).is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_two_files_at_one_url() {
+        let dir = std::env::temp_dir().join(format!("volt-metadata-groups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("(shop)")).unwrap();
+        std::fs::write(dir.join("icon.png"), b"a").unwrap();
+        std::fs::write(dir.join("(shop)/icon.png"), b"b").unwrap();
+        let root = File::scan(&dir, "", true).unwrap();
+        let shop = File::scan(&dir.join("(shop)"), "/(shop)", false).unwrap();
+        assert_eq!(write(root.iter().chain(&root), &dir.join("out")).unwrap().len(), 1);
+        let error = write(root.iter().chain(&shop), &dir.join("out")).unwrap_err().to_string();
+        assert!(error.contains("two metadata files resolve to `/icon.png`"), "{error}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
