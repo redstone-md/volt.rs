@@ -1,6 +1,7 @@
 //! The build pipeline shared by `volt dev`, `volt build` and `volt export`.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -12,8 +13,11 @@ use voltrs::ssr::{Engine, EngineOptions};
 
 use crate::bundler::Bundle;
 use crate::css::Css;
+use crate::fonts::Fonts;
+use crate::media::Media;
 use crate::project::Project;
 use crate::routes::Route;
+use crate::styles::Styles;
 use crate::util::hash;
 
 /// Route exports read from the server bundle by `__VOLT__.routes()`.
@@ -97,16 +101,24 @@ impl<'a> Pipeline<'a> {
         if !self.dev {
             crate::util::reset_dir(&self.project.static_dir())?;
         }
-        let bundle = Bundle::new(self.project, &routes, self.dev);
+        let media = Media::new(self.project.static_dir().join("media"), self.project.config.static_prefix());
+        let styles = Arc::new(Styles::new(self.project, media.clone())?);
+        let fonts = Arc::new(Fonts::new(media, self.project.cache_dir()));
+        let bundle = Bundle::new(self.project, &routes, self.dev, styles.clone(), fonts);
         let (server, client) = tokio::join!(bundle.server(), bundle.client());
         let (server, client) = (server?, client?);
-        let css = Css::new(self.project, !self.dev).build(&server.css)?;
+        let css = Css::new(self.project, &styles, !self.dev).build(&server.css)?;
 
         let mut manifest = Manifest {
             build_id: String::new(),
             dev: self.dev,
             server: server.file.clone(),
-            client: ClientAssets { entry: client.entry, css: css.into_iter().collect(), preload: client.preload },
+            client: ClientAssets {
+                entry: client.entry,
+                css: css.into_iter().collect(),
+                preload: client.preload,
+                fonts: server.fonts,
+            },
             routes: routes
                 .iter()
                 .map(|r| RouteEntry {

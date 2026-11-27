@@ -1,4 +1,19 @@
+// CSS module declarations come first: TypeScript picks the first of equally specific wildcard patterns.
+declare module "*.module.css" {
+  const classes: { readonly [key: string]: string };
+  export default classes;
+}
+declare module "*.module.scss" {
+  const classes: { readonly [key: string]: string };
+  export default classes;
+}
+declare module "*.module.sass" {
+  const classes: { readonly [key: string]: string };
+  export default classes;
+}
 declare module "*.css";
+declare module "*.scss";
+declare module "*.sass";
 declare module "*.png" {
   const image: import("./image").StaticImageData;
   export default image;
@@ -69,4 +84,27 @@ declare module "next/form" {
 declare module "next/dynamic" {
   export * from "volt-rs/dynamic";
   export { default } from "volt-rs/dynamic";
+}
+declare module "*.woff" {
+  const url: string;
+  export default url;
+}
+declare module "*.woff2" {
+  const url: string;
+  export default url;
+}
+declare module "*.ttf" {
+  const url: string;
+  export default url;
+}
+declare module "*.otf" {
+  const url: string;
+  export default url;
+}
+declare module "next/font/google" {
+  export * from "volt-rs/font/google";
+}
+declare module "next/font/local" {
+  export { default } from "volt-rs/font/local";
+  export * from "volt-rs/font/local";
 }

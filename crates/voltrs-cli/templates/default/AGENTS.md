@@ -63,7 +63,8 @@ This is a [volt.rs](https://github.com/redstone-md/volt.rs) app: React 19 pages,
 - Shared state: register with `App::new().state(value)` and read with `ctx.state::<T>()`.
 - Static pages: dynamic routes export `generateStaticParams()` (from the page or a parent layout) to be prerendered by `npm run build`; add `export const dynamicParams = false` to answer other params with 404. `export const revalidate = 60` re-renders a cached page in the background after 60 seconds; `revalidate = 0` renders on every request. Generators run in QuickJS at build time: no Node APIs, no network. Pages with a Rust loader are never prerendered.
 - After a mutation, purge cached pages with `ctx.revalidate_path("/posts/[slug]")` or `ctx.revalidate_prefix("/posts")`.
-- Styling: Tailwind CSS v4 in `app/globals.css`. Merge classes with `cn()`.
+- Styling: Tailwind CSS v4 in `app/globals.css`. Merge classes with `cn()`. CSS Modules (`*.module.css`, `*.module.scss`) and Sass also work.
+- Fonts: `next/font/google` (`Inter({ subsets: ["latin"], variable: "--font-sans" })`) or `next/font/local` called at module top level with literal options; apply `font.className` or `font.variable` in the root layout.
 
 ## Before you finish
 

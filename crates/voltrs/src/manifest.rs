@@ -27,6 +27,9 @@ pub struct ClientAssets {
     pub entry: String,
     pub css: Vec<String>,
     pub preload: Vec<String>,
+    /// Font files preloaded on every page (fonts declared by the root layout).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fonts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

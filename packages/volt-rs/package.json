@@ -28,6 +28,8 @@
     "./actions": { "types": "./src/actions.d.ts", "default": "./src/actions.js" },
     "./seo": { "types": "./src/seo.d.ts", "default": "./src/seo.js" },
     "./dynamic": { "types": "./src/dynamic.d.ts", "default": "./src/dynamic.js" },
+    "./font/google": { "types": "./src/font/google.d.ts", "default": "./src/font/google.js" },
+    "./font/local": { "types": "./src/font/local.d.ts", "default": "./src/font/local.js" },
     "./env": { "types": "./src/env.d.ts" },
     "./internal/*": "./src/internal/*.js",
     "./package.json": "./package.json"

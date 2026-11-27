@@ -110,6 +110,12 @@ impl Document<'_> {
     fn head(&self) -> String {
         let client = &self.manifest.client;
         let mut head = String::new();
+        for font in &client.fonts {
+            head.push_str(&format!(
+                "<link rel=\"preload\" href=\"{font}\" as=\"font\" type=\"{}\" crossorigin=\"\">",
+                font_type(font)
+            ));
+        }
         for css in &client.css {
             head.push_str(&format!("<link rel=\"stylesheet\" href=\"{css}\">"));
         }
@@ -130,6 +136,15 @@ impl Document<'_> {
             body.push_str(&crate::dev::client(self.base_path));
         }
         body
+    }
+}
+
+fn font_type(url: &str) -> &'static str {
+    match url.rsplit('.').next() {
+        Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        _ => "font/woff2",
     }
 }
 
@@ -154,5 +169,28 @@ mod tests {
     #[test]
     fn escapes_script_json() {
         assert_eq!(script_json(&"</script>"), "\"\\u003c/script>\"");
+    }
+
+    #[test]
+    fn preloads_fonts() {
+        let mut manifest = Manifest::default();
+        manifest.client.fonts = vec!["/_volt/static/media/a-1.woff2".into()];
+        manifest.client.css = vec!["/_volt/static/css/app.css".into()];
+        let state = PageState {
+            route: "/".into(),
+            pathname: "/".into(),
+            search: String::new(),
+            params: Value::Null,
+            search_params: Value::Null,
+            data: Value::Null,
+            status: 200,
+            error: None,
+            build_id: String::new(),
+            site: Site { name: String::new(), url: String::new() },
+        };
+        let head = Document { manifest: &manifest, route: None, state: &state, dev: false }.head();
+        assert!(head.starts_with(
+            "<link rel=\"preload\" href=\"/_volt/static/media/a-1.woff2\" as=\"font\" type=\"font/woff2\" crossorigin=\"\">"
+        ));
     }
 }

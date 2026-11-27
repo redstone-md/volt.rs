@@ -1,15 +1,16 @@
 //! Client and server bundles built with rolldown.
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use arcstr::ArcStr;
 use rolldown::plugin::{
-    HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn,
-    HookUsage, Plugin, PluginContext, SharedLoadPluginContext,
+    HookBuildEndArgs, HookLoadArgs, HookLoadOutput, HookLoadReturn, HookNoopReturn, HookResolveIdArgs,
+    HookResolveIdOutput, HookResolveIdReturn, HookTransformArgs, HookTransformOutput, HookTransformReturn, HookUsage,
+    Plugin, PluginContext, SharedLoadPluginContext, SharedTransformPluginContext,
 };
 use rolldown::{
     Bundler, BundlerOptions, InputItem, OutputFormat, Platform, RawMinifyOptions, ResolveOptions, SourceMapType,
@@ -17,17 +18,22 @@ use rolldown::{
 use rolldown_common::side_effects::HookSideEffects;
 use rolldown_common::{ModuleType, Output};
 
+use crate::css::Stylesheet;
+use crate::fonts::{FONT_MODULE, Fonts};
+use crate::media::Media;
 use crate::project::Project;
 use crate::routes::{Kind, Module, Route};
+use crate::styles::{ClassPart, CssModule, Styles};
 use crate::util::{hash, to_slash};
 
 const CLIENT_ENTRY: &str = "volt:client";
 const SERVER_ENTRY: &str = "volt:server";
 const MEDIA: [&str; 13] =
     ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "ico", "woff", "woff2", "ttf", "otf", "mp4"];
+const SCRIPTS: [&str; 8] = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
 
 /// Next.js import paths served by the volt runtime.
-const COMPAT: [(&str, &str); 11] = [
+const COMPAT: [(&str, &str); 13] = [
     ("next/link", "volt-rs/link"),
     ("next/navigation", "volt-rs/navigation"),
     ("next/router", "volt-rs/router"),
@@ -38,16 +44,24 @@ const COMPAT: [(&str, &str); 11] = [
     ("next/head", "volt-rs/head"),
     ("next/form", "volt-rs/form"),
     ("next/dynamic", "volt-rs/dynamic"),
+    ("next/font/google", "volt-rs/font/google"),
+    ("next/font/local", "volt-rs/font/local"),
     ("next", "volt-rs"),
 ];
 
 #[derive(Debug)]
 struct Shared {
     modules: HashMap<String, String>,
-    css: Mutex<BTreeSet<String>>,
-    media_dir: PathBuf,
-    static_prefix: String,
+    /// Stylesheets seen while loading, keyed by module id; ordered later by module evaluation order.
+    css: Mutex<BTreeMap<String, Stylesheet>>,
+    media: Media,
+    styles: Arc<Styles>,
+    fonts: Arc<Fonts>,
     root: PathBuf,
+    root_layout: Option<String>,
+    preload_fonts: Mutex<Vec<String>>,
+    /// Module ids in evaluation order, recorded when the build ends.
+    order: Mutex<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -74,15 +88,8 @@ impl VoltPlugin {
     /// Copies an imported media file into the static dir and exports its URL and size.
     fn media(&self, id: &str, ext: &str) -> HookLoadReturn {
         let path = Path::new(strip_query(id));
+        let url = self.0.media.copy(path)?;
         let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
-        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "asset".into());
-        let name = format!("{stem}-{}.{ext}", hash(&bytes));
-        let target = self.0.media_dir.join(&name);
-        if !target.exists() {
-            std::fs::create_dir_all(&self.0.media_dir)?;
-            std::fs::write(&target, &bytes)?;
-        }
-        let url = format!("{}media/{name}", self.0.static_prefix);
         let code = match imagesize::blob_size(&bytes) {
             Ok(size) if !matches!(ext, "woff" | "woff2" | "ttf" | "otf" | "mp4") => {
                 format!("export default {{ src: {url:?}, width: {}, height: {} }};", size.width, size.height)
@@ -91,6 +98,95 @@ impl VoltPlugin {
         };
         Self::module(code, false)
     }
+
+    fn stylesheet(&self, id: &str, sheet: Stylesheet) {
+        if let Ok(mut css) = self.0.css.lock() {
+            css.insert(id.to_owned(), sheet);
+        }
+    }
+
+    /// Global stylesheets load as empty modules; CSS modules export their scoped class names.
+    fn css(&self, id: &str) -> HookLoadReturn {
+        let id = strip_query(id);
+        let path = Path::new(id);
+        if !crate::styles::is_module(path) {
+            self.stylesheet(id, Stylesheet::File(path.to_path_buf()));
+            return Self::module("", true);
+        }
+        let module = self.0.styles.module(path)?;
+        self.stylesheet(id, Stylesheet::Compiled(module.css.clone()));
+        Self::module(css_module_code(&module), false)
+    }
+
+    /// Font files declared by the root layout and the modules it imports.
+    fn root_fonts(&self, ctx: &PluginContext) -> Vec<String> {
+        let Some(root) = &self.0.root_layout else { return Vec::new() };
+        let prefix = format!("\0{FONT_MODULE}");
+        let mut files: Vec<String> = Vec::new();
+        for id in execution_order(ctx, root, false) {
+            if let Some(font) = id.strip_prefix(&prefix).and_then(|key| self.0.fonts.get(key)) {
+                for file in &font.preload {
+                    if !files.contains(file) {
+                        files.push(file.clone());
+                    }
+                }
+            }
+        }
+        files
+    }
+}
+
+/// Modules reachable from `entry` in ES evaluation order: imports before importers, in source order.
+fn execution_order(ctx: &PluginContext, entry: &str, dynamic: bool) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    let mut stack = vec![(entry.to_owned(), false)];
+    while let Some((id, expanded)) = stack.pop() {
+        if expanded {
+            order.push(id);
+            continue;
+        }
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        stack.push((id.clone(), true));
+        if let Some(info) = ctx.get_module_info(&id) {
+            let imports =
+                info.imported_ids.iter().chain(dynamic.then_some(&info.dynamically_imported_ids).into_iter().flatten());
+            let children: Vec<String> = imports.map(|i| i.as_str().to_owned()).collect();
+            stack.extend(children.into_iter().rev().filter(|c| !seen.contains(c)).map(|c| (c, false)));
+        }
+    }
+    order
+}
+
+/// JavaScript for a CSS module: `export default { local: "scoped composed..." }`.
+fn css_module_code(module: &CssModule) -> String {
+    let mut imports: Vec<String> = Vec::new();
+    let mut entries = Vec::new();
+    for (local, parts) in &module.exports {
+        let mut values = Vec::new();
+        for part in parts {
+            values.push(match part {
+                ClassPart::Name(name) => format!("{name:?}"),
+                ClassPart::Import { specifier, name } => {
+                    let index = match imports.iter().position(|s| s == specifier) {
+                        Some(index) => index,
+                        None => {
+                            imports.push(specifier.clone());
+                            imports.len() - 1
+                        }
+                    };
+                    format!("d{index}[{name:?}]")
+                }
+            });
+        }
+        entries.push(format!("  {local:?}: {},", values.join(" + \" \" + ")));
+    }
+    let mut code: String =
+        imports.iter().enumerate().map(|(i, specifier)| format!("import d{i} from {specifier:?};\n")).collect();
+    code.push_str(&format!("export default {{\n{}\n}};\n", entries.join("\n")));
+    code
 }
 
 impl Plugin for VoltPlugin {
@@ -99,11 +195,11 @@ impl Plugin for VoltPlugin {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::ResolveId | HookUsage::Load
+        HookUsage::ResolveId | HookUsage::Load | HookUsage::Transform | HookUsage::BuildEnd
     }
 
     async fn resolve_id(&self, ctx: &PluginContext, args: &HookResolveIdArgs<'_>) -> HookResolveIdReturn {
-        if self.0.modules.contains_key(args.specifier) {
+        if self.0.modules.contains_key(args.specifier) || args.specifier.starts_with(FONT_MODULE) {
             return Ok(Some(HookResolveIdOutput { id: format!("\0{}", args.specifier).into(), ..Default::default() }));
         }
         let virtual_importer = args.importer.is_some_and(|i| i.starts_with('\0'));
@@ -124,22 +220,44 @@ impl Plugin for VoltPlugin {
         {
             return Self::module(code.clone(), true);
         }
+        if let Some(key) = args.id.strip_prefix('\0').and_then(|id| id.strip_prefix(FONT_MODULE)) {
+            let font = self.0.fonts.get(key).with_context(|| format!("unknown font {key}"))?;
+            self.stylesheet(args.id, Stylesheet::Compiled(font.css.clone()));
+            return Self::module("", true);
+        }
         match extension(args.id).as_deref() {
-            Some("css") => {
-                if let Ok(mut css) = self.0.css.lock() {
-                    css.insert(strip_query(args.id).to_owned());
-                }
-                Self::module("", true)
-            }
+            Some(ext) if crate::styles::is_stylesheet(ext) => self.css(args.id),
             Some(ext) if MEDIA.contains(&ext) => self.media(args.id, ext),
             _ => Ok(None),
         }
+    }
+
+    async fn transform(&self, _ctx: SharedTransformPluginContext, args: &HookTransformArgs<'_>) -> HookTransformReturn {
+        if args.id.starts_with('\0') || !extension(args.id).is_some_and(|ext| SCRIPTS.contains(&ext.as_str())) {
+            return Ok(None);
+        }
+        let transformed = crate::fonts::transform(&self.0.fonts, strip_query(args.id), args.code)?;
+        Ok(transformed.map(|t| HookTransformOutput { code: Some(t.code), map: t.map.into(), ..Default::default() }))
+    }
+
+    async fn build_end(&self, ctx: &PluginContext, _args: Option<&HookBuildEndArgs<'_>>) -> HookNoopReturn {
+        let fonts = self.root_fonts(ctx);
+        if let Ok(mut preload) = self.0.preload_fonts.lock() {
+            *preload = fonts;
+        }
+        let order = execution_order(ctx, &format!("\0{SERVER_ENTRY}"), true);
+        if let Ok(mut recorded) = self.0.order.lock() {
+            *recorded = order;
+        }
+        Ok(())
     }
 }
 
 pub struct ServerBundle {
     pub file: String,
-    pub css: Vec<PathBuf>,
+    pub css: Vec<Stylesheet>,
+    /// Font files to preload on every page: those declared by the root layout and its imports.
+    pub fonts: Vec<String>,
 }
 
 pub struct ClientBundle {
@@ -154,12 +272,14 @@ pub struct Bundle<'a> {
     /// Pages Router document, imported by the server bundle only.
     document: Option<Module>,
     dev: bool,
+    styles: Arc<Styles>,
+    fonts: Arc<Fonts>,
 }
 
 impl<'a> Bundle<'a> {
-    pub fn new(project: &'a Project, routes: &'a [Route], dev: bool) -> Self {
+    pub fn new(project: &'a Project, routes: &'a [Route], dev: bool, styles: Arc<Styles>, fonts: Arc<Fonts>) -> Self {
         let document = crate::routes::document(project.pages_dir.as_deref());
-        Self { project, routes, document, dev }
+        Self { project, routes, document, dev, styles, fonts }
     }
 
     /// Imports a route module as the namespace `name`.
@@ -266,12 +386,28 @@ impl<'a> Bundle<'a> {
     }
 
     fn shared(&self, client: bool) -> Arc<Shared> {
+        // The App Router root layout wraps every app page; `_app` plays that role in the Pages Router.
+        let root_layout = self
+            .routes
+            .iter()
+            .find_map(|route| match &route.kind {
+                Kind::App => route.segments.first()?.layout.as_ref(),
+                Kind::Pages { app } => Some(app),
+            })
+            .and_then(|module| match module {
+                Module::File(path) => Some(to_slash(path)),
+                Module::Builtin(_) => None,
+            });
         Arc::new(Shared {
             modules: self.modules(client),
             css: Mutex::default(),
-            media_dir: self.project.static_dir().join("media"),
-            static_prefix: self.project.config.static_prefix(),
+            media: Media::new(self.project.static_dir().join("media"), self.project.config.static_prefix()),
+            styles: self.styles.clone(),
+            fonts: self.fonts.clone(),
             root: self.project.root.clone(),
+            root_layout,
+            preload_fonts: Mutex::default(),
+            order: Mutex::default(),
         })
     }
 
@@ -359,20 +495,17 @@ impl<'a> Bundle<'a> {
         let file = format!("server-{}.js", hash(chunk.code.as_bytes()));
         std::fs::write(dir.join(&file), &chunk.code)?;
 
-        let collected = shared.css.lock().map(|c| c.clone()).unwrap_or_default();
-        let mut css: Vec<PathBuf> = Vec::new();
-        for id in &chunk.module_ids {
-            let id = strip_query(id.as_str());
-            if collected.contains(id) && !css.iter().any(|p| p == Path::new(id)) {
-                css.push(PathBuf::from(id));
+        let mut collected = shared.css.lock().map(|c| c.clone()).unwrap_or_default();
+        let mut css: Vec<Stylesheet> = Vec::new();
+        let order = shared.order.lock().map(|o| o.clone()).unwrap_or_default();
+        for id in &order {
+            if let Some(sheet) = collected.remove(strip_query(id)) {
+                css.push(sheet);
             }
         }
-        for id in collected {
-            if !css.iter().any(|p| p == Path::new(&id)) {
-                css.push(PathBuf::from(id));
-            }
-        }
-        Ok(ServerBundle { file: format!("server/{file}"), css })
+        css.extend(collected.into_values());
+        let fonts = shared.preload_fonts.lock().map(|f| f.clone()).unwrap_or_default();
+        Ok(ServerBundle { file: format!("server/{file}"), css, fonts })
     }
 
     /// Builds the browser bundle with one lazy chunk per route.
@@ -406,7 +539,7 @@ impl<'a> Bundle<'a> {
         let facade = |chunk: &rolldown_common::OutputChunk| chunk.facade_module_id.as_ref().map(|id| id.to_string());
         let entry_chunk = chunks
             .values()
-            .find(|c| c.is_entry && facade(c).as_deref() == Some(&format!("\0{CLIENT_ENTRY}")))
+            .find(|c| c.is_entry && facade(c).as_deref() == Some(format!("\0{CLIENT_ENTRY}").as_str()))
             .context("client bundle has no entry chunk")?;
         let entry_files = closure(&entry_chunk.filename);
         let entry_set: HashSet<&String> = entry_files.iter().collect();
