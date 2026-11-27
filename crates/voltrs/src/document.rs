@@ -146,7 +146,7 @@ impl Document<'_> {
             self.manifest.client.entry
         );
         if self.dev {
-            body.push_str(&crate::dev::client(self.base_path));
+            body.push_str(&crate::dev::client(self.base_path, self.manifest.revision));
         }
         body
     }
@@ -321,7 +321,7 @@ pre{{white-space:pre-wrap;background:#18181b;border:1px solid #27272a;border-rad
 </style></head><body><main><h1>⚡ {t}</h1><pre>{d}</pre></main>{c}</body></html>",
         t = escape_html(title),
         d = escape_html(detail),
-        c = crate::dev::client(base_path)
+        c = crate::dev::client(base_path, 0)
     )
 }
 

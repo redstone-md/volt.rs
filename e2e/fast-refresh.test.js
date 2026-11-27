@@ -23,11 +23,15 @@ await page.evaluate(() => (window.__marker = true));
 
 await check("development builds install the refresh runtime", async () => {
   assert.equal(await page.evaluate(() => typeof window.__VOLT_REFRESH__?.apply), "function");
-  const cache = await page.evaluate(async () => {
+  const [cache, revalidated] = await page.evaluate(async () => {
     const script = document.querySelector('script[type="module"][src]');
-    return (await fetch(script.src)).headers.get("cache-control");
+    const response = await fetch(script.src);
+    const etag = response.headers.get("etag");
+    const again = await fetch(script.src, { headers: { "if-none-match": etag } });
+    return [response.headers.get("cache-control"), etag && again.status];
   });
   assert.equal(cache, "no-cache");
+  assert.equal(revalidated, 304);
 });
 
 await check("component edits apply in place and keep state", async () => {
@@ -78,11 +82,60 @@ await check("css edits swap the stylesheet", async () => {
   assert.ok(await marked(), "the page reloaded");
 });
 
-await check("changed non-component exports reload the page", async () => {
+await check("constant edits reach their importers in place", async () => {
   edit("app/label.ts", "Label one", "Label two");
+  await page.locator("#label", { hasText: "Label two" }).waitFor({ timeout: 20_000 });
+  assert.equal(await text("#increment"), "Count: 2");
+  assert.equal(await page.inputValue("#text"), "kept");
+  assert.ok(await marked(), "the page reloaded");
+});
+
+await check("helpers that close over a changed constant update their callers", async () => {
+  edit("app/helper.ts", "Helper one", "Helper two");
+  await page.locator("#helper", { hasText: "Helper two" }).waitFor({ timeout: 20_000 });
+  assert.equal(await text("#increment"), "Count: 2");
+  assert.ok(await marked(), "the page reloaded");
+});
+
+await check("updates evaluate only the modules that changed", async () => {
+  const evaluations = () => page.evaluate(() => window.__evaluations);
+  const before = await evaluations();
+  edit("app/page.tsx", ">Home edited<", ">Home again<");
+  await page.locator("#title", { hasText: "Home again" }).waitFor({ timeout: 20_000 });
+  edit("app/page.tsx", ">Home again<", ">Home edited<");
+  await page.locator("#title", { hasText: "Home edited" }).waitFor({ timeout: 20_000 });
+  assert.equal(await evaluations(), before);
+  assert.ok(await marked(), "the page reloaded");
+});
+
+await check("render errors without an error boundary show an overlay and the fix renders again", async () => {
+  const boom = '  if (count > 0) throw new Error("render boom");\n';
+  edit("app/counter.tsx", "  return (\n", `${boom}  return (\n`);
+  await overlay.locator("pre", { hasText: "render boom" }).waitFor({ timeout: 20_000 });
+  edit("app/counter.tsx", boom, "");
+  await page.locator("#message", { hasText: "Version three" }).waitFor({ timeout: 20_000 });
+  await overlay.waitFor({ state: "detached" });
+  await page.click("#increment");
+  assert.equal(await text("#increment"), "Count: 1");
+  assert.ok(await marked(), "the page reloaded");
+});
+
+await check("changed route config reloads the page", async () => {
+  edit("app/layout.tsx", 'title: "fast-refresh"', 'title: "fast-refresh edited"');
   await page.waitForFunction(() => !window.__marker, null, { timeout: 20_000 });
-  await page.locator("#label", { hasText: "Label two" }).waitFor();
-  assert.equal(await text("#message"), "Version three");
+  await page.waitForFunction(() => document.title === "fast-refresh edited");
+  assert.equal(await text("#label"), "Label two");
+});
+
+await check("installed package changes reload the page on the next update", async () => {
+  await page.evaluate(() => (window.__marker = true));
+  const link = join(dir, "node_modules/volt-rs/src/link.js");
+  writeFileSync(link, `${readFileSync(link, "utf8")}\n// upgraded\n`);
+  edit("app/counter.tsx", "Version three", "Version 3");
+  await page.waitForFunction(() => !window.__marker, null, { timeout: 20_000 });
+  await page.locator("#message", { hasText: "Version 3" }).waitFor();
+  edit("app/counter.tsx", "Version 3", "Version three");
+  await page.locator("#message", { hasText: "Version three" }).waitFor({ timeout: 20_000 });
 });
 
 await check("client navigation stays soft after updates", async () => {

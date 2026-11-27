@@ -11,10 +11,10 @@ use tokio::sync::mpsc;
 
 use crate::manifest::Manifest;
 
-/// Browser-side client injected into dev pages; `{base}` is replaced with the base path. It applies `update`
-/// events through the Fast Refresh runtime of the page (`window.__VOLT_REFRESH__`, absent on error pages,
-/// which reload instead), swaps the stylesheets and shows build and runtime errors in an overlay that keeps
-/// the page and its state underneath.
+/// Browser-side client injected into dev pages; `{base}` is replaced with the base path and `{revision}` with
+/// the revision of the build the page was rendered from. It applies `update` events through the Fast Refresh
+/// runtime of the page (`window.__VOLT_REFRESH__`, absent on error pages, which reload instead), swaps the
+/// stylesheets and shows build and runtime errors in an overlay that keeps the page and its state underneath.
 const CLIENT: &str = r#"<script type="module">
 const overlay = {
   host: null,
@@ -30,19 +30,27 @@ button{background:none;border:0;color:#a1a1aa;font:inherit;font-size:20px;line-h
 pre{margin:16px 0 0;white-space:pre-wrap;background:#18181b;border:1px solid #27272a;border-radius:8px;padding:16px;overflow:auto}</style>
 <section role="alert"><header><h1></h1><button type="button" aria-label="Close">×</button></header><pre></pre></section>`;
       root.querySelector("button").onclick = () => this.hide();
+      // React empties <body> when the root fails or remounts; the overlay outlives it while it is shown.
+      new MutationObserver(() => this.visible && this.attach()).observe(document, { childList: true, subtree: true });
     }
     const root = this.host.shadowRoot;
     root.querySelector("h1").textContent = "⚡ " + title;
     root.querySelector("pre").textContent = detail;
-    if (!this.host.isConnected) document.body.appendChild(this.host);
+    this.visible = true;
+    this.attach();
+  },
+  attach() {
+    if (!this.host.isConnected) (document.body ?? document.documentElement).appendChild(this.host);
   },
   hide() {
+    this.visible = false;
     this.host?.remove();
   },
 };
 const describe = (error) => (error && error.stack) || String(error);
 addEventListener("error", (event) => overlay.show("Unhandled runtime error", describe(event.error ?? event.message)));
 addEventListener("unhandledrejection", (event) => overlay.show("Unhandled runtime error", describe(event.reason)));
+addEventListener("volt:error", (event) => overlay.show("Runtime error", describe(event.detail)));
 
 const swapStyles = (hrefs) => {
   const links = [...document.querySelectorAll('link[rel="stylesheet"]')].filter((link) =>
@@ -61,14 +69,17 @@ const swapStyles = (hrefs) => {
   for (const link of links) link.remove();
 };
 
+let revision = {revision};
 let queue = Promise.resolve();
-const apply = async ({ modules, css, revision }) => {
+const apply = async (update) => {
   const refresh = window.__VOLT_REFRESH__;
-  if (!refresh) return location.reload();
-  swapStyles(css);
+  if (!refresh || update.base > revision) return location.reload();
+  swapStyles(update.css);
+  // Hidden first: render errors of the refreshed components report themselves once React re-renders.
+  overlay.hide();
   try {
-    if (!(await refresh.apply(modules, revision))) return location.reload();
-    overlay.hide();
+    if (!(await refresh.apply(update, revision))) return location.reload();
+    revision = update.revision;
   } catch (error) {
     overlay.show("Runtime error", describe(error));
   }
@@ -88,9 +99,9 @@ const connect = (stale) => {
 connect(false);
 </script>"#;
 
-/// The live reload client for an app mounted at `base_path`.
-pub fn client(base_path: &str) -> String {
-    CLIENT.replace("{base}", base_path)
+/// The live reload client for an app mounted at `base_path`, on a page rendered from build `revision`.
+pub fn client(base_path: &str, revision: u64) -> String {
+    CLIENT.replace("{base}", base_path).replace("{revision}", &revision.to_string())
 }
 
 /// The event that brings browsers showing build `previous` to build `next`, with its data: `failed` with the
@@ -101,7 +112,13 @@ pub fn event(previous: &Manifest, next: &Manifest) -> (&'static str, String) {
     }
     match &next.hot {
         Some(hot) if hot.base <= previous.revision && previous.revision < next.revision => {
-            let data = json!({ "modules": hot.modules, "css": next.client.css, "revision": next.revision });
+            let data = json!({
+                "base": hot.base,
+                "modules": hot.modules,
+                "importers": hot.importers,
+                "css": next.client.css,
+                "revision": next.revision,
+            });
             ("update", data.to_string())
         }
         _ => ("reload", String::new()),
@@ -156,16 +173,30 @@ mod tests {
     use crate::manifest::{HotModule, HotUpdate};
 
     #[test]
+    fn fills_in_the_client() {
+        let script = client("/docs", 7);
+        assert!(script.contains("new EventSource(\"/docs/_volt/hmr\")"));
+        assert!(script.contains("let revision = 7;"));
+    }
+
+    #[test]
     fn picks_events() {
         let previous = Manifest { revision: 3, ..Manifest::default() };
-        let module = HotModule { id: "app/page.tsx".into(), url: "/_volt/static/js/app/page.js".into() };
-        let mut next =
-            Manifest { revision: 4, hot: Some(HotUpdate { base: 3, modules: vec![module] }), ..Manifest::default() };
+        let url = "/_volt/static/js/app/page.js";
+        let update = HotUpdate {
+            base: 3,
+            modules: vec![HotModule { url: url.into(), revision: 4 }],
+            importers: [(url.to_owned(), vec!["/_volt/static/js/_virtual/home.js".to_owned()])].into(),
+        };
+        let mut next = Manifest { revision: 4, hot: Some(update), ..Manifest::default() };
         next.client.css = vec!["/_volt/static/css/app-1.css".into()];
         let (name, data) = event(&previous, &next);
         assert_eq!(name, "update");
         let data: serde_json::Value = serde_json::from_str(&data).unwrap();
-        assert_eq!(data["modules"][0]["id"], "app/page.tsx");
+        assert_eq!(data["modules"][0]["url"], url);
+        assert_eq!(data["modules"][0]["revision"], 4);
+        assert_eq!(data["importers"][url][0], "/_volt/static/js/_virtual/home.js");
+        assert_eq!(data["base"], 3);
         assert_eq!(data["css"][0], "/_volt/static/css/app-1.css");
         assert_eq!(data["revision"], 4);
 

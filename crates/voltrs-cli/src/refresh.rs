@@ -21,7 +21,12 @@ pub fn is_app_module(root: &Path, id: &str) -> bool {
     let root = crate::util::to_slash(root);
     id.strip_prefix(&root)
         .and_then(|rest| rest.strip_prefix('/'))
-        .is_some_and(|rest| !rest.split('/').any(|part| matches!(part, "node_modules" | ".volt")))
+        .is_some_and(|rest| !is_dependency(rest) && !rest.split('/').any(|part| part == ".volt"))
+}
+
+/// Whether a module is a file of an installed package.
+pub fn is_dependency(id: &str) -> bool {
+    !id.starts_with('\0') && crate::util::to_slash(Path::new(id)).split('/').any(|part| part == "node_modules")
 }
 
 /// The id a module registers its components under: its path relative to the project root.
@@ -73,7 +78,7 @@ fn prelude(id: &str) -> String {
         "\nimport * as __volt_refresh from {RUNTIME:?};\n\
          function $RefreshReg$(type, name) {{ __volt_refresh.register(type, {id} + \" \" + name); }}\n\
          function $RefreshSig$() {{ return __volt_refresh.signature(); }}\n\
-         __volt_refresh.loaded({id});\n"
+         __volt_refresh.loaded(import.meta.url);\n"
     )
 }
 
@@ -91,7 +96,7 @@ mod tests {
         assert!(out.code.contains("$RefreshReg$(_c, \"Counter\")"), "{}", out.code);
         assert!(out.code.contains("$RefreshSig$()"), "{}", out.code);
         assert!(out.code.contains("__volt_refresh.register(type, \"app/page.tsx\" + \" \" + name)"));
-        assert!(out.code.contains("__volt_refresh.loaded(\"app/page.tsx\")"));
+        assert!(out.code.contains("__volt_refresh.loaded(import.meta.url)"));
     }
 
     #[test]
@@ -108,6 +113,9 @@ mod tests {
         assert!(!is_app_module(root, "/p/node_modules/volt-rs/src/link.js"));
         assert!(!is_app_module(root, "/p/.volt/types/api.ts"));
         assert!(!is_app_module(root, "/other/app/page.tsx"));
+        assert!(is_dependency("/p/node_modules/react/index.js"));
+        assert!(!is_dependency("/p/app/node_modules.tsx"));
+        assert!(!is_dependency("\0rolldown/runtime.js"));
         assert_eq!(module_id(root, "/p/app/page.tsx"), "app/page.tsx");
     }
 }

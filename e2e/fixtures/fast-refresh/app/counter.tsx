@@ -1,6 +1,9 @@
 "use client";
 import { useState } from "react";
 
+// Counts evaluations of this module, which updates of other modules must not repeat.
+if (typeof window !== "undefined") window.__evaluations = (window.__evaluations ?? 0) + 1;
+
 export function Counter() {
   const [count, setCount] = useState(0);
   const [text, setText] = useState("");

@@ -1,5 +1,6 @@
 //! Build manifest written by `volt build` and read by the server.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -48,19 +49,22 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
-/// The client modules that `volt dev` rebuilds changed since the build of revision `base`, all applicable in
-/// place: a page showing any revision from `base` on updates by evaluating them again.
+/// The client modules that `volt dev` rebuilds changed since the build of revision `base`: a page showing any
+/// revision from `base` on evaluates the ones newer than its own copy again, then re-renders in place.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotUpdate {
     pub base: u64,
     pub modules: Vec<HotModule>,
+    /// The URLs of the modules importing each app module, keyed by its URL. An update that reaches an importer
+    /// outside the app (the entry, a route table) through modules that cannot be swapped alone reloads.
+    pub importers: BTreeMap<String, Vec<String>>,
 }
 
-/// A changed app module: the id its components are registered under and the URL of its new code.
+/// A changed app module: the URL of its new code and the revision it last changed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotModule {
-    pub id: String,
     pub url: String,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

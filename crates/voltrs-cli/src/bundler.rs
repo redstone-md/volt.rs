@@ -76,8 +76,8 @@ struct Shared {
     failures: Mutex<Vec<String>>,
     /// Whether app modules get the React Refresh transform: development client builds.
     refresh: bool,
-    /// Refresh ids of the instrumented modules, by module id.
-    refreshed: Mutex<HashMap<String, String>>,
+    /// Ids of the modules instrumented for Fast Refresh.
+    refreshed: Mutex<HashSet<String>>,
 }
 
 impl Shared {
@@ -323,7 +323,7 @@ impl Plugin for VoltPlugin {
                     None => instrumented.map,
                 };
                 if let Ok(mut refreshed) = self.0.refreshed.lock() {
-                    refreshed.insert(args.id.to_owned(), module);
+                    refreshed.insert(args.id.to_owned());
                 }
                 transformed = Some(crate::fonts::Transformed { code: instrumented.code, map });
             }
@@ -426,14 +426,16 @@ pub struct ClientBundle {
 }
 
 /// A file of a development client build.
+#[derive(Clone)]
 pub struct ClientModule {
     pub url: String,
-    /// Content hash of the code.
+    /// Content hash of the code, or of the sources for installed packages: their output also varies with what
+    /// the app uses of them and with rolldown's interop details, which the loaded instances do not depend on.
     pub digest: String,
-    /// The refresh id of the app module it holds, when that module is instrumented for Fast Refresh.
-    pub refresh: Option<String>,
-    /// Whether it holds an installed package module.
-    pub dependency: bool,
+    /// Whether it holds an app module instrumented for Fast Refresh.
+    pub refresh: bool,
+    /// URLs of the files it imports, statically or dynamically.
+    pub imports: Vec<String>,
 }
 
 pub struct Bundle<'a> {
@@ -815,15 +817,24 @@ impl<'a> Bundle<'a> {
         let modules = chunks
             .values()
             .filter(|_| self.dev)
-            .map(|chunk| ClientModule {
-                url: url(&chunk.filename),
-                digest: hash(chunk.code.as_bytes()),
-                refresh: match chunk.module_ids.as_slice() {
-                    [id] => refreshed.get(id.as_str()).cloned(),
-                    _ => None,
-                },
-                dependency: !chunk.module_ids.is_empty()
-                    && chunk.module_ids.iter().all(|id| id.as_str().contains("/node_modules/")),
+            .map(|chunk| {
+                let ids: Vec<&str> = chunk.module_ids.iter().map(|id| id.as_str()).collect();
+                let dependency = !ids.is_empty() && ids.iter().all(|id| crate::refresh::is_dependency(id));
+                let digest = if dependency {
+                    hash(
+                        &ids.iter()
+                            .flat_map(|id| std::fs::read(strip_query(id)).unwrap_or_default())
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    hash(chunk.code.as_bytes())
+                };
+                ClientModule {
+                    url: url(&chunk.filename),
+                    digest,
+                    refresh: matches!(ids.as_slice(), [id] if refreshed.contains(*id)),
+                    imports: chunk.imports.iter().chain(&chunk.dynamic_imports).map(|file| url(file)).collect(),
+                }
             })
             .collect();
         Ok(ClientBundle {

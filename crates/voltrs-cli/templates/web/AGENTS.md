@@ -39,7 +39,7 @@ This is a [volt.rs](https://github.com/redstone-md/volt.rs) app: React 19 pages,
 - Hrefs, redirects and `<Image src>` are written without `[build] base_path`; volt adds it. Plain `<img>` and `<a>` to `public/` files need the prefix.
 - Styling: Tailwind CSS v4 in `app/globals.css`. Merge classes with `cn()`. CSS Modules (`*.module.css`, `*.module.scss`) and Sass also work.
 - Fonts: `next/font/google` (`Inter({ subsets: ["latin"], variable: "--font-sans" })`) or `next/font/local` called at module top level with literal options; apply `font.className` or `font.variable` in the root layout.
-- Fast Refresh: `npm run dev` applies edits to components in place and keeps their state. Keep component files exporting components (plus unchanged route exports like `metadata`); editing a constant, hook or helper that other files import reloads the page.
+- Fast Refresh: `npm run dev` applies edits to components in place and keeps their state. Edits to constants, hooks and helpers re-run the files that import them, up to the nearest files exporting only components (plus plain data such as `metadata`). Pages and layouts that export functions other than components, or a changed `metadata`, reload the page.
 
 ## Before you finish
 
