@@ -24,9 +24,14 @@ impl Media {
     /// Copies a file and returns its public URL.
     pub fn copy(&self, path: &Path) -> Result<String> {
         let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+        self.add(path, &bytes)
+    }
+
+    /// Stores the already read contents of `path` under its name and returns the public URL.
+    pub fn add(&self, path: &Path, bytes: &[u8]) -> Result<String> {
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "asset".into());
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-        self.write(&stem, &ext, &bytes)
+        self.write(&stem, &ext, bytes)
     }
 
     /// Writes bytes as `<stem>-<hash>.<ext>` and returns the public URL.

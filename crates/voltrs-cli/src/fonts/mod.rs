@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::media::Media;
 use crate::util::hash;
 
-pub use source::transform;
+pub use source::{Transformed, transform};
 
 /// Prefix of the virtual stylesheet module generated for each font.
 pub const FONT_MODULE: &str = "volt:font/";

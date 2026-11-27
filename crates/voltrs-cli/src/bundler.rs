@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use arcstr::ArcStr;
+use oxc_allocator::Allocator;
+use oxc_ast::ast::Statement;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 use rolldown::plugin::{
     HookBuildEndArgs, HookLoadArgs, HookLoadOutput, HookLoadReturn, HookNoopReturn, HookResolveIdArgs,
     HookResolveIdOutput, HookResolveIdReturn, HookTransformArgs, HookTransformOutput, HookTransformReturn, HookUsage,
@@ -17,6 +21,7 @@ use rolldown::{
 };
 use rolldown_common::side_effects::HookSideEffects;
 use rolldown_common::{ModuleType, Output};
+use string_wizard::{MagicString, SourceMapOptions};
 
 use crate::css::Stylesheet;
 use crate::fonts::{FONT_MODULE, Fonts};
@@ -62,6 +67,16 @@ struct Shared {
     preload_fonts: Mutex<Vec<String>>,
     /// Module ids in evaluation order, recorded when the build ends.
     order: Mutex<Vec<String>>,
+    /// Full messages of load hook errors; rolldown reports only "plugin `volt` threw an error" for them.
+    failures: Mutex<Vec<String>>,
+}
+
+impl Shared {
+    /// Appends the recorded load failures to a rolldown error message.
+    fn explain(&self, message: String) -> String {
+        let failures = self.failures.lock().map(|f| f.clone()).unwrap_or_default();
+        failures.iter().fold(message, |message, failure| format!("{message}\n{failure}"))
+    }
 }
 
 #[derive(Debug)]
@@ -88,8 +103,8 @@ impl VoltPlugin {
     /// Copies an imported media file into the static dir and exports its URL and size.
     fn media(&self, id: &str, ext: &str) -> HookLoadReturn {
         let path = Path::new(strip_query(id));
-        let url = self.0.media.copy(path)?;
         let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+        let url = self.0.media.add(path, &bytes)?;
         let code = match imagesize::blob_size(&bytes) {
             Ok(size) if !matches!(ext, "woff" | "woff2" | "ttf" | "otf" | "mp4") => {
                 format!("export default {{ src: {url:?}, width: {}, height: {} }};", size.width, size.height)
@@ -115,7 +130,26 @@ impl VoltPlugin {
         }
         let module = self.0.styles.module(path)?;
         self.stylesheet(id, Stylesheet::Compiled(module.css.clone()));
-        Self::module(css_module_code(&module), false)
+        // Importing a CSS module includes its CSS even when no class is used, so it must not be tree-shaken.
+        Self::module(css_module_code(&module), true)
+    }
+
+    fn load_module(&self, args: &HookLoadArgs<'_>) -> HookLoadReturn {
+        if let Some(name) = args.id.strip_prefix('\0')
+            && let Some(code) = self.0.modules.get(name)
+        {
+            return Self::module(code.clone(), true);
+        }
+        if let Some(key) = args.id.strip_prefix('\0').and_then(|id| id.strip_prefix(FONT_MODULE)) {
+            let font = self.0.fonts.get(key).with_context(|| format!("unknown font {key}"))?;
+            self.stylesheet(args.id, Stylesheet::Compiled(font.css.clone()));
+            return Self::module("", true);
+        }
+        match extension(args.id).as_deref() {
+            Some(ext) if crate::styles::is_stylesheet(ext) => self.css(args.id),
+            Some(ext) if MEDIA.contains(&ext) => self.media(args.id, ext),
+            _ => Ok(None),
+        }
     }
 
     /// Font files declared by the root layout and the modules it imports.
@@ -158,6 +192,30 @@ fn execution_order(ctx: &PluginContext, entry: &str, dynamic: bool) -> Vec<Strin
         }
     }
     order
+}
+
+/// Bare imports re-adding every stylesheet a module imports with bindings. TypeScript drops imports whose
+/// bindings are unused, but importing a stylesheet must include its CSS either way.
+fn stylesheet_imports(id: &str, code: &str) -> String {
+    if ![".css", ".scss", ".sass"].iter().any(|ext| code.contains(ext)) {
+        return String::new();
+    }
+    let source_type = SourceType::from_path(id).unwrap_or_else(|_| SourceType::tsx());
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, source_type).parse();
+    let mut kept = String::new();
+    for statement in &parsed.program.body {
+        let Statement::ImportDeclaration(import) = statement else { continue };
+        let Some(specifier) = import.source.value.as_str() else { continue };
+        if import.import_kind.is_type()
+            || import.specifiers.as_ref().is_none_or(|s| s.is_empty())
+            || !extension(specifier).is_some_and(|ext| crate::styles::is_stylesheet(&ext))
+        {
+            continue;
+        }
+        kept.push_str(&format!("\nimport {specifier:?};"));
+    }
+    kept
 }
 
 /// JavaScript for a CSS module: `export default { local: "scoped composed..." }`.
@@ -215,29 +273,43 @@ impl Plugin for VoltPlugin {
     }
 
     async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
-        if let Some(name) = args.id.strip_prefix('\0')
-            && let Some(code) = self.0.modules.get(name)
+        let result = self.load_module(args);
+        if let Err(error) = &result
+            && let Ok(mut failures) = self.0.failures.lock()
         {
-            return Self::module(code.clone(), true);
+            failures.push(format!("{error:#}"));
         }
-        if let Some(key) = args.id.strip_prefix('\0').and_then(|id| id.strip_prefix(FONT_MODULE)) {
-            let font = self.0.fonts.get(key).with_context(|| format!("unknown font {key}"))?;
-            self.stylesheet(args.id, Stylesheet::Compiled(font.css.clone()));
-            return Self::module("", true);
-        }
-        match extension(args.id).as_deref() {
-            Some(ext) if crate::styles::is_stylesheet(ext) => self.css(args.id),
-            Some(ext) if MEDIA.contains(&ext) => self.media(args.id, ext),
-            _ => Ok(None),
-        }
+        result
     }
 
     async fn transform(&self, _ctx: SharedTransformPluginContext, args: &HookTransformArgs<'_>) -> HookTransformReturn {
         if args.id.starts_with('\0') || !extension(args.id).is_some_and(|ext| SCRIPTS.contains(&ext.as_str())) {
             return Ok(None);
         }
-        let transformed = crate::fonts::transform(&self.0.fonts, strip_query(args.id), args.code)?;
-        Ok(transformed.map(|t| HookTransformOutput { code: Some(t.code), map: t.map.into(), ..Default::default() }))
+        let id = strip_query(args.id);
+        let kept = stylesheet_imports(id, args.code);
+        let transformed = match crate::fonts::transform(&self.0.fonts, id, args.code)? {
+            Some(mut transformed) => {
+                transformed.code.push_str(&kept);
+                transformed
+            }
+            None if kept.is_empty() => return Ok(None),
+            None => {
+                let mut magic = MagicString::new(args.code);
+                magic.append(kept);
+                let map = magic.source_map(SourceMapOptions {
+                    source: id.into(),
+                    include_content: true,
+                    ..Default::default()
+                });
+                crate::fonts::Transformed { code: magic.to_string(), map }
+            }
+        };
+        Ok(Some(HookTransformOutput {
+            code: Some(transformed.code),
+            map: transformed.map.into(),
+            ..Default::default()
+        }))
     }
 
     async fn build_end(&self, ctx: &PluginContext, _args: Option<&HookBuildEndArgs<'_>>) -> HookNoopReturn {
@@ -272,14 +344,20 @@ pub struct Bundle<'a> {
     /// Pages Router document, imported by the server bundle only.
     document: Option<Module>,
     dev: bool,
-    styles: Arc<Styles>,
-    fonts: Arc<Fonts>,
+    assets: Assets,
+}
+
+/// What the bundles share with the CSS and font steps of the same build.
+pub struct Assets {
+    pub media: Media,
+    pub styles: Arc<Styles>,
+    pub fonts: Arc<Fonts>,
 }
 
 impl<'a> Bundle<'a> {
-    pub fn new(project: &'a Project, routes: &'a [Route], dev: bool, styles: Arc<Styles>, fonts: Arc<Fonts>) -> Self {
+    pub fn new(project: &'a Project, routes: &'a [Route], dev: bool, assets: Assets) -> Self {
         let document = crate::routes::document(project.pages_dir.as_deref());
-        Self { project, routes, document, dev, styles, fonts }
+        Self { project, routes, document, dev, assets }
     }
 
     /// Imports a route module as the namespace `name`.
@@ -401,13 +479,14 @@ impl<'a> Bundle<'a> {
         Arc::new(Shared {
             modules: self.modules(client),
             css: Mutex::default(),
-            media: Media::new(self.project.static_dir().join("media"), self.project.config.static_prefix()),
-            styles: self.styles.clone(),
-            fonts: self.fonts.clone(),
+            media: self.assets.media.clone(),
+            styles: self.assets.styles.clone(),
+            fonts: self.assets.fonts.clone(),
             root: self.project.root.clone(),
             root_layout,
             preload_fonts: Mutex::default(),
             order: Mutex::default(),
+            failures: Mutex::default(),
         })
     }
 
@@ -459,11 +538,11 @@ impl<'a> Bundle<'a> {
     }
 
     async fn run(&self, entry: &str, client: bool, shared: Arc<Shared>, write: bool) -> Result<Vec<Output>> {
-        let plugin = rolldown::plugin::__inner::Pluginable::new_shared(VoltPlugin(shared));
+        let plugin = rolldown::plugin::__inner::Pluginable::new_shared(VoltPlugin(shared.clone()));
         let mut bundler = Bundler::with_plugins(self.options(entry, client), vec![plugin])
             .map_err(|e| anyhow!(crate::util::diagnostics(&e)))?;
         let output = if write { bundler.write().await } else { bundler.generate().await };
-        let output = output.map_err(|e| anyhow!(crate::util::diagnostics(&e)))?;
+        let output = output.map_err(|e| anyhow!(shared.explain(crate::util::diagnostics(&e))))?;
         let unresolved: Vec<String> = output
             .warnings
             .iter()

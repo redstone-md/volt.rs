@@ -11,7 +11,7 @@ use voltrs::router::{Params, RoutePattern};
 use voltrs::sdk::{SERVER_INFO_FILE, Sdk, ServerInfo};
 use voltrs::ssr::{Engine, EngineOptions};
 
-use crate::bundler::Bundle;
+use crate::bundler::{Assets, Bundle};
 use crate::css::Css;
 use crate::fonts::Fonts;
 use crate::media::Media;
@@ -103,8 +103,8 @@ impl<'a> Pipeline<'a> {
         }
         let media = Media::new(self.project.static_dir().join("media"), self.project.config.static_prefix());
         let styles = Arc::new(Styles::new(self.project, media.clone())?);
-        let fonts = Arc::new(Fonts::new(media, self.project.cache_dir()));
-        let bundle = Bundle::new(self.project, &routes, self.dev, styles.clone(), fonts);
+        let fonts = Arc::new(Fonts::new(media.clone(), self.project.cache_dir()));
+        let bundle = Bundle::new(self.project, &routes, self.dev, Assets { media, styles: styles.clone(), fonts });
         let (server, client) = tokio::join!(bundle.server(), bundle.client());
         let (server, client) = (server?, client?);
         let css = Css::new(self.project, &styles, !self.dev).build(&server.css)?;
