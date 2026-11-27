@@ -1,5 +1,6 @@
 //! The build pipeline shared by `volt dev` and `volt build`.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -11,7 +12,7 @@ use voltrs::ssr::{Engine, EngineOptions};
 use crate::bundler::Bundle;
 use crate::css::Css;
 use crate::project::Project;
-use crate::routes::{self, Route};
+use crate::routes::Route;
 use crate::util::hash;
 
 #[derive(serde::Deserialize)]
@@ -19,6 +20,9 @@ struct RouteConfig {
     id: String,
     revalidate: Option<u64>,
     dynamic: String,
+    /// Concrete paths from a Pages Router `getStaticPaths`.
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 pub struct Pipeline<'a> {
@@ -44,7 +48,7 @@ impl<'a> Pipeline<'a> {
 
     pub async fn frontend(&self, info: &ServerInfo) -> Result<Manifest> {
         let started = Instant::now();
-        let routes = routes::scan(&self.project.app_dir)?;
+        let routes = self.project.routes()?;
         if !self.dev {
             crate::util::reset_dir(&self.project.static_dir())?;
         }
@@ -64,6 +68,7 @@ impl<'a> Pipeline<'a> {
                     id: r.id.clone(),
                     chunks: client.routes.get(&r.id).cloned().unwrap_or_default(),
                     dynamic: r.is_dynamic() || info.loaders.contains(&r.id),
+                    pages: r.is_pages(),
                     ..RouteEntry::default()
                 })
                 .collect(),
@@ -74,9 +79,9 @@ impl<'a> Pipeline<'a> {
         manifest.save(&self.project.out_dir)?;
 
         if !self.dev {
-            self.apply_route_config(&mut manifest).await?;
+            let static_paths = self.apply_route_config(&mut manifest).await?;
             if self.project.config.build.prerender {
-                self.prerender(&mut manifest, &routes, info).await?;
+                self.prerender(&mut manifest, &routes, info, &static_paths).await?;
             }
             manifest.save(&self.project.out_dir)?;
             let compressed = crate::compress::precompress(&self.project.static_dir())?;
@@ -86,8 +91,8 @@ impl<'a> Pipeline<'a> {
         Ok(manifest)
     }
 
-    /// Reads `revalidate` and `dynamic` exports from the built server bundle.
-    async fn apply_route_config(&self, manifest: &mut Manifest) -> Result<()> {
+    /// Reads `revalidate` and `dynamic` exports from the built server bundle and returns `getStaticPaths` results.
+    async fn apply_route_config(&self, manifest: &mut Manifest) -> Result<HashMap<String, Vec<String>>> {
         let engine = Engine::start(EngineOptions {
             bundle: self.project.out_dir.join(&manifest.server),
             workers: 1,
@@ -97,22 +102,37 @@ impl<'a> Pipeline<'a> {
         .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
         let output = engine.call("routes", String::new()).await.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
         let configs: Vec<RouteConfig> = serde_json::from_str(&output).context("invalid route config")?;
+        let mut static_paths = HashMap::new();
         for config in configs {
             if let Some(route) = manifest.routes.iter_mut().find(|r| r.id == config.id) {
                 route.revalidate = config.revalidate;
                 route.dynamic |= config.dynamic == "force-dynamic";
             }
+            if !config.paths.is_empty() {
+                static_paths.insert(config.id, config.paths);
+            }
         }
-        Ok(())
+        Ok(static_paths)
     }
 
-    async fn prerender(&self, manifest: &mut Manifest, routes: &[Route], info: &ServerInfo) -> Result<()> {
-        let targets: Vec<String> = routes
-            .iter()
-            .filter(|r| !r.is_special() && !info.loaders.contains(&r.id))
-            .filter(|r| manifest.route(&r.id).is_some_and(|m| !m.dynamic))
-            .map(|r| r.id.clone())
-            .collect();
+    async fn prerender(
+        &self,
+        manifest: &mut Manifest,
+        routes: &[Route],
+        info: &ServerInfo,
+        static_paths: &HashMap<String, Vec<String>>,
+    ) -> Result<()> {
+        let mut owners = HashMap::new();
+        for route in routes.iter().filter(|r| !r.is_special() && !info.loaders.contains(&r.id)) {
+            if manifest.route(&route.id).is_some_and(|m| !m.dynamic) {
+                owners.insert(route.id.clone(), route.id.clone());
+            }
+            for path in static_paths.get(&route.id).into_iter().flatten() {
+                owners.entry(path.clone()).or_insert_with(|| route.id.clone());
+            }
+        }
+        let mut targets: Vec<String> = owners.keys().cloned().collect();
+        targets.sort();
         if targets.is_empty() {
             return Ok(());
         }
@@ -124,23 +144,29 @@ impl<'a> Pipeline<'a> {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
         let mut count = 0;
-        for (route, html) in rendered {
-            let html = match html {
-                Ok(html) => html,
+        for (url, page) in rendered {
+            let page = match page {
+                Ok(page) => page,
                 Err(error) => {
-                    voltrs::log::warn(&format!("skipped prerendering {route}: {}", error.message()));
+                    voltrs::log::warn(&format!("skipped prerendering {url}: {}", error.message()));
                     continue;
                 }
             };
             let name =
-                if route == "/" { "index.html".to_owned() } else { format!("{}.html", route.trim_start_matches('/')) };
+                if url == "/" { "index.html".to_owned() } else { format!("{}.html", url.trim_start_matches('/')) };
             let path = dir.join(&name);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&path, html)?;
-            if let Some(entry) = manifest.routes.iter_mut().find(|r| r.id == route) {
-                entry.prerendered = Some(format!("prerender/{name}"));
+            std::fs::write(&path, page.html)?;
+            let file = format!("prerender/{name}");
+            if let Some(entry) = owners.get(&url).and_then(|id| manifest.routes.iter_mut().find(|r| &r.id == id)) {
+                if entry.id == url {
+                    entry.prerendered = Some(file);
+                } else {
+                    entry.static_paths.insert(url.clone(), file);
+                }
+                entry.revalidate = entry.revalidate.or(page.revalidate);
             }
             count += 1;
         }

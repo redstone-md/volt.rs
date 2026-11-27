@@ -120,3 +120,43 @@ export interface Viewport {
 }
 
 export type GenerateMetadata<Data = undefined> = (props: PageProps<Data>) => Metadata | Promise<Metadata>;
+
+/** Pages Router: a page component with optional `getLayout`-style statics. */
+export type NextPage<P = {}, IP = P> = import("react").ComponentType<P> & { getInitialProps?: (context: unknown) => IP | Promise<IP> };
+
+export type Redirect = { destination: string; permanent: boolean } | { destination: string; statusCode: 301 | 302 | 303 | 307 | 308 };
+
+export interface GetServerSidePropsContext<P extends Params = Params> {
+  params: P;
+  query: Record<string, string | string[]>;
+  resolvedUrl: string;
+}
+
+export type GetServerSidePropsResult<P> = { props: P | Promise<P> } | { notFound: true } | { redirect: Redirect };
+
+export type GetServerSideProps<P extends Record<string, any> = Record<string, any>, Q extends Params = Params> = (
+  context: GetServerSidePropsContext<Q>,
+) => Promise<GetServerSidePropsResult<P>> | GetServerSidePropsResult<P>;
+
+export interface GetStaticPropsContext<P extends Params = Params> {
+  params: P;
+}
+
+export type GetStaticPropsResult<P> = { props: P; revalidate?: number | false } | { notFound: true; revalidate?: number | false } | { redirect: Redirect; revalidate?: number | false };
+
+export type GetStaticProps<P extends Record<string, any> = Record<string, any>, Q extends Params = Params> = (
+  context: GetStaticPropsContext<Q>,
+) => Promise<GetStaticPropsResult<P>> | GetStaticPropsResult<P>;
+
+export interface GetStaticPathsResult<P extends Params = Params> {
+  paths: (string | { params: P })[];
+  fallback: boolean | "blocking";
+}
+
+export type GetStaticPaths<P extends Params = Params> = () => Promise<GetStaticPathsResult<P>> | GetStaticPathsResult<P>;
+
+type Unwrap<T> = T extends Promise<infer U> ? U : T;
+export type InferGetServerSidePropsType<T extends (...args: any) => any> = Unwrap<ReturnType<T>> extends { props: infer P } ? Unwrap<P> : never;
+export type InferGetStaticPropsType<T extends (...args: any) => any> = Unwrap<ReturnType<T>> extends { props: infer P } ? P : never;
+
+export type { AppProps } from "./app";

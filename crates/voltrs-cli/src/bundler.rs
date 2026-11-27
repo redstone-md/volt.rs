@@ -18,7 +18,7 @@ use rolldown_common::side_effects::HookSideEffects;
 use rolldown_common::{ModuleType, Output};
 
 use crate::project::Project;
-use crate::routes::{Module, Route};
+use crate::routes::{Kind, Module, Route};
 use crate::util::{hash, to_slash};
 
 const CLIENT_ENTRY: &str = "volt:client";
@@ -27,10 +27,12 @@ const MEDIA: [&str; 13] =
     ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "ico", "woff", "woff2", "ttf", "otf", "mp4"];
 
 /// Next.js import paths served by the volt runtime.
-const COMPAT: [(&str, &str); 9] = [
+const COMPAT: [(&str, &str); 11] = [
     ("next/link", "volt-rs/link"),
     ("next/navigation", "volt-rs/navigation"),
-    ("next/router", "volt-rs/navigation"),
+    ("next/router", "volt-rs/router"),
+    ("next/document", "volt-rs/document"),
+    ("next/app", "volt-rs/app"),
     ("next/image", "volt-rs/image"),
     ("next/script", "volt-rs/script"),
     ("next/head", "volt-rs/head"),
@@ -148,12 +150,26 @@ pub struct ClientBundle {
 pub struct Bundle<'a> {
     project: &'a Project,
     routes: &'a [Route],
+    /// Pages Router document, imported by the server bundle only.
+    document: Option<Module>,
     dev: bool,
 }
 
 impl<'a> Bundle<'a> {
     pub fn new(project: &'a Project, routes: &'a [Route], dev: bool) -> Self {
-        Self { project, routes, dev }
+        let document = crate::routes::document(project.pages_dir.as_deref());
+        Self { project, routes, document, dev }
+    }
+
+    /// Imports a route module as the namespace `name`.
+    fn import(module: &Module, name: &str) -> String {
+        match module {
+            Module::File(path) => format!("import * as {name} from {:?};\n", to_slash(path)),
+            Module::Builtin(export) => format!(
+                "import {{ {export} as {name}_c, notFoundMetadata as {name}_m }} from \"volt-rs/internal/defaults\";\nconst {name} = {{ default: {name}_c{} }};\n",
+                if *export == "NotFound" { format!(", metadata: {name}_m") } else { String::new() }
+            ),
+        }
     }
 
     /// Virtual module of a route; its last path segment becomes the chunk name.
@@ -168,19 +184,23 @@ impl<'a> Bundle<'a> {
         if taken { format!("volt:route/{own}-{index}") } else { format!("volt:route/{own}") }
     }
 
-    fn route_module(route: &Route) -> String {
+    /// Imports only the default export, so tree-shaking drops server-only data functions from browser chunks.
+    fn import_default(module: &Module, name: &str) -> String {
+        match module {
+            Module::File(path) => {
+                format!("import {name}_d from {:?};\nconst {name} = {{ default: {name}_d }};\n", to_slash(path))
+            }
+            Module::Builtin(_) => Self::import(module, name),
+        }
+    }
+
+    fn route_module(route: &Route, client: bool) -> String {
         let mut imports = String::new();
         let mut names = 0;
         let mut module = |module: &Module| -> String {
             let name = format!("m{names}");
             names += 1;
-            match module {
-                Module::File(path) => imports.push_str(&format!("import * as {name} from {:?};\n", to_slash(path))),
-                Module::Builtin(export) => imports.push_str(&format!(
-                    "import {{ {export} as {name}_c, notFoundMetadata as {name}_m }} from \"volt-rs/internal/defaults\";\nconst {name} = {{ default: {name}_c{} }};\n",
-                    if *export == "NotFound" { format!(", metadata: {name}_m") } else { String::new() }
-                )),
-            }
+            imports.push_str(&Self::import(module, &name));
             name
         };
         let segments: Vec<String> = route
@@ -195,13 +215,27 @@ impl<'a> Bundle<'a> {
                 format!("{{ {} }}", fields.join(", "))
             })
             .collect();
-        let page = module(&route.page);
-        format!("{imports}export default {{ segments: [{}], page: {page} }};\n", segments.join(", "))
+        let shell = match &route.kind {
+            Kind::App => String::new(),
+            Kind::Pages { app } => format!("kind: \"pages\", app: {}, ", module(app)),
+        };
+        let page = if client && route.is_pages() {
+            let name = format!("m{names}");
+            imports.push_str(&Self::import_default(&route.page, &name));
+            name
+        } else {
+            module(&route.page)
+        };
+        format!("{imports}export default {{ {shell}segments: [{}], page: {page} }};\n", segments.join(", "))
     }
 
-    fn modules(&self) -> HashMap<String, String> {
-        let mut modules: HashMap<String, String> =
-            self.routes.iter().enumerate().map(|(i, route)| (self.route_key(i), Self::route_module(route))).collect();
+    fn modules(&self, client: bool) -> HashMap<String, String> {
+        let mut modules: HashMap<String, String> = self
+            .routes
+            .iter()
+            .enumerate()
+            .map(|(i, route)| (self.route_key(i), Self::route_module(route, client)))
+            .collect();
         let lazy: Vec<String> = self
             .routes
             .iter()
@@ -215,10 +249,14 @@ impl<'a> Bundle<'a> {
         let imports: Vec<String> =
             (0..self.routes.len()).map(|i| format!("import r{i} from {:?};", self.route_key(i))).collect();
         let table: Vec<String> = self.routes.iter().enumerate().map(|(i, r)| format!("  {:?}: r{i},", r.id)).collect();
+        let (document_import, document) = match &self.document {
+            Some(module) => (Self::import(module, "doc"), "doc"),
+            None => (String::new(), "undefined"),
+        };
         modules.insert(
             SERVER_ENTRY.into(),
             format!(
-                "import {{ createServer }} from \"volt-rs/internal/server\";\n{}\ncreateServer({{\n{}\n}});\n",
+                "import {{ createServer }} from \"volt-rs/internal/server\";\n{}\n{document_import}createServer({{\n{}\n}}, {{ document: {document} }});\n",
                 imports.join("\n"),
                 table.join("\n")
             ),
@@ -226,9 +264,9 @@ impl<'a> Bundle<'a> {
         modules
     }
 
-    fn shared(&self) -> Arc<Shared> {
+    fn shared(&self, client: bool) -> Arc<Shared> {
         Arc::new(Shared {
-            modules: self.modules(),
+            modules: self.modules(client),
             css: Mutex::default(),
             media_dir: self.project.static_dir().join("media"),
             root: self.project.root.clone(),
@@ -298,7 +336,7 @@ impl<'a> Bundle<'a> {
 
     /// Builds the server bundle evaluated by QuickJS. Also reports CSS in execution order.
     pub async fn server(&self) -> Result<ServerBundle> {
-        let shared = self.shared();
+        let shared = self.shared(false);
         let assets = self.run(SERVER_ENTRY, false, shared.clone(), false).await?;
         let chunk = assets
             .iter()
@@ -331,7 +369,7 @@ impl<'a> Bundle<'a> {
     /// Builds the browser bundle with one lazy chunk per route.
     pub async fn client(&self) -> Result<ClientBundle> {
         crate::util::reset_dir(&self.project.static_dir().join("js"))?;
-        let assets = self.run(CLIENT_ENTRY, true, self.shared(), true).await?;
+        let assets = self.run(CLIENT_ENTRY, true, self.shared(true), true).await?;
         let chunks: HashMap<&str, &rolldown_common::OutputChunk> = assets
             .iter()
             .filter_map(|a| match a {

@@ -95,7 +95,7 @@ impl App {
     }
 
     /// Renders the given static routes to HTML without starting a listener.
-    pub async fn prerender(self, routes: &[String]) -> Result<Vec<(String, Result<String>)>> {
+    pub async fn prerender(self, routes: &[String]) -> Result<Vec<(String, Result<server::Prerendered>)>> {
         let config = Config::load(&self.root)?;
         let server = Server::new(config, self.state, self.middleware)?;
         Ok(server.prerender(routes).await)

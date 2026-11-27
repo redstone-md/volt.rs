@@ -39,17 +39,16 @@ impl PageCache {
     /// Loads HTML that `volt build` prerendered for static routes.
     pub fn preload(&self, routes: &[RouteEntry], out_dir: &Path) {
         for route in routes {
-            let Some(file) = &route.prerendered else {
-                continue;
-            };
-            let Ok(html) = std::fs::read_to_string(out_dir.join(file)) else {
-                continue;
-            };
-            let response = Response::html(html).header(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=0, s-maxage=31536000, stale-while-revalidate"),
-            );
-            self.put(format!("{}?", route.id), &response, route.revalidate.map(Duration::from_secs));
+            for (path, file) in route.prerendered_files() {
+                let Ok(html) = std::fs::read_to_string(out_dir.join(file)) else {
+                    continue;
+                };
+                let response = Response::html(html).header(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=0, s-maxage=31536000, stale-while-revalidate"),
+                );
+                self.put(format!("{path}?"), &response, route.revalidate.map(Duration::from_secs));
+            }
         }
     }
 }

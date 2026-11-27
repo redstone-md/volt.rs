@@ -63,12 +63,54 @@ struct Rendered {
     html: String,
     status: u16,
     redirect: Option<RenderedRedirect>,
+    /// Set when rendering fell back to another route, such as not-found.
+    #[serde(default)]
+    route: Option<String>,
+    /// Pages Router props that replace the loader data in the serialized state.
+    #[serde(default)]
+    data: Option<Value>,
+    #[serde(flatten)]
+    hints: CacheHints,
 }
 
 #[derive(Deserialize)]
 struct RenderedRedirect {
     location: String,
     status: u16,
+}
+
+/// Caching hints from `getStaticProps`.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+struct CacheHints {
+    #[serde(default)]
+    revalidate: Option<u64>,
+    #[serde(default, rename = "static")]
+    is_static: bool,
+}
+
+/// Answer of `__VOLT__.props` for a Pages Router data request.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PropsResult {
+    #[serde(default)]
+    data: Option<Value>,
+    #[serde(default)]
+    not_found: bool,
+    #[serde(default)]
+    redirect: Option<RenderedRedirect>,
+}
+
+/// A rendered page with the caching hints its data functions returned.
+struct Page {
+    response: Response,
+    hints: CacheHints,
+}
+
+/// HTML produced by [`Server::prerender`].
+pub struct Prerendered {
+    pub html: String,
+    /// `revalidate` seconds returned by `getStaticProps`.
+    pub revalidate: Option<u64>,
 }
 
 pub(crate) struct Server {
@@ -353,7 +395,11 @@ impl Server {
             None => (target.clone(), String::new()),
         };
         let pathname = self.rewrite(&pathname);
-        let state = match self.resolve(ctx, &pathname, &search).await {
+        let resolved = match self.resolve(ctx, &pathname, &search).await {
+            Ok(state) => self.with_props(state).await,
+            Err(error) => Err(error),
+        };
+        let state = match resolved {
             Ok(state) => state,
             Err(error) => match error.kind() {
                 ErrorKind::Redirect(location) => {
@@ -363,6 +409,23 @@ impl Server {
             },
         };
         Response::json(&state).header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))
+    }
+
+    /// Runs the Pages Router data functions of the resolved route for a client navigation.
+    async fn with_props(&self, mut state: PageState) -> Result<PageState> {
+        if !self.current().manifest.route(&state.route).is_some_and(|r| r.pages) {
+            return Ok(state);
+        }
+        let output = self.engine.call("props", serde_json::to_string(&state)?).await?;
+        let result: PropsResult = serde_json::from_str(&output)?;
+        if result.not_found {
+            return Err(Error::not_found());
+        }
+        if let Some(redirect) = result.redirect {
+            return Err(Error::redirect(redirect.location));
+        }
+        state.data = result.data.unwrap_or(Value::Null);
+        Ok(state)
     }
 
     async fn seo(&self, ctx: &Ctx, path: &str) -> Option<Response> {
@@ -397,36 +460,43 @@ impl Server {
     }
 
     async fn page(&self, ctx: &Ctx, path: &str) -> Response {
+        self.serve_page(ctx, path).await.response
+    }
+
+    async fn serve_page(&self, ctx: &Ctx, path: &str) -> Page {
         if !matches!(*ctx.method(), Method::GET | Method::HEAD) {
-            return Response::text("Method Not Allowed").status(StatusCode::METHOD_NOT_ALLOWED);
+            return Response::text("Method Not Allowed").status(StatusCode::METHOD_NOT_ALLOWED).into();
         }
         let key = format!("{path}?{}", ctx.query_string());
         let build = self.current();
         let entry = build.pages.find(path).map(|(_, index, _)| &build.manifest.routes[*index]);
-        let cacheable = !self.dev && entry.is_some_and(|e| e.prerendered.is_some() || e.revalidate.is_some());
-        if cacheable && let Some(hit) = self.cache.get(&key) {
-            return hit;
+        let cached_route =
+            entry.is_some_and(|e| e.prerendered.is_some() || e.revalidate.is_some() || !e.static_paths.is_empty());
+        if !self.dev
+            && let Some(hit) = self.cache.get(&key)
+        {
+            return hit.into();
         }
         let search = ctx.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
         let state = match self.resolve(ctx, path, &search).await {
             Ok(state) => state,
             Err(error) => match error.kind() {
                 ErrorKind::Redirect(location) => {
-                    return Response::redirect(error.status(), location);
+                    return Response::redirect(error.status(), location).into();
                 }
                 _ => self.failure_state(path, &search, &error),
             },
         };
-        let response = self.render(&build, state).await;
-        if cacheable && response.status == StatusCode::OK {
-            let ttl = entry.and_then(|e| e.revalidate).map(Duration::from_secs);
-            self.cache.put(key, &response, ttl);
+        let page = self.render(&build, state).await;
+        if !self.dev && page.response.status == StatusCode::OK && (cached_route || page.hints.is_static) {
+            let ttl = page.hints.revalidate.or(entry.and_then(|e| e.revalidate)).map(Duration::from_secs);
+            self.cache.put(key, &page.response, ttl);
         }
-        response
+        page
     }
 
     /// Renders routes ahead of time; used by `volt build` for static pages.
-    pub async fn prerender(&self, routes: &[String]) -> Vec<(String, Result<String>)> {
+    pub async fn prerender(&self, routes: &[String]) -> Vec<(String, Result<Prerendered>)> {
         let mut out = Vec::with_capacity(routes.len());
         for route in routes {
             let uri = route.parse().unwrap_or_default();
@@ -439,9 +509,12 @@ impl Server {
                 started: Instant::now(),
             };
             let ctx = Ctx::new(request, self.state.clone(), self.config.clone());
-            let response = self.page(&ctx, route).await;
-            let result = match response.status {
-                StatusCode::OK => Ok(String::from_utf8_lossy(&response.body).into_owned()),
+            let page = self.serve_page(&ctx, route).await;
+            let result = match page.response.status {
+                StatusCode::OK => Ok(Prerendered {
+                    html: String::from_utf8_lossy(&page.response.body).into_owned(),
+                    revalidate: page.hints.revalidate,
+                }),
                 status => Err(Error::internal(format!("prerender returned {status}"))),
             };
             out.push((route.clone(), result));
@@ -500,13 +573,14 @@ impl Server {
         }
     }
 
-    async fn render(&self, build: &Build, state: PageState) -> Response {
+    async fn render(&self, build: &Build, state: PageState) -> Page {
         match self.render_once(build, &state).await {
-            Ok(response) => response,
+            Ok(page) => page,
             Err(error) if self.dev => {
                 log::error(error.message());
                 Response::html(error_overlay("Render failed", error.message()))
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .into()
             }
             Err(error) => {
                 log::error(&format!("render {} failed: {}", state.pathname, error.message()));
@@ -517,33 +591,42 @@ impl Server {
                     ..state
                 };
                 match self.render_once(build, &fallback).await {
-                    Ok(response) => response,
+                    Ok(page) => page,
                     Err(_) => Response::html("<!DOCTYPE html><title>500</title><h1>500 Internal Server Error</h1>")
-                        .status(StatusCode::INTERNAL_SERVER_ERROR),
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .into(),
                 }
             }
         }
     }
 
-    async fn render_once(&self, build: &Build, state: &PageState) -> Result<Response> {
+    async fn render_once(&self, build: &Build, state: &PageState) -> Result<Page> {
         let payload = serde_json::to_string(state)?;
         let output = self.engine.call("render", payload).await?;
         let rendered: Rendered = serde_json::from_str(&output)?;
         if let Some(redirect) = rendered.redirect {
             let status = StatusCode::from_u16(redirect.status).unwrap_or(StatusCode::TEMPORARY_REDIRECT);
-            return Ok(Response::redirect(status, &redirect.location));
+            return Ok(Response::redirect(status, &redirect.location).into());
         }
-        let route = build.manifest.route(&state.route);
         let mut state = state.clone();
         state.status = rendered.status;
+        if let Some(route) = rendered.route {
+            state.route = route;
+        }
+        if let Some(data) = rendered.data {
+            state.data = data;
+        }
+        let route = build.manifest.route(&state.route);
         let html = Document { manifest: &build.manifest, route, state: &state, dev: self.dev }.render(&rendered.html);
         let status = StatusCode::from_u16(rendered.status).unwrap_or(StatusCode::OK);
-        let cache = if route.is_some_and(|r| r.prerendered.is_some()) {
+        let cache = if route.is_some_and(|r| r.prerendered.is_some()) || rendered.hints.is_static {
             "public, max-age=0, s-maxage=31536000, stale-while-revalidate"
         } else {
             "private, no-cache, no-store, max-age=0, must-revalidate"
         };
-        Ok(Response::html(html).status(status).header(header::CACHE_CONTROL, HeaderValue::from_static(cache)))
+        let response =
+            Response::html(html).status(status).header(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+        Ok(Page { response, hints: rendered.hints })
     }
 
     /// Security headers, configured headers and on-the-fly gzip.
@@ -577,6 +660,12 @@ impl Server {
             response.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
             response.headers.append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
         }
+    }
+}
+
+impl From<Response> for Page {
+    fn from(response: Response) -> Self {
+        Self { response, hints: CacheHints::default() }
     }
 }
 

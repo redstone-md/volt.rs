@@ -1,5 +1,6 @@
 //! Build manifest written by `volt build` and read by the server.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,23 @@ pub struct RouteEntry {
     pub revalidate: Option<u64>,
     #[serde(default)]
     pub dynamic: bool,
+    /// Rendered by the Pages Router: data requests also run `getServerSideProps` / `getStaticProps`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pages: bool,
+    /// Concrete paths of a dynamic route prerendered from `getStaticPaths`, mapped to their HTML files.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub static_paths: BTreeMap<String, String>,
+}
+
+impl RouteEntry {
+    /// Prerendered paths and their HTML files relative to the out dir.
+    pub fn prerendered_files(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.prerendered
+            .as_deref()
+            .map(|file| (self.id.as_str(), file))
+            .into_iter()
+            .chain(self.static_paths.iter().map(|(path, file)| (path.as_str(), file.as_str())))
+    }
 }
 
 impl Manifest {

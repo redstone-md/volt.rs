@@ -1,4 +1,7 @@
-import { createElement as h } from "react";
+import { Fragment, createElement as h } from "react";
+
+export { default as PagesApp } from "../app.js";
+export { default as Document } from "../document.js";
 
 const center = {
   minHeight: "100vh",
@@ -27,3 +30,13 @@ export function ErrorPage({ error }) {
 }
 
 export const notFoundMetadata = { title: "404: This page could not be found.", robots: { index: false } };
+
+export function PagesNotFound() {
+  return h(Fragment, null, h("title", null, notFoundMetadata.title), h(NotFound));
+}
+
+export function PagesError({ statusCode, error }) {
+  const status = statusCode ?? error?.status ?? 500;
+  const message = error?.message ?? "Something went wrong.";
+  return h(Fragment, null, h("title", null, `${status}: ${message}`), h(Status, { status, message }));
+}

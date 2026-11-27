@@ -7,7 +7,7 @@ export async function boot(routes) {
   const script = document.getElementById("__VOLT_DATA__");
   const state = JSON.parse(script.textContent);
   const initial = await createView(routes, state);
-  const container = document.getElementById("__volt") ?? document;
+  const container = document.getElementById("__next") ?? document.getElementById("__volt") ?? document;
   hydrateRoot(container, h(App, { routes, initial }), {
     onRecoverableError(error) {
       if (process.env.NODE_ENV !== "production") console.warn("[volt] hydration:", error);

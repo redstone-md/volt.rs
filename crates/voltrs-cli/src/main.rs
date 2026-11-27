@@ -169,7 +169,7 @@ fn routes(project: &Project) -> Result<()> {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-    for route in routes::scan(&project.app_dir)?.iter().filter(|r| !r.is_special()) {
+    for route in project.routes()?.iter().filter(|r| !r.is_special()) {
         let kind = if info.loaders.contains(&route.id) {
             "loader"
         } else if route.is_dynamic() {
@@ -181,7 +181,8 @@ fn routes(project: &Project) -> Result<()> {
             routes::Module::File(path) => project.relative(path).into_owned(),
             routes::Module::Builtin(name) => name.to_string(),
         };
-        println!("  {:<32} {:<8} {}", route.id, kind, log::paint("2", &file));
+        let router = if route.is_pages() { "pages" } else { "app" };
+        println!("  {:<32} {:<8} {:<6} {}", route.id, kind, router, log::paint("2", &file));
     }
     for api in &info.api {
         println!("  {:<32} {:<8}", api, "api");
