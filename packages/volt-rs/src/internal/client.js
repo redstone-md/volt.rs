@@ -1,5 +1,6 @@
 import { createElement as h } from "react";
 import { hydrateRoot } from "react-dom/client";
+import { isNotFound, readRedirect } from "./errors.js";
 import { App, createView, isPagesView } from "./router.js";
 
 /** Hydrates the server-rendered document; called by the generated client entry with the routes and their loading shells. */
@@ -13,5 +14,14 @@ export async function boot(routes, shells = {}) {
     onRecoverableError(error) {
       if (process.env.NODE_ENV !== "production") console.warn("[volt] hydration:", error);
     },
+    ...(process.env.NODE_ENV !== "production" &&
+      window.__VOLT_REFRESH__ && { onCaughtError: report, onUncaughtError: report }),
   });
+}
+
+/** Shows render errors in the `volt dev` overlay, including the ones an `error.tsx` boundary caught. */
+function report(error, info) {
+  if (isNotFound(error) || readRedirect(error)) return;
+  console.error(error, info?.componentStack ?? "");
+  window.dispatchEvent(new CustomEvent("volt:error", { detail: error }));
 }

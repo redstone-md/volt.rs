@@ -206,7 +206,9 @@ class RootBoundary extends Component {
     const redirect = readRedirect(error);
     if (redirect) this.props.onRedirect(redirect);
     else if (isNotFound(error)) this.props.onNotFound();
-    else throw error;
+    // Under `volt dev` the error shows in the overlay and the boundary stays mounted, so Fast Refresh can
+    // render the fixed tree again; rethrown, it would unmount the root.
+    else if (process.env.NODE_ENV === "production" || !window.__VOLT_REFRESH__) throw error;
   }
   componentDidUpdate(previous) {
     if (previous.view !== this.props.view && this.state.error) this.setState({ error: null });
