@@ -1,5 +1,5 @@
 import { useContext, useMemo } from "react";
-import { RouterContext, getRouter } from "./internal/router.js";
+import { LayoutSegmentContext, RouterContext, ServerInsertedHTMLContext, getRouter } from "./internal/router.js";
 
 export { notFound, permanentRedirect, redirect } from "./internal/errors.js";
 export { getRouter };
@@ -36,3 +36,32 @@ export function useData() {
 export function useNavigationPending() {
   return useRouterContext().pending;
 }
+
+/**
+ * Active segments below the layout this is called from (`["blog", "hello"]` in the root layout on
+ * `/blog/hello`). Parallel route slots are not supported, so any key other than `children` returns `[]`.
+ */
+export function useSelectedLayoutSegments(parallelRoutesKey = "children") {
+  const segments = useContext(LayoutSegmentContext);
+  return parallelRoutesKey === "children" ? (segments ?? []) : [];
+}
+
+/** The active segment one level below the layout this is called from, or `null` at the page itself. */
+export function useSelectedLayoutSegment(parallelRoutesKey = "children") {
+  return useSelectedLayoutSegments(parallelRoutesKey)[0] ?? null;
+}
+
+/**
+ * Adds the returned elements to the head of the server-rendered document once the whole tree has rendered,
+ * which CSS-in-JS libraries use to flush their styles. Does nothing in the browser.
+ */
+export function useServerInsertedHTML(callback) {
+  const register = useContext(ServerInsertedHTMLContext);
+  if (register) register(callback);
+}
+
+/** Next.js compatibility no-op: caching follows route exports (`dynamic`, `revalidate`) and Rust loaders. */
+export function unstable_noStore() {}
+
+/** Next.js compatibility no-op: resolves immediately. */
+export async function connection() {}

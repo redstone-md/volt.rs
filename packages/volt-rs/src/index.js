@@ -16,4 +16,9 @@ export {
   usePathname,
   useRouter,
   useSearchParams,
+  useSelectedLayoutSegment,
+  useSelectedLayoutSegments,
+  useServerInsertedHTML,
+  unstable_noStore,
+  connection,
 } from "./navigation.js";

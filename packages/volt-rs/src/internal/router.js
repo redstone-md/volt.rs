@@ -24,6 +24,12 @@ const PREFETCH_TTL = 30_000;
 
 export const RouterContext = createContext(null);
 
+/** Segments below the nearest layout, for `useSelectedLayoutSegment(s)`. */
+export const LayoutSegmentContext = createContext(null);
+
+/** Registers `useServerInsertedHTML` callbacks; only provided while rendering on the server. */
+export const ServerInsertedHTMLContext = createContext(null);
+
 const controller = { router: null, state: null, revalidate: null };
 
 /** Router of the mounted app, for use outside React components. */
@@ -137,18 +143,29 @@ async function loadRoute(routes, id) {
 /** Loads route modules and resolves metadata for a page state. */
 export async function createView(routes, state) {
   const route = await loadRoute(routes, state.route);
-  const metadata = kindOf(route) === "pages" ? null : await resolveMetadata(route, pageProps(state), state.site);
+  const resolve = kindOf(route) === "app" && !state.globalError;
+  const metadata = resolve ? await resolveMetadata(route, pageProps(state), state.site, state.notFound) : null;
   return { route, state, metadata };
 }
 
-class ErrorBoundary extends Component {
+/**
+ * Catches errors until `resetKey` changes. Boundaries are reset this way rather than remounted with a `key`,
+ * which would also remount the layouts nested inside them on every navigation.
+ */
+class Boundary extends Component {
   constructor(props) {
     super(props);
-    this.state = { error: null };
+    this.state = { error: null, key: props.resetKey };
   }
   static getDerivedStateFromError(error) {
     return { error };
   }
+  static getDerivedStateFromProps(props, state) {
+    return props.resetKey === state.key ? null : { error: null, key: props.resetKey };
+  }
+}
+
+class ErrorBoundary extends Boundary {
   render() {
     const { error } = this.state;
     if (!error) return this.props.children;
@@ -157,16 +174,11 @@ class ErrorBoundary extends Component {
   }
 }
 
-class NotFoundBoundary extends Component {
-  constructor(props) {
-    super(props);
-    this.state = { error: null };
-  }
-  static getDerivedStateFromError(error) {
-    return { error };
-  }
+class NotFoundBoundary extends Boundary {
   render() {
     const { error } = this.state;
+    // `forced`: the server already resolved a `notFound()` to this boundary.
+    if (this.props.forced) return h(this.props.fallback);
     if (!error) return this.props.children;
     if (!isNotFound(error)) throw error;
     return h(this.props.fallback);
@@ -195,6 +207,31 @@ class RootBoundary extends Component {
   }
 }
 
+/** `global-error.tsx` around the root layout: it replaces the whole document until the next navigation. */
+class GlobalErrorBoundary extends Boundary {
+  render() {
+    const { error } = this.state;
+    if (!error) return this.props.children;
+    if (isNotFound(error) || readRedirect(error)) throw error;
+    return h(this.props.fallback, { error, reset: () => this.setState({ error: null }) });
+  }
+}
+
+function dynamicName(name) {
+  return (/^\[\[?\.\.\.(.+?)\]?\]$/.exec(name) ?? /^\[(.+)\]$/.exec(name))?.[1];
+}
+
+/** The route's directories below `depth`, dynamic ones replaced by their values, as in Next.js. */
+function segmentsBelow(route, depth, params) {
+  const out = [];
+  for (const name of (route.path ?? []).slice(depth)) {
+    const param = dynamicName(name);
+    const value = param === undefined ? name : [].concat(params?.[param] ?? []).join("/");
+    if (value !== "") out.push(value);
+  }
+  return out;
+}
+
 /** Pages Router tree: `_app` wrapping the page component. */
 function PagesTree({ view }) {
   const { route, state } = view;
@@ -214,18 +251,28 @@ function Tree({ view }) {
 function AppTree({ view }) {
   const { route, state, metadata } = view;
   const Page = component(route.page);
+  const GlobalError = route.globalError && component(route.globalError);
   const props = useMemo(() => pageProps(state), [state]);
+  if (state.globalError && GlobalError) return h(GlobalError, { error: state.error, reset: () => location.reload() });
   let node = state.route === ERROR_ROUTE ? h(Page, { error: state.error, reset: () => location.reload() }) : h(Page, props);
+  const resetKey = state.pathname;
   for (let i = route.segments.length - 1; i >= 0; i--) {
     const segment = route.segments[i];
-    if (segment.notFound) node = h(NotFoundBoundary, { key: state.pathname, fallback: component(segment.notFound) }, node);
+    const below = segmentsBelow(route, segment.path?.length ?? 0, state.params);
+    if (segment.notFound) {
+      const fallback = component(segment.notFound);
+      node = h(NotFoundBoundary, { resetKey, fallback, forced: state.notFound === i }, node);
+    }
     if (segment.loading) node = h(Suspense, { fallback: h(component(segment.loading)) }, node);
-    if (segment.error) node = h(ErrorBoundary, { key: state.pathname, fallback: component(segment.error) }, node);
-    if (segment.template) node = h(component(segment.template), { key: state.pathname }, node);
+    if (segment.error) node = h(ErrorBoundary, { resetKey, fallback: component(segment.error) }, node);
+    // As in Next.js, a template remounts when the segment right below it changes.
+    if (segment.template) node = h(component(segment.template), { key: below[0] ?? "" }, node);
     if (i === 0) node = h(Fragment, null, h(Metadata, { metadata }), node);
-    if (segment.layout) node = h(component(segment.layout), { params: props.params }, node);
+    if (segment.layout) {
+      node = h(LayoutSegmentContext.Provider, { value: below }, h(component(segment.layout), { params: props.params }, node));
+    }
   }
-  return node;
+  return GlobalError ? h(GlobalErrorBoundary, { resetKey: view, fallback: GlobalError }, node) : node;
 }
 
 const historyKey = () => Math.random().toString(36).slice(2, 10);

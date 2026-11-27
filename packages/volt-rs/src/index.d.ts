@@ -19,6 +19,11 @@ export {
   usePathname,
   useRouter,
   useSearchParams,
+  useSelectedLayoutSegment,
+  useSelectedLayoutSegments,
+  useServerInsertedHTML,
+  unstable_noStore,
+  connection,
 } from "./navigation";
 export type { Router } from "./navigation";
 
@@ -58,6 +63,35 @@ export type GetStaticPaths<P extends Params = Params> = () => GetStaticPathsResu
 export interface ErrorProps {
   error: Error & { status?: number; digest?: string };
   reset: () => void;
+}
+
+/** Return types of the metadata routes `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts`. */
+export declare namespace MetadataRoute {
+  type Sitemap = {
+    url: string;
+    lastModified?: string | Date;
+    changeFrequency?: "always" | "hourly" | "daily" | "weekly" | "monthly" | "yearly" | "never";
+    priority?: number;
+  }[];
+  type RobotsRule = {
+    userAgent?: string | string[];
+    allow?: string | string[];
+    disallow?: string | string[];
+    crawlDelay?: number;
+  };
+  type Robots = { rules: RobotsRule | RobotsRule[]; sitemap?: string | string[]; host?: string };
+  type Manifest = {
+    name?: string;
+    short_name?: string;
+    description?: string;
+    start_url?: string;
+    scope?: string;
+    display?: "fullscreen" | "standalone" | "minimal-ui" | "browser";
+    background_color?: string;
+    theme_color?: string;
+    icons?: { src: string; sizes?: string; type?: string; purpose?: string }[];
+    [key: string]: unknown;
+  };
 }
 
 type Url = string | URL;

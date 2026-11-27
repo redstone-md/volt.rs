@@ -85,6 +85,12 @@ declare module "next/dynamic" {
   export * from "volt-rs/dynamic";
   export { default } from "volt-rs/dynamic";
 }
+declare module "next/cache" {
+  export * from "volt-rs/cache";
+}
+declare module "next/server" {
+  export * from "volt-rs/server";
+}
 declare module "*.woff" {
   const url: string;
   export default url;

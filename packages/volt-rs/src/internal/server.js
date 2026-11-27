@@ -1,9 +1,9 @@
-import { createElement as h } from "react";
+import { Fragment, createElement as h } from "react";
 import { renderToReadableStream, renderToString } from "react-dom/server";
 import DefaultDocument, { DocumentContext } from "../document.js";
 import { isNotFound, readRedirect } from "./errors.js";
 import { resolveProps, staticPaths } from "./pages.js";
-import { App, NOT_FOUND_ROUTE, createView } from "./router.js";
+import { App, ERROR_ROUTE, NOT_FOUND_ROUTE, ServerInsertedHTMLContext, createView } from "./router.js";
 
 const isPages = (route) => route?.kind === "pages";
 
@@ -29,16 +29,37 @@ async function renderDocument(document, main, state) {
 }
 
 /**
- * Renders an App Router tree. `"string"` uses `renderToString`. The other modes report the shell to
- * `sink.shell(json)` and each chunk to `sink.write(bytes)`, then resolve to `null`: `"complete"` waits
- * for every Suspense boundary first, `"stream"` writes chunks as React flushes them. A `notFound()` or
- * `redirect()` raised before the shell is sent is thrown, so it still decides the status code, even when
- * a Suspense boundary caught it. `sink.abort(reason)`, called by the engine when the render runs out of
- * time, makes React finish the document with the boundaries still pending rendered in the browser.
+ * Collects `useServerInsertedHTML` callbacks of one render. They run once the tree (or, when streaming, its
+ * shell) is complete and what they return goes into the head.
  */
-async function renderApp(element, state, mode, sink) {
+function insertedHTML() {
+  const callbacks = [];
+  return {
+    wrap: (element) => h(ServerInsertedHTMLContext.Provider, { value: (callback) => callbacks.push(callback) }, element),
+    head() {
+      const nodes = callbacks.map((callback) => callback()).filter((node) => node != null && node !== false);
+      return nodes.length ? renderToString(h(Fragment, null, ...nodes)) : "";
+    },
+  };
+}
+
+/**
+ * Renders an App Router tree, with `fields` added to its result. `"string"` uses `renderToString`. The other
+ * modes report the shell to `sink.shell(json)` and each chunk to `sink.write(bytes)`, then resolve to `null`:
+ * `"complete"` waits for every Suspense boundary first, `"stream"` writes chunks as React flushes them. A
+ * `notFound()` or `redirect()` raised before the shell is sent is thrown, so it still decides the status code,
+ * even when a Suspense boundary caught it. `sink.abort(reason)`, called by the engine when the render runs out
+ * of time, makes React finish the document with the boundaries still pending rendered in the browser.
+ */
+async function renderView(routes, state, mode, sink, fields = {}) {
+  const initial = await createView(routes, state);
+  const inserted = insertedHTML();
+  const element = inserted.wrap(h(App, { routes, initial }));
   const status = state.status ?? 200;
-  if (mode === "string") return { html: renderToString(element), status };
+  if (mode === "string") {
+    const html = renderToString(element);
+    return { html, head: inserted.head(), status, ...fields };
+  }
   let raised = null;
   const controller = new AbortController();
   sink.abort = (message) => {
@@ -59,7 +80,8 @@ async function renderApp(element, state, mode, sink) {
     throw raised;
   }
   const incomplete = controller.signal.aborted;
-  if (!sink.shell(JSON.stringify({ status, route: state.route, incomplete }))) {
+  const shell = { status, route: state.route, incomplete, head: inserted.head(), ...fields };
+  if (!sink.shell(JSON.stringify(shell))) {
     controller.abort();
     return null;
   }
@@ -77,19 +99,64 @@ async function renderApp(element, state, mode, sink) {
   return null;
 }
 
+/** Segments with a `not-found` below the root, innermost first: where a `notFound()` may be caught. */
+const notFoundLevels = (route) =>
+  route.segments
+    .map((segment, index) => (index > 0 && segment.notFound ? index : -1))
+    .filter((index) => index > 0)
+    .reverse();
+
+/**
+ * Renders an App Router page. A `notFound()` that reaches the shell is retried with the innermost `not-found`
+ * shown in place of its segment's children, then the next one out (the layout of that segment may be the one
+ * that threw), before the root not-found page takes over.
+ */
+async function renderApp(routes, route, state, mode, sink) {
+  try {
+    return await renderView(routes, state, mode, sink);
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    for (const index of notFoundLevels(route)) {
+      try {
+        return await renderView(routes, { ...state, notFound: index, status: 404 }, mode, sink, { notFound: index });
+      } catch (retry) {
+        if (!isNotFound(retry)) throw retry;
+      }
+    }
+    throw error;
+  }
+}
+
+/** Whether `global-error` can replace the document, when even the error page failed to render. */
+async function hasGlobalError(routes, state) {
+  if (state.route !== ERROR_ROUTE || state.globalError) return false;
+  return Boolean((await loadRoute(routes, ERROR_ROUTE)).globalError);
+}
+
+/** `global-error` in place of the document. */
+function renderGlobalError(routes, state, mode, sink) {
+  const next = { ...state, globalError: true, status: state.status ?? 500 };
+  return renderView(routes, next, mode, sink, { globalError: true });
+}
+
 async function renderPage(routes, options, state, mode, sink) {
   const route = await loadRoute(routes, state.route);
-  if (!isPages(route)) {
-    const initial = await createView(routes, state);
-    return renderApp(h(App, { routes, initial }), state, mode, sink);
-  }
+  if (!isPages(route)) return renderApp(routes, route, state, mode, sink);
   const result = await resolveProps(route, state);
   if (result.notFound) return notFound(routes, options, state, mode, sink);
   if (result.redirect) return { html: "", status: result.redirect.status, redirect: result.redirect };
   const next = { ...state, data: result.props };
   const initial = await createView(routes, next);
-  const html = await renderDocument(options.document, h(App, { routes, initial }), next);
-  return { html, status: next.status ?? 200, data: next.data, static: result.static, revalidate: result.revalidate };
+  const inserted = insertedHTML();
+  const html = await renderDocument(options.document, inserted.wrap(h(App, { routes, initial })), next);
+  return {
+    html,
+    head: inserted.head(),
+    status: next.status ?? 200,
+    data: next.data,
+    static: result.static,
+    revalidate: result.revalidate,
+  };
 }
 
 async function notFound(routes, options, state, mode, sink) {
@@ -100,18 +167,25 @@ async function notFound(routes, options, state, mode, sink) {
   return { ...rendered, status: 404, route: NOT_FOUND_ROUTE, static: false, revalidate: null };
 }
 
-/** Renders a page state, turning `notFound()` and `redirect()` into the not-found page and a redirect. */
+/** A render result as the engine expects it: `""` once it was streamed to the sink. */
+const reply = (rendered) => (rendered === null ? "" : JSON.stringify(rendered));
+
+/**
+ * Renders a page state, turning `notFound()` and `redirect()` into the not-found page and a redirect, and a
+ * failed error page into `global-error`.
+ */
 async function respond(routes, options, payload, mode, sink) {
   const state = JSON.parse(payload);
   try {
-    const rendered = await renderPage(routes, options, state, mode, sink);
-    return rendered === null ? "" : JSON.stringify(rendered);
+    return reply(await renderPage(routes, options, state, mode, sink));
   } catch (error) {
     const redirect = readRedirect(error);
     if (redirect) return JSON.stringify({ html: "", status: redirect.status, redirect });
-    if (!isNotFound(error) || state.route === NOT_FOUND_ROUTE) throw error;
-    const rendered = await notFound(routes, options, state, mode, sink);
-    return rendered === null ? "" : JSON.stringify(rendered);
+    if (isNotFound(error) && state.route !== NOT_FOUND_ROUTE) {
+      return reply(await notFound(routes, options, state, mode, sink));
+    }
+    if (await hasGlobalError(routes, state)) return reply(await renderGlobalError(routes, state, mode, sink));
+    throw error;
   }
 }
 
@@ -123,6 +197,22 @@ function dynamicParams(route) {
   const found = modules(route).find((module) => typeof module.dynamicParams === "boolean");
   return found ? found.dynamicParams : true;
 }
+
+/** Route segment config `dynamic`, the page taking precedence over its layouts. */
+function dynamicMode(route) {
+  return modules(route).find((module) => typeof module.dynamic === "string")?.dynamic ?? "auto";
+}
+
+const isoDate = (value) => (value instanceof Date ? value.toISOString() : value == null ? null : String(value));
+
+/** Sitemap entries as `voltrs::SitemapEntry` reads them. */
+const sitemapEntries = (entries) =>
+  (entries ?? []).map((entry) => ({
+    url: entry.url,
+    lastModified: isoDate(entry.lastModified),
+    changeFrequency: entry.changeFrequency ?? null,
+    priority: typeof entry.priority === "number" ? entry.priority : null,
+  }));
 
 /**
  * Params of every path to prerender. Layout generators run first (outermost first); each later
@@ -159,6 +249,13 @@ export function createServer(routes, options = {}) {
      * Pages Router pages and redirects resolve to a complete result instead.
      */
     stream: (payload, sink) => respond(routes, options, payload, "stream", sink),
+    /** Default export of `app/sitemap.ts`, `app/robots.ts` or `app/manifest.ts`, as JSON. */
+    async metadataRoute(name) {
+      const module = options.metadata?.[name];
+      if (!module) throw new Error(`no metadata route \`${name}\``);
+      const value = typeof module.default === "function" ? await module.default() : module.default;
+      return JSON.stringify(name === "sitemap" ? sitemapEntries(value) : (value ?? {}));
+    },
     /** Pages Router props for a client navigation (`/_volt/data`). */
     async props(payload) {
       const state = JSON.parse(payload);
@@ -178,7 +275,7 @@ export function createServer(routes, options = {}) {
           configs.push({
             id,
             revalidate: typeof page.revalidate === "number" ? page.revalidate : null,
-            dynamic: page.dynamic ?? "auto",
+            dynamic: dynamicMode(route),
             dynamicParams: dynamicParams(route),
             staticParams:
               typeof page.getStaticPaths === "function" ||

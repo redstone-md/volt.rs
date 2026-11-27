@@ -21,3 +21,8 @@ export function getRouter(): Router | null;
 export function notFound(): never;
 export function redirect(location: string, type?: "replace" | "push"): never;
 export function permanentRedirect(location: string, type?: "replace" | "push"): never;
+export function useSelectedLayoutSegment(parallelRoutesKey?: string): string | null;
+export function useSelectedLayoutSegments(parallelRoutesKey?: string): string[];
+export function useServerInsertedHTML(callback: () => import("react").ReactNode): void;
+export function unstable_noStore(): void;
+export function connection(): Promise<void>;

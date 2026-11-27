@@ -1,4 +1,5 @@
 import { createElement as h, Fragment } from "react";
+import { fillPattern } from "./pages.js";
 
 const list = (value) => (value == null ? [] : Array.isArray(value) ? value : [value]);
 
@@ -13,17 +14,55 @@ async function exported(module, props, name, generator) {
   return module[name];
 }
 
-/** Merges `metadata` / `generateMetadata` from every segment, Next.js style. */
-export async function resolveMetadata(route, props, site) {
-  const modules = [...route.segments.map((s) => s.layout), route.page];
+/** A metadata file URL (`/blog/[slug]/opengraph-image.png?hash`) for the current params. */
+function fileUrl(url, params) {
+  const [path, query] = url.split("?");
+  return query ? `${fillPattern(path, params)}?${query}` : fillPattern(path, params);
+}
+
+/** Metadata contributed by `app/` metadata files, which take precedence over the same segment's exports. */
+function applyFiles(merged, files, params) {
+  const fill = (items) => items.map((item) => ({ ...item, url: fileUrl(item.url, params) }));
+  if (files.icon || files.apple) {
+    const icons = typeof merged.icons === "string" ? { icon: merged.icons } : { ...merged.icons };
+    if (files.icon) icons.icon = fill(files.icon);
+    if (files.apple) icons.apple = fill(files.apple);
+    merged.icons = icons;
+  }
+  if (files.openGraph) merged.openGraph = { ...merged.openGraph, images: fill(files.openGraph) };
+  if (files.twitter) merged.twitter = { ...merged.twitter, images: fill(files.twitter) };
+  if (files.manifest) merged.manifest = files.manifest;
+}
+
+/** Forgets inherited file metadata that a deeper segment's exports replace. */
+function overridden(files, meta) {
+  if (meta.icons !== undefined) {
+    delete files.icon;
+    delete files.apple;
+  }
+  if (meta.openGraph?.images !== undefined) delete files.openGraph;
+  if (meta.twitter?.images !== undefined) delete files.twitter;
+  if (meta.manifest !== undefined) delete files.manifest;
+}
+
+/**
+ * Merges `metadata` / `generateMetadata` and metadata files from every segment, Next.js style. With
+ * `notFound` (the index of the segment showing its `not-found`), only that segment and its parents count.
+ */
+export async function resolveMetadata(route, props, site, notFound) {
+  const levels = [...route.segments.map((s) => [s.layout, s.files]), [route.page, route.files]];
+  const shown = notFound == null ? levels : levels.slice(0, notFound + 1);
   const merged = { metadataBase: site?.url };
+  const files = {};
   const viewport = {};
   let template = null;
   let title;
-  for (const module of modules) {
+  for (const [module, found] of shown) {
     const meta = await exported(module, props, "metadata", "generateMetadata");
     const view = await exported(module, props, "viewport", "generateViewport");
     if (view) Object.assign(viewport, view);
+    if (meta) overridden(files, meta);
+    if (found) Object.assign(files, found);
     if (!meta) continue;
     const { title: own, ...rest } = meta;
     Object.assign(merged, rest);
@@ -34,6 +73,8 @@ export async function resolveMetadata(route, props, site) {
       if (typeof own === "object" && own.template) template = own.template;
     }
   }
+  applyFiles(merged, files, props.params);
+  if (notFound != null) merged.robots = { index: false };
   if (title == null && site?.name) title = site.name;
   return { ...merged, title, viewport };
 }
@@ -100,7 +141,7 @@ export function Metadata({ metadata: m }) {
 
   const icons = typeof m.icons === "string" ? { icon: m.icons } : (m.icons ?? {});
   list(icons.icon).forEach((icon, i) => link(`icon-${i}`, { rel: "icon", ...(typeof icon === "string" ? { href: icon } : { href: icon.url, type: icon.type, sizes: icon.sizes }) }));
-  list(icons.apple).forEach((icon, i) => link(`apple-${i}`, { rel: "apple-touch-icon", href: typeof icon === "string" ? icon : icon.url, sizes: icon.sizes }));
+  list(icons.apple).forEach((icon, i) => link(`apple-${i}`, { rel: "apple-touch-icon", ...(typeof icon === "string" ? { href: icon } : { href: icon.url, type: icon.type, sizes: icon.sizes }) }));
   list(icons.shortcut).forEach((icon, i) => link(`shortcut-${i}`, { rel: "shortcut icon", href: typeof icon === "string" ? icon : icon.url }));
 
   const og = m.openGraph;
@@ -114,6 +155,7 @@ export function Metadata({ metadata: m }) {
     p("type", og.type ?? "website");
     images(og.images, base).forEach((image, i) => {
       meta(`og:image-${i}`, { property: "og:image", content: image.url });
+      meta(`og:image:type-${i}`, { property: "og:image:type", content: image.type });
       meta(`og:image:width-${i}`, { property: "og:image:width", content: image.width });
       meta(`og:image:height-${i}`, { property: "og:image:height", content: image.height });
       meta(`og:image:alt-${i}`, { property: "og:image:alt", content: image.alt });
@@ -132,7 +174,12 @@ export function Metadata({ metadata: m }) {
     t("creator", tw?.creator);
     t("title", tw?.title ?? og?.title ?? m.title);
     t("description", tw?.description ?? og?.description ?? m.description);
-    twImages.forEach((image, i) => meta(`twitter:image-${i}`, { name: "twitter:image", content: image.url }));
+    twImages.forEach((image, i) => {
+      meta(`twitter:image-${i}`, { name: "twitter:image", content: image.url });
+      meta(`twitter:image:width-${i}`, { name: "twitter:image:width", content: image.width });
+      meta(`twitter:image:height-${i}`, { name: "twitter:image:height", content: image.height });
+      meta(`twitter:image:alt-${i}`, { name: "twitter:image:alt", content: image.alt });
+    });
   }
 
   const verification = m.verification ?? {};
