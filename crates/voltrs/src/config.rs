@@ -30,6 +30,7 @@ pub struct Config {
     pub build: BuildConfig,
     pub seo: SeoConfig,
     pub images: ImageConfig,
+    pub i18n: I18nConfig,
     pub headers: BTreeMap<String, String>,
     pub redirects: Vec<Redirect>,
     pub rewrites: Vec<Rewrite>,
@@ -172,6 +173,117 @@ impl Default for ImageConfig {
     }
 }
 
+/// `[i18n]`: locale-prefixed routing. The default locale is served without a prefix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct I18nConfig {
+    /// Supported locales, e.g. `["en", "de"]`. Empty disables internationalized routing.
+    pub locales: Vec<String>,
+    /// Locale of unprefixed URLs; the first locale when left empty.
+    pub default_locale: String,
+    /// Redirects `/` to the visitor's preferred locale (cookie, then `Accept-Language`).
+    pub locale_detection: bool,
+}
+
+impl Default for I18nConfig {
+    fn default() -> Self {
+        Self { locales: Vec::new(), default_locale: String::new(), locale_detection: true }
+    }
+}
+
+/// Cookies holding a visitor's chosen locale, read in this order; the client runtime writes the first.
+pub const LOCALE_COOKIES: [&str; 2] = ["VOLT_LOCALE", "NEXT_LOCALE"];
+
+impl I18nConfig {
+    pub fn is_enabled(&self) -> bool {
+        !self.locales.is_empty()
+    }
+
+    fn validate(&mut self) -> Result<(), String> {
+        if !self.is_enabled() {
+            return Ok(());
+        }
+        if let Some(bad) =
+            self.locales.iter().find(|l| l.is_empty() || !l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        {
+            return Err(format!("i18n.locales: `{bad}` is not a locale such as `en` or `pt-BR`"));
+        }
+        if self.default_locale.is_empty() {
+            self.default_locale = self.locales[0].clone();
+        }
+        if !self.locales.contains(&self.default_locale) {
+            return Err(format!("i18n.default_locale `{}` is not listed in i18n.locales", self.default_locale));
+        }
+        Ok(())
+    }
+
+    /// The configured spelling of `candidate`, compared case-insensitively.
+    pub fn find(&self, candidate: &str) -> Option<&str> {
+        self.locales.iter().find(|l| l.eq_ignore_ascii_case(candidate)).map(String::as_str)
+    }
+
+    /// Splits an app path into its locale prefix (if any) and the path below it:
+    /// `/de/about` is `(Some("de"), "/about")`, `/de` is `(Some("de"), "/")`.
+    pub fn split<'a>(&self, path: &'a str) -> (Option<&str>, &'a str) {
+        let rest = path.strip_prefix('/').unwrap_or(path);
+        let (first, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        match self.find(first).filter(|_| !first.is_empty()) {
+            Some(locale) => (Some(locale), if tail.is_empty() { "/" } else { tail }),
+            None => (None, path),
+        }
+    }
+
+    /// App path of `path` in `locale`: prefixed unless `locale` is the default.
+    pub fn localize(&self, locale: &str, path: &str) -> String {
+        if !self.is_enabled() || locale == self.default_locale {
+            return path.to_owned();
+        }
+        match path {
+            "/" | "" => format!("/{locale}"),
+            _ => format!("/{locale}{path}"),
+        }
+    }
+
+    /// Prefixes a local redirect target with `locale`, leaving external URLs, internal endpoints
+    /// and paths that already name a locale alone.
+    pub fn localize_href(&self, locale: &str, href: &str) -> String {
+        let local = href.starts_with('/') && !href.starts_with("//") && !href.starts_with("/\\");
+        if !self.is_enabled() || !local || href.starts_with("/_volt/") || self.split(href).0.is_some() {
+            return href.to_owned();
+        }
+        let (path, rest) = href.split_at(href.find(['?', '#']).unwrap_or(href.len()));
+        format!("{}{rest}", self.localize(locale, path))
+    }
+
+    /// `(locale, app path)` of every locale variant of an unprefixed path, the default locale first.
+    pub fn variants(&self, path: &str) -> Vec<(&str, String)> {
+        let default = std::iter::once(self.default_locale.as_str());
+        let others = self.locales.iter().map(String::as_str).filter(|l| *l != self.default_locale);
+        default.chain(others).map(|locale| (locale, self.localize(locale, path))).collect()
+    }
+
+    /// Best supported locale for an `Accept-Language` header: exact tags first, then a shared
+    /// primary language (`de-AT` picks `de`, `pt` picks `pt-BR`), in the header's quality order.
+    pub fn negotiate(&self, accept_language: &str) -> Option<&str> {
+        let mut ranges: Vec<(&str, f32)> = accept_language
+            .split(',')
+            .filter_map(|part| {
+                let mut pieces = part.split(';');
+                let tag = pieces.next()?.trim();
+                let quality = pieces
+                    .find_map(|p| p.trim().strip_prefix("q="))
+                    .map_or(Some(1.0), |q| q.trim().parse::<f32>().ok())?;
+                (!tag.is_empty() && tag != "*" && quality > 0.0).then_some((tag, quality))
+            })
+            .collect();
+        ranges.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let primary = |tag: &str| tag.split('-').next().unwrap_or(tag).to_ascii_lowercase();
+        ranges.iter().find_map(|(tag, _)| {
+            self.find(tag).or_else(|| self.locales.iter().find(|l| primary(l) == primary(tag)).map(String::as_str))
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Redirect {
@@ -217,6 +329,7 @@ impl Config {
             )));
         }
         config.server.bot_pattern().map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
+        config.i18n.validate().map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
         config.apply_env();
         Ok(config)
     }
@@ -259,6 +372,19 @@ impl Config {
     /// `[build] base_path` without a trailing slash; empty when the app is mounted at `/`.
     pub fn base_path(&self) -> &str {
         &self.build.base_path
+    }
+
+    /// Locale of pages served without a locale prefix: `[i18n] default_locale`, else `[site] language`.
+    pub fn default_locale(&self) -> &str {
+        if self.i18n.is_enabled() { &self.i18n.default_locale } else { &self.site.language }
+    }
+
+    /// Splits a localized app path into its locale (the default one when unprefixed) and the route path.
+    pub fn split_locale<'a>(&self, path: &'a str) -> (&str, &'a str) {
+        match self.i18n.split(path) {
+            (Some(locale), rest) => (locale, rest),
+            (None, rest) => (self.default_locale(), rest),
+        }
     }
 
     /// URL prefix of hashed build assets, including the base path.
@@ -375,6 +501,43 @@ mod tests {
         assert_eq!(config("/docs", false).public_path("/"), "/docs");
         assert_eq!(normalize_base_path("/docs/").as_deref(), Some("/docs"));
         assert!(normalize_base_path("docs").is_none());
+    }
+
+    fn i18n() -> I18nConfig {
+        let mut i18n = I18nConfig { locales: vec!["en".into(), "de".into(), "pt-BR".into()], ..I18nConfig::default() };
+        i18n.validate().unwrap();
+        i18n
+    }
+
+    #[test]
+    fn splits_and_localizes_paths() {
+        let i18n = i18n();
+        assert_eq!(i18n.default_locale, "en");
+        assert_eq!(i18n.split("/de/about"), (Some("de"), "/about"));
+        assert_eq!(i18n.split("/de"), (Some("de"), "/"));
+        assert_eq!(i18n.split("/pt-br/x"), (Some("pt-BR"), "/x"));
+        assert_eq!(i18n.split("/design"), (None, "/design"));
+        assert_eq!(i18n.split("/"), (None, "/"));
+        assert_eq!(i18n.localize("de", "/"), "/de");
+        assert_eq!(i18n.localize("en", "/a"), "/a");
+        assert_eq!(i18n.localize_href("de", "/login?next=1"), "/de/login?next=1");
+        assert_eq!(i18n.localize_href("de", "/en/a"), "/en/a");
+        assert_eq!(i18n.localize_href("de", "https://x.dev/"), "https://x.dev/");
+        let variants: Vec<String> = i18n.variants("/a").into_iter().map(|(_, p)| p).collect();
+        assert_eq!(variants, ["/a", "/de/a", "/pt-BR/a"]);
+        assert_eq!(I18nConfig::default().localize("de", "/a"), "/a");
+    }
+
+    #[test]
+    fn negotiates_accept_language() {
+        let i18n = i18n();
+        assert_eq!(i18n.negotiate("fr;q=0.9, de-AT;q=0.8, en;q=0.5"), Some("de"));
+        assert_eq!(i18n.negotiate("de;q=0.2, en"), Some("en"));
+        assert_eq!(i18n.negotiate("pt"), Some("pt-BR"));
+        assert_eq!(i18n.negotiate("fr, *"), None);
+        assert_eq!(i18n.negotiate("de;q=0"), None);
+        let mut bad = I18nConfig { locales: vec!["en".into()], default_locale: "de".into(), ..I18nConfig::default() };
+        assert!(bad.validate().is_err());
     }
 
     #[test]

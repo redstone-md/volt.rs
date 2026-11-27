@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use http::{HeaderValue, header};
 use serde_json::Value;
 
+use crate::config::Config;
 use crate::manifest::{RouteEntry, prerender_file, same_path};
 use crate::response::Response;
 use crate::router::RoutePattern;
@@ -103,9 +104,10 @@ pub struct PageCache {
     epoch: AtomicU64,
 }
 
-/// Cache key of a request: app path and raw query string.
-pub fn key(path: &str, query: &str) -> String {
-    format!("{path}?{query}")
+/// Cache key of a request: route path (without its locale prefix), raw query string and locale.
+/// Keeping the locale out of the path lets revalidation by path purge every locale variant.
+pub fn key(path: &str, query: &str, locale: &str) -> String {
+    format!("{path}?{query}#{locale}")
 }
 
 fn key_path(key: &str) -> &str {
@@ -206,7 +208,7 @@ impl PageCache {
     }
 
     /// Loads the HTML (and Pages Router props) that `volt build` prerendered and pins it.
-    pub fn preload(&self, routes: &[RouteEntry], out_dir: &Path) {
+    pub fn preload(&self, routes: &[RouteEntry], out_dir: &Path, config: &Config) {
         let Ok(mut entries) = self.entries.write() else {
             return;
         };
@@ -220,7 +222,8 @@ impl PageCache {
                 };
                 let response = Response::html(html).header(header::CACHE_CONTROL, cache_control(route.revalidate));
                 let data = route.static_props.then(|| Self::prerendered_props(out_dir, path)).flatten();
-                let key = key(path, "");
+                let (locale, route_path) = config.split_locale(path);
+                let key = key(route_path, "", locale);
                 let entry = self.entry(&key, &CachedPage { response, data }, route.revalidate.map(Duration::from_secs));
                 entries.remove(&key);
                 entries.pinned.insert(key.clone());
@@ -303,7 +306,7 @@ mod tests {
     }
 
     fn put(cache: &PageCache, path: &str, query: &str, body: &str, ttl: Option<Duration>) {
-        cache.put(key(path, query), &page(body), ttl, cache.ticket());
+        cache.put(key(path, query, "en"), &page(body), ttl, cache.ticket());
     }
 
     fn cached(cache: &PageCache, key: &str) -> bool {
@@ -314,11 +317,11 @@ mod tests {
     fn serves_stale_once_per_refresh() {
         let cache = PageCache::new(1 << 20);
         put(&cache, "/a", "", "a", Some(Duration::ZERO));
-        assert!(matches!(cache.get("/a?"), Lookup::Stale { refresh: true, .. }));
-        assert!(matches!(cache.get("/a?"), Lookup::Stale { refresh: false, .. }));
+        assert!(matches!(cache.get("/a?#en"), Lookup::Stale { refresh: true, .. }));
+        assert!(matches!(cache.get("/a?#en"), Lookup::Stale { refresh: false, .. }));
         put(&cache, "/a", "", "b", Some(Duration::from_secs(60)));
-        assert!(cached(&cache, "/a?"));
-        assert!(matches!(cache.get("/b?"), Lookup::Miss));
+        assert!(cached(&cache, "/a?#en"));
+        assert!(matches!(cache.get("/b?#en"), Lookup::Miss));
     }
 
     #[test]
@@ -331,8 +334,18 @@ mod tests {
         assert_eq!(Target::Path("/blog/a/".into()).apply(&cache), 2);
         assert_eq!(Target::Path("/blog/[slug]".into()).apply(&cache), 1);
         assert_eq!(Target::Prefix("/blog".into()).apply(&cache), 1);
-        assert!(cached(&cache, "/blogger?"));
+        assert!(cached(&cache, "/blogger?#en"));
         assert_eq!(Target::Prefix("/".into()).apply(&cache), 2);
+    }
+
+    #[test]
+    fn revalidating_a_path_purges_every_locale() {
+        let cache = PageCache::new(1 << 20);
+        for locale in ["en", "de"] {
+            cache.put(key("/about", "", locale), &page(locale), None, cache.ticket());
+        }
+        assert!(cached(&cache, "/about?#de"));
+        assert_eq!(Target::Path("/about".into()).apply(&cache), 2);
     }
 
     #[test]
@@ -342,31 +355,31 @@ mod tests {
         for path in ["/a", "/b", "/c"] {
             put(&cache, path, "", &body, None);
         }
-        assert!(cached(&cache, "/a?"));
+        assert!(cached(&cache, "/a?#en"));
         put(&cache, "/d", "", &body, None);
-        assert!(matches!(cache.get("/b?"), Lookup::Miss));
-        for kept in ["/a?", "/c?", "/d?"] {
+        assert!(matches!(cache.get("/b?#en"), Lookup::Miss));
+        for kept in ["/a?#en", "/c?#en", "/d?#en"] {
             assert!(cached(&cache, kept), "{kept}");
         }
         put(&cache, "/huge", "", &"x".repeat(400), None);
-        assert!(matches!(cache.get("/huge?"), Lookup::Miss));
+        assert!(matches!(cache.get("/huge?#en"), Lookup::Miss));
         assert!(cache.entries.read().unwrap().bytes <= 350);
     }
 
     #[test]
     fn keeps_pinned_paths_and_drops_renders_older_than_a_purge() {
         let cache = PageCache::new(0);
-        cache.entries.write().unwrap().pinned.insert(key("/a", ""));
+        cache.entries.write().unwrap().pinned.insert(key("/a", "", "en"));
         put(&cache, "/a", "", "a", None);
         put(&cache, "/b", "", "b", None);
-        assert!(cached(&cache, "/a?"));
-        assert!(matches!(cache.get("/b?"), Lookup::Miss));
+        assert!(cached(&cache, "/a?#en"));
+        assert!(matches!(cache.get("/b?#en"), Lookup::Miss));
 
         let ticket = cache.ticket();
         assert_eq!(Target::Path("/a".into()).apply(&cache), 1);
-        cache.put(key("/a", ""), &page("old"), None, ticket);
-        assert!(matches!(cache.get("/a?"), Lookup::Miss));
+        cache.put(key("/a", "", "en"), &page("old"), None, ticket);
+        assert!(matches!(cache.get("/a?#en"), Lookup::Miss));
         put(&cache, "/a", "", "new", None);
-        assert!(cached(&cache, "/a?"));
+        assert!(cached(&cache, "/a?#en"));
     }
 }

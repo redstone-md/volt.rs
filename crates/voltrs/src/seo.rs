@@ -201,13 +201,63 @@ fn absolute(config: &Config, url: &str) -> String {
     }
 }
 
+/// A sitemap `<url>`: an entry with its absolute location and its `hreflang` alternates.
+struct Location<'a> {
+    entry: &'a SitemapEntry,
+    url: String,
+    alternates: Vec<(String, String)>,
+}
+
+/// Every entry once per locale when `[i18n]` is configured. Relative URLs that already carry a locale
+/// prefix and absolute URLs are kept as they are; duplicates are listed once.
+fn locations<'a>(config: &Config, entries: &'a [SitemapEntry]) -> Vec<Location<'a>> {
+    let i18n = &config.i18n;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for entry in entries {
+        let relative = !entry.url.starts_with("http://") && !entry.url.starts_with("https://");
+        let path = format!("/{}", entry.url.trim_start_matches('/'));
+        if !i18n.is_enabled() || !relative || i18n.split(&path).0.is_some() {
+            let url = absolute(config, &entry.url);
+            if seen.insert(url.clone()) {
+                out.push(Location { entry, url, alternates: Vec::new() });
+            }
+            continue;
+        }
+        let variants: Vec<(String, String)> = i18n
+            .variants(&path)
+            .into_iter()
+            .map(|(locale, localized)| (locale.to_owned(), absolute(config, &localized)))
+            .collect();
+        let mut alternates = variants.clone();
+        alternates.push(("x-default".to_owned(), variants[0].1.clone()));
+        for (_, url) in variants {
+            if seen.insert(url.clone()) {
+                out.push(Location { entry, url, alternates: alternates.clone() });
+            }
+        }
+    }
+    out
+}
+
 pub fn sitemap(config: &Config, entries: &[SitemapEntry]) -> String {
     let mut xml = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"",
     );
-    for entry in entries {
+    if config.i18n.is_enabled() {
+        xml.push_str(" xmlns:xhtml=\"http://www.w3.org/1999/xhtml\"");
+    }
+    xml.push_str(">\n");
+    for Location { entry, url, alternates } in locations(config, entries) {
         xml.push_str("  <url>\n");
-        xml.push_str(&format!("    <loc>{}</loc>\n", escape_xml(&absolute(config, &entry.url))));
+        xml.push_str(&format!("    <loc>{}</loc>\n", escape_xml(&url)));
+        for (lang, href) in &alternates {
+            xml.push_str(&format!(
+                "    <xhtml:link rel=\"alternate\" hreflang=\"{}\" href=\"{}\"/>\n",
+                escape_xml(lang),
+                escape_xml(href)
+            ));
+        }
         if let Some(date) = &entry.last_modified {
             xml.push_str(&format!("    <lastmod>{}</lastmod>\n", escape_xml(date)));
         }
@@ -237,8 +287,8 @@ pub fn robots(config: &Config) -> String {
 
 pub fn llms(config: &Config, entries: &[SitemapEntry]) -> String {
     let mut text = format!("# {}\n\n> {}\n\n## Pages\n\n", config.site.name, config.site_url());
-    for entry in entries {
-        text.push_str(&format!("- {}\n", absolute(config, &entry.url)));
+    for location in locations(config, entries) {
+        text.push_str(&format!("- {}\n", location.url));
     }
     text
 }
@@ -255,6 +305,24 @@ mod tests {
         assert!(xml.contains("<loc>https://volt.rs/blog?a=1&amp;b=2</loc>"));
         assert!(xml.contains("<priority>0.8</priority>"));
         assert!(robots(&config).contains("Sitemap: https://volt.rs/sitemap.xml"));
+        assert!(!xml.contains("xhtml"));
+    }
+
+    #[test]
+    fn lists_locale_variants_with_alternates() {
+        let mut config = Config::default();
+        config.site.url = "https://volt.rs".into();
+        config.i18n.locales = vec!["en".into(), "de".into()];
+        config.i18n.default_locale = "en".into();
+        let entries = [SitemapEntry::new("/"), SitemapEntry::new("/about"), SitemapEntry::new("/de/only")];
+        let xml = sitemap(&config, &entries);
+        for loc in ["https://volt.rs/", "https://volt.rs/de", "https://volt.rs/about", "https://volt.rs/de/about"] {
+            assert!(xml.contains(&format!("<loc>{loc}</loc>")), "{loc}");
+        }
+        assert!(xml.contains("<xhtml:link rel=\"alternate\" hreflang=\"de\" href=\"https://volt.rs/de/about\"/>"));
+        assert!(xml.contains("hreflang=\"x-default\" href=\"https://volt.rs/about\""));
+        assert_eq!(xml.matches("<loc>https://volt.rs/de/only</loc>").count(), 1);
+        assert_eq!(xml.matches("<url>").count(), 5);
     }
 
     #[test]

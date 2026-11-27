@@ -87,6 +87,7 @@ impl ResponseParts {
 pub struct Ctx {
     request: Arc<RequestParts>,
     params: Arc<Params>,
+    locale: Option<Arc<str>>,
     state: Arc<State>,
     config: Arc<Config>,
     cache: Arc<PageCache>,
@@ -95,11 +96,23 @@ pub struct Ctx {
 
 impl Ctx {
     pub(crate) fn new(request: RequestParts, state: Arc<State>, config: Arc<Config>, cache: Arc<PageCache>) -> Self {
-        Self { request: Arc::new(request), params: Arc::default(), state, config, cache, response: Arc::default() }
+        Self {
+            request: Arc::new(request),
+            params: Arc::default(),
+            locale: None,
+            state,
+            config,
+            cache,
+            response: Arc::default(),
+        }
     }
 
     pub(crate) fn with_params(&self, params: Params) -> Self {
         Self { params: Arc::new(params), ..self.clone() }
+    }
+
+    pub(crate) fn with_locale(&self, locale: &str) -> Self {
+        Self { locale: Some(Arc::from(locale)), ..self.clone() }
     }
 
     pub(crate) fn take_response(&self) -> ResponseParts {
@@ -149,6 +162,17 @@ impl Ctx {
     /// Parses a route param, answering 404 when it is missing or malformed.
     pub fn param_as<T: FromStr>(&self, name: &str) -> Result<T> {
         self.param(name).and_then(|v| v.parse().ok()).ok_or_else(Error::not_found)
+    }
+
+    /// Active locale of the request: the `[i18n]` locale of the page URL (for actions, of the page
+    /// that called them), else the default locale, else `[site] language`.
+    pub fn locale(&self) -> &str {
+        self.locale.as_deref().unwrap_or_else(|| self.config.default_locale())
+    }
+
+    /// Locales configured in `[i18n]`; empty when internationalized routing is off.
+    pub fn locales(&self) -> &[String] {
+        &self.config.i18n.locales
     }
 
     pub fn headers(&self) -> &HeaderMap {

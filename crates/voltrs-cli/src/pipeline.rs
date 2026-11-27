@@ -251,13 +251,15 @@ impl<'a> Pipeline<'a> {
         Ok(())
     }
 
-    /// Renders every known path of routes without a Rust loader into `prerender/`.
+    /// Renders every known path of routes without a Rust loader into `prerender/`, once per `[i18n]` locale.
     async fn prerender(&self, manifest: &mut Manifest, info: &ServerInfo) -> Result<()> {
+        let config = &self.project.config;
         let targets: Vec<String> = manifest
             .routes
             .iter()
             .filter(|r| r.is_page() && !r.dynamic && !info.loaders.contains(&r.id))
-            .flat_map(|r| r.paths.iter().cloned())
+            .flat_map(|r| &r.paths)
+            .flat_map(|path| config.i18n.variants(path).into_iter().map(|(_, localized)| localized))
             .collect();
         let dir = self.project.out_dir.join(voltrs::manifest::PRERENDER_DIR);
         crate::util::reset_dir(&dir)?;
@@ -292,7 +294,8 @@ impl<'a> Pipeline<'a> {
                 }
                 std::fs::write(&path, body)?;
             }
-            if let Some(entry) = manifest.routes.iter_mut().find(|r| r.paths.contains(&page.path)) {
+            let route_path = config.split_locale(&page.path).1;
+            if let Some(entry) = manifest.routes.iter_mut().find(|r| r.paths.iter().any(|p| p == route_path)) {
                 entry.revalidate = entry.revalidate.or(page.revalidate);
                 entry.prerendered.push(page.path);
             }

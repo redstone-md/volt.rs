@@ -58,6 +58,9 @@ impl<'a> Export<'a> {
         if !config.headers.is_empty() {
             out.push("[headers] are not applied; configure them on your host".to_owned());
         }
+        if config.i18n.is_enabled() && config.i18n.locale_detection {
+            out.push("[i18n] locale_detection needs the server: `/` always serves the default locale".to_owned());
+        }
         if self.manifest.routes.iter().any(|r| r.revalidate.is_some()) {
             out.push("`revalidate` has no effect: exported pages are rendered once".to_owned());
         }

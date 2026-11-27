@@ -34,6 +34,8 @@ pub struct PageState {
     pub global_error: bool,
     pub build_id: String,
     pub site: Site,
+    /// Active locale: the URL's `[i18n]` locale prefix, else the default locale, else `[site] language`.
+    pub locale: String,
     /// Set by `volt export`: the client reads route data from `/_volt/data/<path>.json` files.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub export: bool,
@@ -114,7 +116,7 @@ impl Document<'_> {
 
     /// Inserts this document's head and body additions into HTML that arrives in chunks.
     pub fn splice(&self) -> Splice {
-        Splice::new(self.head(), self.body())
+        Splice::new(self.head(), self.body()).lang(&self.state.locale)
     }
 
     fn head(&self) -> String {
@@ -173,13 +175,20 @@ enum Shape {
 pub struct Splice {
     head: Option<String>,
     body: String,
+    lang: String,
     shape: Shape,
     pending: Vec<u8>,
 }
 
 impl Splice {
     pub fn new(head: String, body: String) -> Self {
-        Self { head: Some(head), body, shape: Shape::Undecided, pending: Vec::new() }
+        Self { head: Some(head), body, lang: String::new(), shape: Shape::Undecided, pending: Vec::new() }
+    }
+
+    /// Sets the `lang` attribute of the `<html>` element that wraps fragment output.
+    pub fn lang(mut self, lang: &str) -> Self {
+        self.lang = lang.to_owned();
+        self
     }
 
     /// Accepts the next chunk and returns the bytes that can be sent now.
@@ -236,7 +245,10 @@ impl Splice {
             self.shape = Shape::Document;
         } else {
             self.shape = Shape::Fragment;
-            out.extend_from_slice(b"<html><head>");
+            match self.lang.as_str() {
+                "" => out.extend_from_slice(b"<html><head>"),
+                lang => out.extend_from_slice(format!("<html lang=\"{}\"><head>", escape_html(lang)).as_bytes()),
+            }
             out.extend_from_slice(self.head.take().unwrap_or_default().as_bytes());
             out.extend_from_slice(b"</head><body><div id=\"__volt\">");
         }
@@ -341,6 +353,7 @@ mod tests {
             global_error: false,
             build_id: String::new(),
             site: Site { name: String::new(), url: String::new() },
+            locale: "en".into(),
             export: false,
             slots: BTreeMap::new(),
             retain: false,

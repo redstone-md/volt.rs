@@ -295,7 +295,7 @@ impl Server {
             dev,
         });
         if !dev {
-            server.cache.preload(&server.current().manifest.routes, &out_dir);
+            server.cache.preload(&server.current().manifest.routes, &out_dir, &server.config);
         }
         Ok(server)
     }
@@ -390,8 +390,9 @@ impl Server {
         if let Some(response) = self.redirect(&path) {
             return response.into();
         }
+        let localized = ctx.with_locale(self.config.split_locale(&path).0);
         for middleware in &self.middleware {
-            if let Some(response) = middleware(ctx.clone()).await {
+            if let Some(response) = middleware(localized.clone()).await {
                 return response.into();
             }
         }
@@ -421,22 +422,94 @@ impl Server {
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into();
         }
-        let path = self.rewrite(&path);
-        if let Some(response) = self.api(ctx, &path).await {
+        let (prefix, route_path) = self.config.i18n.split(&path);
+        let detects = self.detects_locale(ctx, prefix, route_path);
+        if let Some(response) = self.locale_redirect(ctx, prefix, &path, route_path, detects) {
             return response.into();
         }
-        if matches!(*ctx.method(), Method::GET | Method::HEAD) {
-            if let Some(response) = self.current().metadata.serve(&path, ctx.uri().query(), ctx.headers()) {
+        let ctx = &ctx.with_locale(prefix.unwrap_or(self.config.default_locale()));
+        let path = self.rewrite(route_path);
+        // API routes, metadata files, public files and SEO files live outside the locale prefixes.
+        if prefix.is_none() {
+            if let Some(response) = self.api(ctx, &path).await {
                 return response.into();
             }
-            if let Some(response) = serve_public(&self.config.public_dir(), &path, ctx.headers()).await {
-                return response.into();
-            }
-            if let Some(response) = self.seo(ctx, &path).await {
-                return response.into();
+            if matches!(*ctx.method(), Method::GET | Method::HEAD) {
+                if let Some(response) = self.current().metadata.serve(&path, ctx.uri().query(), ctx.headers()) {
+                    return response.into();
+                }
+                if let Some(response) = serve_public(&self.config.public_dir(), &path, ctx.headers()).await {
+                    return response.into();
+                }
+                if let Some(response) = self.seo(ctx, &path).await {
+                    return response.into();
+                }
             }
         }
-        self.page(ctx, &path).await
+        let mut reply = self.page(ctx, &path).await;
+        if detects {
+            vary_on_locale(&mut reply.response);
+        }
+        reply
+    }
+
+    /// Whether this request is the unprefixed root that `[i18n] locale_detection` may redirect.
+    fn detects_locale(&self, ctx: &Ctx, prefix: Option<&str>, route_path: &str) -> bool {
+        let i18n = &self.config.i18n;
+        i18n.is_enabled()
+            && i18n.locale_detection
+            && prefix.is_none()
+            && route_path == "/"
+            && matches!(*ctx.method(), Method::GET | Method::HEAD)
+    }
+
+    /// Redirects to the canonical locale prefix (none for the default locale, the configured spelling
+    /// otherwise) and, on the root, to the visitor's preferred locale.
+    fn locale_redirect(
+        &self,
+        ctx: &Ctx,
+        prefix: Option<&str>,
+        path: &str,
+        route_path: &str,
+        detects: bool,
+    ) -> Option<Response> {
+        let i18n = &self.config.i18n;
+        if !i18n.is_enabled() || !matches!(*ctx.method(), Method::GET | Method::HEAD) {
+            return None;
+        }
+        let query = ctx.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+        if let Some(locale) = prefix {
+            let canonical = i18n.localize(locale, route_path);
+            return (canonical != path)
+                .then(|| Response::redirect(StatusCode::PERMANENT_REDIRECT, &format!("{canonical}{query}")));
+        }
+        if !detects {
+            return None;
+        }
+        let preferred = self
+            .chosen_locale(ctx)
+            .or_else(|| ctx.header("accept-language").and_then(|header| i18n.negotiate(header)))
+            .filter(|locale| *locale != i18n.default_locale)?;
+        let mut response = Response::redirect(StatusCode::TEMPORARY_REDIRECT, &format!("/{preferred}{query}"))
+            .header(header::CACHE_CONTROL, HeaderValue::from_static(PRIVATE_CACHE));
+        vary_on_locale(&mut response);
+        Some(response)
+    }
+
+    /// Locale stored in the `VOLT_LOCALE` or `NEXT_LOCALE` cookie, when it is supported.
+    fn chosen_locale(&self, ctx: &Ctx) -> Option<&str> {
+        crate::config::LOCALE_COOKIES.iter().find_map(|name| self.config.i18n.find(&ctx.cookie(name)?))
+    }
+
+    /// Locale of the page that called an action: sent by the client runtime, else the referer's prefix.
+    fn caller_locale(&self, ctx: &Ctx) -> String {
+        let i18n = &self.config.i18n;
+        let sent = ctx.header("x-volt-locale").and_then(|locale| i18n.find(locale));
+        let referer = || {
+            let uri: http::Uri = ctx.header("referer")?.parse().ok()?;
+            i18n.split(self.config.app_path(uri.path())?).0
+        };
+        sent.or_else(referer).unwrap_or(self.config.default_locale()).to_owned()
     }
 
     /// Redirects with 308 to the canonical form of the URL under `trailing_slash`.
@@ -494,6 +567,7 @@ impl Server {
         if *ctx.method() != Method::POST {
             return Response::text("Method Not Allowed").status(StatusCode::METHOD_NOT_ALLOWED);
         }
+        let ctx = &ctx.with_locale(&self.caller_locale(ctx));
         let content_type = ctx.header("content-type").unwrap_or_default();
         match FormData::from_request(content_type, ctx.body()) {
             Ok(form) => self.run_action(ctx, name, form, None).await,
@@ -552,7 +626,7 @@ impl Server {
             Err(error) => error,
         };
         if let ErrorKind::Redirect(location) = error.kind() {
-            return Response::redirect(StatusCode::SEE_OTHER, location);
+            return Response::redirect(StatusCode::SEE_OTHER, &self.config.i18n.localize_href(ctx.locale(), location));
         }
         if error.status().is_server_error() {
             log::error(&format!("action `{name}` failed: {}", error.message()));
@@ -582,7 +656,9 @@ impl Server {
             Some((p, s)) => (p.to_owned(), format!("?{s}")),
             None => (target.to_owned(), String::new()),
         };
-        let pathname = self.rewrite(&pathname);
+        let (locale, route_path) = self.config.split_locale(&pathname);
+        let ctx = &ctx.with_locale(locale);
+        let pathname = self.rewrite(route_path);
         let navigation = Navigation::Soft { from: ctx.header(FROM_HEADER) };
         let resolved = match self.resolve(ctx, &pathname, &search, navigation).await {
             Ok(state) if state.retain => Ok(state),
@@ -592,7 +668,7 @@ impl Server {
             },
             Err(error) => Err(error),
         };
-        match self.settle(resolved, &pathname, &search) {
+        match self.settle(ctx, resolved, &pathname, &search) {
             Resolved::Page(state) => {
                 Response::json(&state).header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))
             }
@@ -636,7 +712,7 @@ impl Server {
     /// `robots.txt`, `sitemap.xml`, `llms.txt` and `manifest.webmanifest`. Output built from a code metadata
     /// route is rendered once and shared, as in Next.js, until its `revalidate` time or a revalidation.
     async fn seo(&self, ctx: &Ctx, path: &str) -> Option<Response> {
-        let key = cache::key(path, "");
+        let key = cache::key(path, "", ctx.locale());
         let shared = !self.dev && self.seo_source(path).is_some();
         if shared {
             match self.cache.get(&key) {
@@ -828,12 +904,12 @@ impl Server {
         if !cacheable {
             return self.generate(ctx, &build, path, &search, self.mode(Some(ctx), false)).await;
         }
-        let key = cache::key(path, query);
+        let key = cache::key(path, query, ctx.locale());
         match self.cache.get(&key) {
             Lookup::Fresh(page) => return page.into(),
             Lookup::Stale { page, refresh } => {
                 if refresh {
-                    self.refresh(key, path.to_owned(), search);
+                    self.refresh(key, path.to_owned(), search, ctx.locale().to_owned());
                 }
                 return page.into();
             }
@@ -853,10 +929,10 @@ impl Server {
     }
 
     /// Regenerates a stale page in the background while the stale copy keeps being served.
-    fn refresh(self: &Arc<Self>, key: String, path: String, search: String) {
+    fn refresh(self: &Arc<Self>, key: String, path: String, search: String, locale: String) {
         let server = self.clone();
         tokio::spawn(async move {
-            let ctx = server.synthetic(&format!("{path}{search}"));
+            let ctx = server.synthetic(&format!("{}{search}", server.config.i18n.localize(&locale, &path)));
             let build = server.current();
             let ticket = server.cache.ticket();
             let page = server.generate(&ctx, &build, &path, &search, server.mode(None, true)).await;
@@ -881,8 +957,10 @@ impl Server {
         }
     }
 
-    /// A GET request without headers, used for prerendering and background regeneration.
+    /// A GET request without headers for a localized app path, used for prerendering and background regeneration.
     fn synthetic(&self, app_path: &str) -> Ctx {
+        let pathname = app_path.split_once('?').map_or(app_path, |(path, _)| path);
+        let locale = self.config.split_locale(pathname).0.to_owned();
         let request = RequestParts {
             method: Method::GET,
             uri: self.config.public_path(app_path).parse().unwrap_or_default(),
@@ -891,14 +969,14 @@ impl Server {
             remote: None,
             started: Instant::now(),
         };
-        Ctx::new(request, self.state.clone(), self.config.clone(), self.cache.clone())
+        Ctx::new(request, self.state.clone(), self.config.clone(), self.cache.clone()).with_locale(&locale)
     }
 
-    /// Renders one concrete path ahead of time, with the route data the client navigates with.
+    /// Renders one concrete path (with its locale prefix) ahead of time, with the route data the client navigates with.
     pub(crate) async fn prerender(&self, path: &str) -> Prerendered {
         let ctx = self.synthetic(path);
         let build = self.current();
-        match self.resolve_page(&ctx, path, "").await {
+        match self.resolve_page(&ctx, self.config.split_locale(path).1, "").await {
             Resolved::Page(mut state) => {
                 let page = self.render(&build, (*state).clone(), self.mode(None, true)).await;
                 if let Some(data) = page.data {
@@ -948,18 +1026,22 @@ impl Server {
 
     async fn resolve_page(&self, ctx: &Ctx, path: &str, search: &str) -> Resolved {
         let resolved = self.resolve(ctx, path, search, Navigation::Hard).await;
-        self.settle(resolved, path, search)
+        self.settle(ctx, resolved, path, search)
     }
 
-    /// Turns a loader error into a redirect or the error page state.
-    fn settle(&self, resolved: Result<PageState>, path: &str, search: &str) -> Resolved {
-        match resolved {
-            Ok(state) => Resolved::Page(Box::new(state)),
+    /// Turns a loader error into a redirect or the error page state, in the request's locale.
+    fn settle(&self, ctx: &Ctx, resolved: Result<PageState>, path: &str, search: &str) -> Resolved {
+        let mut state = match resolved {
+            Ok(state) => state,
             Err(error) => match error.kind() {
-                ErrorKind::Redirect(location) => Resolved::Redirect(error.status(), location.clone()),
-                _ => Resolved::Page(Box::new(self.failure_state(path, search, &error))),
+                ErrorKind::Redirect(location) => {
+                    return Resolved::Redirect(error.status(), self.config.i18n.localize_href(ctx.locale(), location));
+                }
+                _ => self.failure_state(path, search, &error),
             },
-        }
+        };
+        state.locale = ctx.locale().to_owned();
+        Resolved::Page(Box::new(state))
     }
 
     /// Matches the route, runs its loader and resolves its parallel route slots.
@@ -1124,6 +1206,7 @@ impl Server {
             global_error: false,
             build_id: self.current().manifest.build_id.clone(),
             site: Site { name: self.config.site.name.clone(), url: self.config.site_url().to_owned() },
+            locale: self.config.default_locale().to_owned(),
             export: crate::config::is_export(),
             slots: BTreeMap::new(),
             retain: false,
@@ -1201,7 +1284,8 @@ impl Server {
     fn assemble(&self, build: &Build, state: &PageState, rendered: Rendered, output: Output) -> Result<Page> {
         if let Some(redirect) = rendered.redirect {
             let status = StatusCode::from_u16(redirect.status).unwrap_or(StatusCode::TEMPORARY_REDIRECT);
-            return Ok(Response::redirect(status, &redirect.location).into());
+            let location = self.config.i18n.localize_href(&state.locale, &redirect.location);
+            return Ok(Response::redirect(status, &location).into());
         }
         let mut state = state.clone();
         state.status = rendered.status;
@@ -1306,6 +1390,11 @@ impl From<CachedPage> for Page {
     fn from(page: CachedPage) -> Self {
         Self { response: page.response, hints: CacheHints::default(), data: page.data, incomplete: false, stream: None }
     }
+}
+
+/// Responses of the detecting root differ by the visitor's language and locale cookie.
+fn vary_on_locale(response: &mut Response) {
+    response.headers.append(header::VARY, HeaderValue::from_static("Accept-Language, Cookie"));
 }
 
 fn not_found_text() -> Response {

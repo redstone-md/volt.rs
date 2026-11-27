@@ -597,6 +597,8 @@ impl<'a> Bundle<'a> {
             ("process.env.__VOLT_BASE_PATH__".to_owned(), format!("{:?}", config.base_path())),
             ("process.env.__VOLT_TRAILING_SLASH__".to_owned(), build.trailing_slash.to_string()),
             ("process.env.__VOLT_IMAGE_OPTIMIZATION__".to_owned(), optimize_images.to_string()),
+            ("process.env.__VOLT_LOCALES__".to_owned(), format!("{:?}", config.i18n.locales.join(","))),
+            ("process.env.__VOLT_DEFAULT_LOCALE__".to_owned(), format!("{:?}", config.default_locale())),
         ]);
         define.extend(build.define.iter().map(|(k, v)| (k.clone(), v.clone())));
         let sdk = to_slash(&self.project.sdk_file());
