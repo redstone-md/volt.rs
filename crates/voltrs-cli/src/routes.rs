@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use voltrs::manifest::{Intercept, SlotEntry};
 use voltrs::router::RoutePattern;
 
 use crate::metadata::File;
@@ -21,6 +22,8 @@ pub enum Module {
 
 #[derive(Debug, Clone, Default)]
 pub struct Segment {
+    /// Directory key relative to `app/`: `/` for the root, `/dashboard`, `/@modal/(.)photos`.
+    pub key: String,
     pub layout: Option<Module>,
     pub loading: Option<Module>,
     pub error: Option<Module>,
@@ -30,18 +33,29 @@ pub struct Segment {
     pub path: Vec<String>,
     /// Metadata files (`icon.png`, `opengraph-image.jpg`, ...) applying to every route below.
     pub files: Vec<File>,
+    /// Parallel route slots (`@name` folders) passed to the layout next to `children`.
+    pub slots: Vec<Slot>,
 }
 
 impl Segment {
-    fn read(dir: &Path, path: Vec<String>) -> Result<Self> {
+    fn read(dir: &Path, place: &Place) -> Result<Self> {
+        let path = place.path.clone();
         let url: String = path.iter().map(|part| format!("/{part}")).collect();
+        // Metadata files belong to URL segments, which slot and interception folders are not.
+        let files = if place.in_slot || place.intercept.is_some() {
+            Vec::new()
+        } else {
+            File::scan(dir, &url, path.is_empty())?
+        };
         Ok(Self {
+            key: place.key(),
+            slots: Vec::new(),
             layout: find(dir, "layout"),
             loading: find(dir, "loading"),
             error: find(dir, "error"),
             not_found: find(dir, "not-found"),
             template: find(dir, "template"),
-            files: File::scan(dir, &url, path.is_empty())?,
+            files,
             path,
         })
     }
@@ -53,6 +67,7 @@ impl Segment {
             && self.not_found.is_none()
             && self.template.is_none()
             && self.files.is_empty()
+            && self.slots.is_empty()
     }
 
     pub fn modules(&self) -> [(&'static str, Option<&Module>); 5] {
@@ -64,6 +79,54 @@ impl Segment {
             ("template", self.template.as_ref()),
         ]
     }
+}
+
+/// A parallel route slot: an `@name` folder with its own pages, rendered as the `name` prop of the layout.
+#[derive(Debug, Clone)]
+pub struct Slot {
+    pub name: String,
+    /// Directory key, e.g. `/dashboard/@team`.
+    pub key: String,
+    /// Rendered when no page of the slot matches the URL.
+    pub default: Option<Module>,
+    pub routes: Vec<SlotRoute>,
+}
+
+impl Slot {
+    /// The manifest entry the server resolves the slot with; `segment` is the key of the layout's directory.
+    pub fn entry(&self, segment: &str) -> SlotEntry {
+        SlotEntry {
+            key: self.key.clone(),
+            segment: segment.to_owned(),
+            default: self.default.is_some(),
+            routes: self
+                .routes
+                .iter()
+                .map(|r| voltrs::manifest::SlotRoute {
+                    id: r.id.clone(),
+                    pattern: r.pattern.clone(),
+                    intercept: r.intercept,
+                    segments: r.dirs.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A page inside a slot.
+#[derive(Debug, Clone)]
+pub struct SlotRoute {
+    /// Directory path with groups removed, e.g. `/@modal/(.)photos/[id]`; loaders register under it.
+    pub id: String,
+    /// URL pattern the page matches.
+    pub pattern: String,
+    /// Inside an interception folder: matches only on client navigations.
+    pub intercept: bool,
+    /// Directory keys from the slot folder to the page.
+    pub dirs: Vec<String>,
+    /// Segments inside the slot, outermost first.
+    pub segments: Vec<Segment>,
+    pub page: Module,
 }
 
 /// Which router renders a route.
@@ -88,6 +151,12 @@ pub struct Route {
     pub files: Vec<File>,
     /// `app/global-error.tsx`, rendered instead of the root layout when it fails.
     pub global_error: Option<Module>,
+    /// Directory keys from `app/` to the page, including directories without special files.
+    pub dirs: Vec<String>,
+    /// Set on routes inside an interception folder (`(.)x`, `(..)x`, `(...)x`).
+    pub intercept: Option<Intercept>,
+    /// Key of the directory whose `default` page this route renders, for URLs that only exist in its slots.
+    pub fallback: Option<String>,
 }
 
 impl Route {
@@ -102,6 +171,34 @@ impl Route {
     pub fn is_dynamic(&self) -> bool {
         RoutePattern::parse(&self.id).is_dynamic()
     }
+
+    /// Every slot the route can render, with the key of the directory whose layout receives it.
+    pub fn slots(&self) -> Vec<(&str, &Slot)> {
+        let mut out = Vec::new();
+        let mut pending: Vec<&Segment> = self.segments.iter().collect();
+        while let Some(segment) = pending.pop() {
+            for slot in &segment.slots {
+                out.push((segment.key.as_str(), slot));
+                pending.extend(slot.routes.iter().flat_map(|r| &r.segments));
+            }
+        }
+        out
+    }
+
+    fn new(id: &str, kind: Kind, segments: Vec<Segment>, page: Module) -> Self {
+        Self {
+            id: id.into(),
+            kind,
+            segments,
+            page,
+            path: Vec::new(),
+            files: Vec::new(),
+            global_error: None,
+            dirs: Vec::new(),
+            intercept: None,
+            fallback: None,
+        }
+    }
 }
 
 fn find(dir: &Path, name: &str) -> Option<Module> {
@@ -114,21 +211,117 @@ pub fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 fn skipped(name: &str) -> bool {
-    name.starts_with('_')
-        || name.starts_with('@')
-        || name.starts_with("(.")
-        || name.starts_with('.')
-        || name == "node_modules"
+    name.starts_with('_') || name.starts_with('@') || name.starts_with('.') || name == "node_modules"
+}
+
+/// Reads an interception folder name: `(.)x`, `(..)x`, `(..)(..)x` or `(...)x` as the number of route segments
+/// to go up (`None` for the root) and the remaining segment name.
+fn interception(name: &str) -> Option<(Option<usize>, &str)> {
+    if let Some(rest) = name.strip_prefix("(...)") {
+        return Some((None, rest));
+    }
+    if let Some(rest) = name.strip_prefix("(.)") {
+        return Some((Some(0), rest));
+    }
+    let mut rest = name;
+    let mut up = 0;
+    while let Some(next) = rest.strip_prefix("(..)") {
+        rest = next;
+        up += 1;
+    }
+    (up > 0).then_some((Some(up), rest))
+}
+
+/// Where a directory sits in `app/`: on the file system, in the URL and in the slot and interception structure.
+#[derive(Debug, Clone)]
+struct Place {
+    /// Path relative to `app/`, empty at the root.
+    rel: String,
+    /// URL path of the directory: slot folders add nothing, interception folders rewrite it.
+    url: String,
+    /// Key of the nearest directory outside slots, which scopes interceptions declared below it.
+    scope: String,
+    /// Directory keys from the root of the tree (`app/` or the slot folder) to this directory.
+    dirs: Vec<String>,
+    /// Directory names from `app/` to this directory, slot folders excluded.
+    path: Vec<String>,
+    in_slot: bool,
+    /// Scope of the enclosing interception folder.
+    intercept: Option<String>,
+}
+
+impl Place {
+    fn root() -> Self {
+        Self {
+            rel: String::new(),
+            url: String::new(),
+            scope: "/".into(),
+            dirs: vec!["/".into()],
+            path: Vec::new(),
+            in_slot: false,
+            intercept: None,
+        }
+    }
+
+    fn key(&self) -> String {
+        if self.rel.is_empty() { "/".into() } else { self.rel.clone() }
+    }
+
+    fn slot(&self, name: &str) -> Self {
+        let rel = format!("{}/@{name}", self.rel);
+        Self { dirs: vec![rel.clone()], rel, in_slot: true, ..self.clone() }
+    }
+
+    fn child(&self, name: &str) -> Result<Self> {
+        let rel = format!("{}/{name}", self.rel);
+        let mut dirs = self.dirs.clone();
+        dirs.push(rel.clone());
+        let mut path = self.path.clone();
+        path.push(name.to_owned());
+        let mut child = Self { rel: rel.clone(), url: format!("{}/{name}", self.url), dirs, path, ..self.clone() };
+        if !self.in_slot {
+            child.scope = rel.clone();
+        }
+        if let Some((up, rest)) = interception(name) {
+            let mut base: Vec<&str> =
+                self.url.split('/').filter(|s| !s.is_empty() && !(s.starts_with('(') && s.ends_with(')'))).collect();
+            match up {
+                Some(up) if up > base.len() => bail!("`app{rel}` intercepts above the app root"),
+                Some(up) => base.truncate(base.len() - up),
+                None => base.clear(),
+            }
+            base.push(rest);
+            child.url = format!("/{}", base.join("/"));
+            child.intercept = Some(self.scope.clone());
+        }
+        Ok(child)
+    }
+
+    fn route_id(&self) -> String {
+        let path = if self.intercept.is_some() || self.in_slot { &self.rel } else { &self.url };
+        RoutePattern::parse(path).as_str().to_owned()
+    }
+
+    fn pattern(&self) -> String {
+        RoutePattern::parse(&self.url).as_str().to_owned()
+    }
+}
+
+/// Pages found while walking `app/`: URL routes, and `default` pages of layouts with slots.
+#[derive(Default)]
+struct Found {
+    routes: BTreeMap<String, Route>,
+    fallbacks: Vec<Route>,
 }
 
 /// Scans the app and pages directories into routes, adding the not-found and error pseudo routes.
 pub fn scan(app_dir: Option<&Path>, pages_dir: Option<&Path>) -> Result<Vec<Route>> {
-    let mut found = BTreeMap::new();
     let app = app_dir.map(AppDir::new).transpose()?;
     let pages = pages_dir.map(PagesDir::new);
-    if let Some(app) = &app {
-        app.walk(&app.dir, "", &mut vec![app.root.clone()], &mut found)?;
-    }
+    let mut found = match &app {
+        Some(app) => app.scan()?,
+        None => BTreeMap::new(),
+    };
     if let Some(pages) = &pages {
         let mut own = BTreeMap::new();
         pages.walk(&pages.dir, "", &mut own)?;
@@ -177,15 +370,7 @@ fn special(
         (None, Some(pages)) => {
             pages.route(id, Module::Builtin(if builtin == "NotFound" { "PagesNotFound" } else { "PagesError" }))
         }
-        (None, None) => Route {
-            id: id.into(),
-            kind: Kind::App,
-            segments: Vec::new(),
-            page: Module::Builtin(builtin),
-            path: Vec::new(),
-            files: Vec::new(),
-            global_error: None,
-        },
+        (None, None) => Route::new(id, Kind::App, Vec::new(), Module::Builtin(builtin)),
     }
 }
 
@@ -197,44 +382,113 @@ struct AppDir {
 
 impl AppDir {
     fn new(dir: &Path) -> Result<Self> {
-        let mut root = Segment::read(dir, Vec::new())?;
+        let mut root = Self::segment(dir, &Place::root())?;
         if root.layout.is_none() {
             root.layout = Some(Module::Builtin("RootLayout"));
+            if !root.slots.is_empty() {
+                voltrs::log::warn("app/ has @slot folders but no layout.tsx to render them");
+            }
         }
         Ok(Self { dir: dir.to_path_buf(), root, global_error: find(dir, "global-error") })
     }
 
     fn route(&self, id: &str, page: Module) -> Route {
         let shell = Segment { layout: self.root.layout.clone(), files: self.root.files.clone(), ..Segment::default() };
-        Route {
-            id: id.into(),
-            kind: Kind::App,
-            segments: vec![shell],
-            page,
-            path: Vec::new(),
-            files: Vec::new(),
-            global_error: self.global_error.clone(),
-        }
+        Route { global_error: self.global_error.clone(), ..Route::new(id, Kind::App, vec![shell], page) }
     }
 
-    fn walk(&self, dir: &Path, url: &str, stack: &mut Vec<Segment>, found: &mut BTreeMap<String, Route>) -> Result<()> {
-        if let Some(page) = find(dir, "page") {
-            let id = RoutePattern::parse(url).as_str().to_owned();
-            let mut segments = stack.clone();
+    /// Every URL route, including those that only exist in slots and render the `default` page of their layout.
+    fn scan(&self) -> Result<BTreeMap<String, Route>> {
+        let mut found = Found::default();
+        let mut stack = vec![self.root.clone()];
+        Self::walk(&self.dir, &Place::root(), &mut stack, &mut found, &mut None)?;
+        for route in found.fallbacks {
+            found.routes.entry(route.id.clone()).or_insert(route);
+        }
+        for route in found.routes.values_mut() {
+            route.global_error = self.global_error.clone();
+        }
+        Ok(found.routes)
+    }
+
+    /// Reads the special files of a directory and scans its `@slot` folders.
+    fn segment(dir: &Path, place: &Place) -> Result<Segment> {
+        let mut segment = Segment::read(dir, place)?;
+        for child in sorted(dir)?.into_iter().filter(|p| p.is_dir()) {
+            let name = file_name(&child);
+            let Some(slot) = name.strip_prefix('@') else { continue };
+            let inner = place.slot(slot);
+            let mut routes = Vec::new();
+            let mut stack = vec![Self::segment(&child, &inner)?];
+            Self::walk(&child, &inner, &mut stack, &mut Found::default(), &mut Some(&mut routes))?;
+            segment.slots.push(Slot {
+                name: slot.to_owned(),
+                key: inner.key(),
+                default: find(&child, "default"),
+                routes,
+            });
+        }
+        if !segment.slots.is_empty() && segment.layout.is_none() && !place.rel.is_empty() {
+            voltrs::log::warn(&format!("app{} has @slot folders but no layout.tsx to render them", place.rel));
+        }
+        Ok(segment)
+    }
+
+    /// Walks a directory tree. Pages go to `slot` inside a slot folder, otherwise to `found`.
+    fn walk(
+        dir: &Path,
+        place: &Place,
+        stack: &mut Vec<Segment>,
+        found: &mut Found,
+        slot: &mut Option<&mut Vec<SlotRoute>>,
+    ) -> Result<()> {
+        // The page directory's own metadata files move to the route, where they take precedence.
+        let segments = |stack: &[Segment]| {
+            let mut segments = stack.to_vec();
             let own = segments.last_mut().map(|s| std::mem::take(&mut s.files)).unwrap_or_default();
             segments.retain(|s| !s.is_empty());
-            let path = stack.last().map(|s| s.path.clone()).unwrap_or_default();
-            let route = Route {
-                id: id.clone(),
-                kind: Kind::App,
-                segments,
-                page,
-                path,
-                files: own,
-                global_error: self.global_error.clone(),
-            };
-            if let Some(existing) = found.insert(id.clone(), route) {
-                bail!("two pages resolve to `{id}`: {:?}", existing.page);
+            (segments, own)
+        };
+        if let Some(page) = find(dir, "page") {
+            let id = place.route_id();
+            match slot {
+                Some(routes) => routes.push(SlotRoute {
+                    id,
+                    pattern: place.pattern(),
+                    intercept: place.intercept.is_some(),
+                    dirs: place.dirs.clone(),
+                    segments: segments(stack).0,
+                    page,
+                }),
+                None => {
+                    let intercept = place.intercept.clone().map(|scope| Intercept { target: place.pattern(), scope });
+                    let (segments, files) = segments(stack);
+                    let route = Route {
+                        dirs: place.dirs.clone(),
+                        path: place.path.clone(),
+                        files,
+                        intercept,
+                        ..Route::new(&id, Kind::App, segments, page)
+                    };
+                    if let Some(existing) = found.routes.insert(id.clone(), route) {
+                        bail!("two pages resolve to `{id}`: {:?}", existing.page);
+                    }
+                }
+            }
+        }
+        if slot.is_none()
+            && let Some(default) = find(dir, "default")
+            && let Some(own) = stack.last()
+        {
+            let (segments, files) = segments(stack);
+            for route in own.slots.iter().flat_map(|s| &s.routes).filter(|r| !r.intercept) {
+                found.fallbacks.push(Route {
+                    dirs: place.dirs.clone(),
+                    path: place.path.clone(),
+                    files: files.clone(),
+                    fallback: Some(place.key()),
+                    ..Route::new(&route.pattern, Kind::App, segments.clone(), default.clone())
+                });
             }
         }
         for child in sorted(dir)?.into_iter().filter(|p| p.is_dir()) {
@@ -242,10 +496,9 @@ impl AppDir {
             if skipped(&name) {
                 continue;
             }
-            let mut path = stack.last().map(|s| s.path.clone()).unwrap_or_default();
-            path.push(name.clone());
-            stack.push(Segment::read(&child, path)?);
-            self.walk(&child, &format!("{url}/{name}"), stack, found)?;
+            let inner = place.child(&name)?;
+            stack.push(Self::segment(&child, &inner)?);
+            Self::walk(&child, &inner, stack, found, slot)?;
             stack.pop();
         }
         Ok(())
@@ -266,15 +519,7 @@ impl PagesDir {
     }
 
     fn route(&self, id: &str, page: Module) -> Route {
-        Route {
-            id: id.into(),
-            kind: Kind::Pages { app: self.app.clone() },
-            segments: Vec::new(),
-            page,
-            path: Vec::new(),
-            files: Vec::new(),
-            global_error: None,
-        }
+        Route::new(id, Kind::Pages { app: self.app.clone() }, Vec::new(), page)
     }
 
     fn walk(&self, dir: &Path, url: &str, found: &mut BTreeMap<String, Route>) -> Result<()> {
@@ -436,5 +681,82 @@ mod tests {
         assert!(routes.iter().find(|r| r.id == "/legacy").unwrap().is_pages());
         assert!(!routes.iter().find(|r| r.id == NOT_FOUND).unwrap().is_pages());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scans_slots_and_interceptions() {
+        let dir = fixture(
+            "slots",
+            &[
+                "layout.tsx",
+                "page.tsx",
+                "@modal/default.tsx",
+                "@modal/(.)photos/[id]/page.tsx",
+                "photos/page.tsx",
+                "photos/[id]/page.tsx",
+                "dashboard/layout.tsx",
+                "dashboard/page.tsx",
+                "dashboard/default.tsx",
+                "dashboard/@team/page.tsx",
+                "dashboard/@team/default.tsx",
+                "dashboard/@analytics/page.tsx",
+                "dashboard/@analytics/views/page.tsx",
+                "(main)/feed/page.tsx",
+                "(main)/feed/(..)photos/[id]/page.tsx",
+            ],
+        );
+        let routes = scan(Some(&dir), None).unwrap();
+        let ids: Vec<&str> = routes.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "/",
+                "/dashboard",
+                "/dashboard/views",
+                "/feed",
+                "/feed/(..)photos/[id]",
+                "/photos",
+                "/photos/[id]",
+                NOT_FOUND,
+                ERROR
+            ]
+        );
+        let root = &routes[0].segments[0];
+        assert_eq!(root.key, "/");
+        let modal = &root.slots[0];
+        assert_eq!((modal.name.as_str(), modal.key.as_str()), ("modal", "/@modal"));
+        assert!(modal.default.is_some());
+        assert_eq!(modal.routes[0].id, "/@modal/(.)photos/[id]");
+        assert_eq!(modal.routes[0].pattern, "/photos/[id]");
+        assert!(modal.routes[0].intercept);
+
+        let dashboard = routes.iter().find(|r| r.id == "/dashboard").unwrap();
+        let slots = dashboard.slots();
+        let keys: Vec<(&str, &str)> = slots.iter().map(|(segment, slot)| (*segment, slot.key.as_str())).collect();
+        assert!(keys.contains(&("/dashboard", "/dashboard/@analytics")));
+        assert!(keys.contains(&("/dashboard", "/dashboard/@team")));
+        assert!(keys.contains(&("/", "/@modal")));
+        let views = routes.iter().find(|r| r.id == "/dashboard/views").unwrap();
+        assert_eq!(views.fallback.as_deref(), Some("/dashboard"));
+        assert_eq!(views.page, Module::File(dir.join("dashboard/default.tsx")));
+
+        let feed = routes.iter().find(|r| r.id == "/feed/(..)photos/[id]").unwrap();
+        let intercept = feed.intercept.as_ref().unwrap();
+        assert_eq!((intercept.target.as_str(), intercept.scope.as_str()), ("/photos/[id]", "/(main)/feed"));
+        assert_eq!(
+            feed.dirs,
+            vec!["/", "/(main)", "/(main)/feed", "/(main)/feed/(..)photos", "/(main)/feed/(..)photos/[id]"]
+        );
+        assert!(routes.iter().find(|r| r.id == "/photos/[id]").unwrap().intercept.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reads_interception_markers() {
+        assert_eq!(interception("(.)photo"), Some((Some(0), "photo")));
+        assert_eq!(interception("(..)(..)photo"), Some((Some(2), "photo")));
+        assert_eq!(interception("(...)photo"), Some((None, "photo")));
+        assert_eq!(interception("(group)"), None);
+        assert!(Place::root().child("a").unwrap().child("(..)(..)b").is_err());
     }
 }

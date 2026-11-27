@@ -27,7 +27,7 @@ use crate::css::Stylesheet;
 use crate::fonts::{FONT_MODULE, Fonts};
 use crate::media::Media;
 use crate::project::Project;
-use crate::routes::{Kind, Module, Route};
+use crate::routes::{Kind, Module, Route, Segment, Slot};
 use crate::styles::{ClassPart, CssModule, Styles};
 use crate::util::{hash, to_slash};
 
@@ -327,6 +327,68 @@ impl Plugin for VoltPlugin {
     }
 }
 
+/// Writes the JavaScript of a route module: imports of every file and the segment tree referencing them.
+struct RouteWriter<'b, 'a> {
+    bundle: &'b Bundle<'a>,
+    imports: String,
+    names: usize,
+}
+
+impl<'b, 'a> RouteWriter<'b, 'a> {
+    fn new(bundle: &'b Bundle<'a>) -> Self {
+        Self { bundle, imports: String::new(), names: 0 }
+    }
+
+    fn name(&mut self) -> String {
+        self.names += 1;
+        format!("m{}", self.names - 1)
+    }
+
+    fn module(&mut self, module: &Module) -> String {
+        let name = self.name();
+        self.imports.push_str(&Bundle::import(module, &name));
+        name
+    }
+
+    /// `[{ layout: m0, slots: { team: { key, default, routes: { id: { segments, page } } } } }, ...]`
+    fn segments(&mut self, segments: &[Segment]) -> String {
+        let items: Vec<String> = segments
+            .iter()
+            .map(|segment| {
+                let mut fields: Vec<String> = segment
+                    .modules()
+                    .into_iter()
+                    .filter_map(|(key, m)| m.map(|m| format!("{key}: {}", self.module(m))))
+                    .collect();
+                fields.push(format!("path: {}", serde_json::json!(segment.path)));
+                fields.extend(self.bundle.files_field(&segment.files, &segment.path));
+                if !segment.slots.is_empty() {
+                    let slots: Vec<String> = segment.slots.iter().map(|slot| self.slot(slot)).collect();
+                    fields.push(format!("slots: {{ {} }}", slots.join(", ")));
+                }
+                format!("{{ {} }}", fields.join(", "))
+            })
+            .collect();
+        format!("[{}]", items.join(", "))
+    }
+
+    fn slot(&mut self, slot: &Slot) -> String {
+        let default = match &slot.default {
+            Some(module) => self.module(module),
+            None => "null".into(),
+        };
+        let routes: Vec<String> = slot
+            .routes
+            .iter()
+            .map(|route| {
+                let segments = self.segments(&route.segments);
+                format!("{:?}: {{ segments: {segments}, page: {} }}", route.id, self.module(&route.page))
+            })
+            .collect();
+        format!("{:?}: {{ key: {:?}, default: {default}, routes: {{ {} }} }}", slot.name, slot.key, routes.join(", "))
+    }
+}
+
 pub struct ServerBundle {
     pub file: String,
     pub css: Vec<Stylesheet>,
@@ -421,47 +483,27 @@ impl<'a> Bundle<'a> {
 
     /// Route modules: `{ segments, page }`, with `page: null` for a navigation shell.
     fn route_module(&self, route: &Route, client: bool, with_page: bool) -> String {
-        let mut imports = String::new();
-        let mut names = 0;
-        let mut module = |module: &Module| -> String {
-            let name = format!("m{names}");
-            names += 1;
-            imports.push_str(&Self::import(module, &name));
-            name
-        };
-        let segments: Vec<String> = route
-            .segments
-            .iter()
-            .map(|segment| {
-                let mut fields: Vec<String> = segment
-                    .modules()
-                    .into_iter()
-                    .filter_map(|(key, m)| m.map(|m| format!("{key}: {}", module(m))))
-                    .collect();
-                fields.push(format!("path: {}", serde_json::json!(segment.path)));
-                fields.extend(self.files_field(&segment.files, &segment.path));
-                format!("{{ {} }}", fields.join(", "))
-            })
-            .collect();
+        let mut writer = RouteWriter::new(self);
+        let segments = writer.segments(&route.segments);
         let shell = match &route.kind {
             Kind::App => {
                 let mut fields = vec![format!("path: {}", serde_json::json!(route.path))];
                 fields.extend(self.files_field(&route.files, &route.path));
-                fields.extend(route.global_error.as_ref().map(|m| format!("globalError: {}", module(m))));
+                fields.extend(route.global_error.as_ref().map(|m| format!("globalError: {}", writer.module(m))));
                 format!("{}, ", fields.join(", "))
             }
-            Kind::Pages { app } => format!("kind: \"pages\", app: {}, ", module(app)),
+            Kind::Pages { app } => format!("kind: \"pages\", app: {}, ", writer.module(app)),
         };
         let page = if !with_page {
             "null".to_owned()
         } else if client && route.is_pages() {
-            let name = format!("m{names}");
-            imports.push_str(&Self::import_default(&route.page, &name));
+            let name = writer.name();
+            writer.imports.push_str(&Self::import_default(&route.page, &name));
             name
         } else {
-            module(&route.page)
+            writer.module(&route.page)
         };
-        format!("{imports}export default {{ {shell}segments: [{}], page: {page} }};\n", segments.join(", "))
+        format!("{}export default {{ {shell}segments: {segments}, page: {page} }};\n", writer.imports)
     }
 
     fn modules(&self, client: bool) -> HashMap<String, String> {

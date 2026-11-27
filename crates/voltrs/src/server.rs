@@ -1,6 +1,6 @@
 //! Request dispatch: static assets, actions, data, API handlers and rendered pages.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -21,7 +21,7 @@ use crate::cache::{self, CachedPage, Lookup, PageCache};
 use crate::config::Config;
 use crate::context::{Ctx, RequestParts, State};
 use crate::dev::{EventStream, Hub};
-use crate::document::{Document, ERROR_ROUTE, NOT_FOUND_ROUTE, PageState, Site, error_overlay};
+use crate::document::{Document, ERROR_ROUTE, NOT_FOUND_ROUTE, PageState, Site, SlotState, error_overlay};
 use crate::error::{Error, ErrorKind, Result};
 use crate::flash::ActionFlash;
 use crate::form::FormData;
@@ -32,16 +32,23 @@ use crate::registry::{self, ActionDef, ApiDef, BoxFuture, LoaderDef, Payload};
 use crate::response::{IntoResponse, Response};
 use crate::router::{Params, RoutePattern, Router};
 use crate::seo::{self, MetadataRoute, Robots, SitemapEntry};
+use crate::slots::Slots;
 use crate::ssr::{Engine, EngineOptions, StreamEvent};
 use crate::stream::PageStream;
+
+/// Header of client navigations naming the route the client navigates from, which decides interceptions.
+const FROM_HEADER: &str = "x-volt-from";
 
 pub type Middleware = Arc<dyn Fn(Ctx) -> BoxFuture<Option<Response>> + Send + Sync>;
 type HyperResponse = hyper::Response<Either<Full<Bytes>, Either<EventStream, PageStream>>>;
 
-/// A loaded build: manifest, page routes, static assets and `app/` metadata files.
+/// A loaded build: manifest, page routes, intercepting routes, slots, static assets and `app/` metadata files.
 struct Build {
     manifest: Manifest,
     pages: Router<usize>,
+    /// Intercepting routes by the pattern they intercept.
+    intercepts: Router<usize>,
+    slots: Slots,
     assets: StaticAssets,
     metadata: MetadataAssets,
 }
@@ -54,16 +61,18 @@ impl Build {
     fn load(out_dir: &std::path::Path) -> Result<Self> {
         let manifest = Manifest::load(out_dir)
             .map_err(|e| Error::internal(format!("no build found in {} ({e}); run `volt build`", out_dir.display())))?;
-        let pages = manifest
+        let pages =
+            manifest.routes.iter().enumerate().filter(|(_, r)| r.is_page()).map(|(i, r)| (r.id.clone(), i)).collect();
+        let intercepts = manifest
             .routes
             .iter()
             .enumerate()
-            .filter(|(_, r)| !r.id.starts_with("/_"))
-            .map(|(i, r)| (r.id.clone(), i))
+            .filter_map(|(i, r)| r.intercept.as_ref().map(|intercept| (intercept.target.clone(), i)))
             .collect();
+        let slots = Slots::new(&manifest.slots);
         let assets = StaticAssets::load(&out_dir.join("static"));
         let metadata = MetadataAssets::load(out_dir, &manifest.metadata);
-        Ok(Self { manifest, pages, assets, metadata })
+        Ok(Self { manifest, pages, intercepts, slots, assets, metadata })
     }
 
     fn has_route(&self, route: MetadataRoute) -> bool {
@@ -191,6 +200,13 @@ impl RenderMode {
             Self::Stream => "stream",
         }
     }
+}
+
+/// How a page is requested: a document load, or a client navigation from the route the client shows.
+#[derive(Clone, Copy)]
+enum Navigation<'a> {
+    Hard,
+    Soft { from: Option<&'a str> },
 }
 
 /// Outcome of matching a path and running its loader.
@@ -559,7 +575,9 @@ impl Server {
             None => (target.to_owned(), String::new()),
         };
         let pathname = self.rewrite(&pathname);
-        let resolved = match self.resolve(ctx, &pathname, &search).await {
+        let navigation = Navigation::Soft { from: ctx.header(FROM_HEADER) };
+        let resolved = match self.resolve(ctx, &pathname, &search, navigation).await {
+            Ok(state) if state.retain => Ok(state),
             Ok(state) => match self.static_props(ctx, &state).await {
                 Some(data) => Ok(PageState { data, ..state }),
                 None => self.with_props(state).await,
@@ -715,7 +733,7 @@ impl Server {
         if let Some(code) = code {
             entries = serde_json::from_value(code)?;
         } else {
-            for route in build.manifest.routes.iter().filter(|r| !r.id.starts_with("/_")) {
+            for route in build.manifest.routes.iter().filter(|r| r.is_page()) {
                 if !route.paths.is_empty() {
                     entries.extend(route.paths.iter().map(|p| SitemapEntry::new(p.clone())));
                 } else if !RoutePattern::parse(&route.id).is_dynamic() {
@@ -921,7 +939,7 @@ impl Server {
     }
 
     async fn resolve_page(&self, ctx: &Ctx, path: &str, search: &str) -> Resolved {
-        let resolved = self.resolve(ctx, path, search).await;
+        let resolved = self.resolve(ctx, path, search, Navigation::Hard).await;
         self.settle(resolved, path, search)
     }
 
@@ -936,29 +954,106 @@ impl Server {
         }
     }
 
-    /// Matches the route and runs its loader.
-    async fn resolve(&self, ctx: &Ctx, pathname: &str, search: &str) -> Result<PageState> {
+    /// Matches the route, runs its loader and resolves its parallel route slots.
+    ///
+    /// On a client navigation from a route that shares a layout with an intercepting route, the intercepting route
+    /// wins: in a slot, the client keeps its page and only the slots change; otherwise it renders instead of the target.
+    async fn resolve(&self, ctx: &Ctx, pathname: &str, search: &str, navigation: Navigation<'_>) -> Result<PageState> {
         let build = self.current();
-        let Some((pattern, index, params)) = build.pages.find(pathname) else {
+        let from = match navigation {
+            Navigation::Soft { from: Some(id) } => build.manifest.route(id).filter(|r| !r.segments.is_empty()),
+            _ => None,
+        };
+        if let Some(from) = from
+            && build.slots.intercepts(&from.segments, pathname)
+        {
+            return self.retain(ctx, &build, from, pathname, search).await;
+        }
+        let in_scope = |index: &usize| {
+            let scope = build.manifest.routes[*index].intercept.as_ref().map(|i| &i.scope);
+            from.zip(scope).is_some_and(|(from, scope)| from.segments.contains(scope))
+        };
+        let Some((_, index, params)) =
+            build.intercepts.find_by(pathname, in_scope).or_else(|| build.pages.find(pathname))
+        else {
             return Err(Error::not_found());
         };
-        if !self.dev && !build.manifest.routes[*index].accepts(pathname) {
+        let entry = &build.manifest.routes[*index];
+        if !self.dev && !entry.accepts(pathname) {
             return Err(Error::not_found());
         }
-        let route = pattern.as_str().to_owned();
+        if let (Some(from), Some(holder)) = (from, &entry.fallback)
+            && from.segments.contains(holder)
+        {
+            return self.retain(ctx, &build, from, pathname, search).await;
+        }
         // `force-static` pages render once per pathname and are shared with every visitor, so their loader
         // sees a request without query, cookies or headers, as in Next.js.
-        let force_static = build.manifest.routes[*index].force_static;
-        let search = if force_static { "" } else { search };
-        let ctx = match force_static {
-            true => self.synthetic(pathname).with_params(params.clone()),
-            false => ctx.with_params(params.clone()),
+        let search = if entry.force_static { "" } else { search };
+        let synthetic;
+        let ctx = if entry.force_static {
+            synthetic = self.synthetic(pathname);
+            &synthetic
+        } else {
+            ctx
         };
-        let data = match self.loaders.get(&route) {
-            Some(loader) => (loader.handler)(ctx).await?,
-            None => Value::Null,
-        };
-        Ok(self.state(route, pathname, search, params.to_json(), data, 200, None))
+        let data = self.load(ctx, &entry.id, &params).await?;
+        let hard = matches!(navigation, Navigation::Hard);
+        let slots = self.slots(ctx, &build, &entry.segments, pathname, false, hard).await?;
+        let mut state = self.state(entry.id.clone(), pathname, search, params.to_json(), data, 200, None);
+        state.slots = slots;
+        Ok(state)
+    }
+
+    /// Runs the loader registered for a page or slot page, if any.
+    async fn load(&self, ctx: &Ctx, route: &str, params: &Params) -> Result<Value> {
+        match self.loaders.get(route) {
+            Some(loader) => (loader.handler)(ctx.with_params(params.clone())).await,
+            None => Ok(Value::Null),
+        }
+    }
+
+    /// What every slot of the layouts in `dirs` renders. On a hard load, a slot without a match or a `default`
+    /// page makes the whole page a 404, as in Next.js.
+    async fn slots(
+        &self,
+        ctx: &Ctx,
+        build: &Build,
+        dirs: &[String],
+        pathname: &str,
+        intercept: bool,
+        hard: bool,
+    ) -> Result<BTreeMap<String, SlotState>> {
+        let mut out = BTreeMap::new();
+        for slot in build.slots.resolve(dirs, pathname, intercept) {
+            let state = match slot.route {
+                Some((route, params)) => SlotState {
+                    route: Some(route.id.clone()),
+                    data: self.load(ctx, &route.id, &params).await?,
+                    params: params.to_json(),
+                },
+                None if hard && !slot.default => return Err(Error::not_found()),
+                None => SlotState::default(),
+            };
+            out.insert(slot.key.to_owned(), state);
+        }
+        Ok(out)
+    }
+
+    /// A client navigation that keeps the page of `from` and only updates the slots of its layouts.
+    async fn retain(
+        &self,
+        ctx: &Ctx,
+        build: &Build,
+        from: &RouteEntry,
+        pathname: &str,
+        search: &str,
+    ) -> Result<PageState> {
+        let slots = self.slots(ctx, build, &from.segments, pathname, true, false).await?;
+        let mut state = self.state(from.id.clone(), pathname, search, json!({}), Value::Null, 200, None);
+        state.slots = slots;
+        state.retain = true;
+        Ok(state)
     }
 
     fn failure_state(&self, pathname: &str, search: &str, error: &Error) -> PageState {
@@ -998,6 +1093,8 @@ impl Server {
             build_id: self.current().manifest.build_id.clone(),
             site: Site { name: self.config.site.name.clone(), url: self.config.site_url().to_owned() },
             export: crate::config::is_export(),
+            slots: BTreeMap::new(),
+            retain: false,
         }
     }
 

@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use voltrs::manifest::{ClientAssets, Manifest, RouteEntry, prerender_file};
+use voltrs::manifest::{ClientAssets, Manifest, RouteEntry, SlotEntry, prerender_file};
 use voltrs::router::{Params, RoutePattern};
 use voltrs::sdk::{SERVER_INFO_FILE, Sdk, ServerInfo};
 use voltrs::ssr::{Engine, EngineOptions};
@@ -126,13 +126,17 @@ impl<'a> Pipeline<'a> {
                 .map(|r| RouteEntry {
                     id: r.id.clone(),
                     chunks: client.routes.get(&r.id).cloned().unwrap_or_default(),
-                    dynamic: r.is_dynamic() || info.loaders.contains(&r.id),
+                    dynamic: r.is_dynamic() || Self::has_loader(r, info),
                     pages: r.is_pages(),
+                    segments: r.dirs.clone(),
+                    intercept: r.intercept.clone(),
+                    fallback: r.fallback.clone(),
                     ..RouteEntry::default()
                 })
                 .collect(),
             metadata,
             metadata_routes: bundle.metadata_routes(),
+            slots: Self::slots(&routes),
             error: None,
         };
         let fingerprint = format!("{}{}{:?}", manifest.server, manifest.client.entry, manifest.client.css);
@@ -153,6 +157,26 @@ impl<'a> Pipeline<'a> {
         Ok(manifest)
     }
 
+    /// Whether the route or a slot page it renders on document loads has a Rust loader. Intercepting slot pages only
+    /// render on client navigations, which always run loaders.
+    fn has_loader(route: &Route, info: &ServerInfo) -> bool {
+        info.loaders.contains(&route.id)
+            || route
+                .slots()
+                .iter()
+                .flat_map(|(_, slot)| &slot.routes)
+                .any(|r| !r.intercept && info.loaders.contains(&r.id))
+    }
+
+    /// The slots of every route, once each.
+    fn slots(routes: &[Route]) -> Vec<SlotEntry> {
+        let mut slots = std::collections::BTreeMap::new();
+        for (segment, slot) in routes.iter().flat_map(Route::slots) {
+            slots.entry(slot.key.clone()).or_insert_with(|| slot.entry(segment));
+        }
+        slots.into_values().collect()
+    }
+
     /// Reads route exports (`revalidate`, `dynamic`, `dynamicParams`) and build-time paths
     /// (`generateStaticParams`, `getStaticPaths`) from the built server bundle.
     async fn apply_route_config(&self, manifest: &mut Manifest, routes: &[Route], info: &ServerInfo) -> Result<()> {
@@ -166,7 +190,9 @@ impl<'a> Pipeline<'a> {
         let output = engine.call("routes", String::new()).await.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
         let configs: Vec<RouteConfig> = serde_json::from_str(&output).context("invalid route config")?;
         for config in configs {
-            let Some(route) = routes.iter().find(|r| r.id == config.id).filter(|r| !r.is_special()) else {
+            let Some(route) =
+                routes.iter().find(|r| r.id == config.id).filter(|r| !r.is_special() && r.intercept.is_none())
+            else {
                 continue;
             };
             let Some(entry) = manifest.routes.iter_mut().find(|r| r.id == config.id) else {
@@ -174,7 +200,7 @@ impl<'a> Pipeline<'a> {
             };
             entry.dynamic_params = config.dynamic_params;
             entry.static_props = config.is_static;
-            let loader = info.loaders.contains(&route.id);
+            let loader = Self::has_loader(route, info);
             if config.is_static && loader {
                 voltrs::log::warn(&format!(
                     "{} has getStaticProps and a Rust loader: it renders per request and is never cached",
@@ -230,7 +256,7 @@ impl<'a> Pipeline<'a> {
         let targets: Vec<String> = manifest
             .routes
             .iter()
-            .filter(|r| !r.id.starts_with("/_") && !r.dynamic && !info.loaders.contains(&r.id))
+            .filter(|r| r.is_page() && !r.dynamic && !info.loaders.contains(&r.id))
             .flat_map(|r| r.paths.iter().cloned())
             .collect();
         let dir = self.project.out_dir.join(voltrs::manifest::PRERENDER_DIR);

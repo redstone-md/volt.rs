@@ -1,5 +1,7 @@
 //! Assembles the final HTML document around React's output.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -35,6 +37,27 @@ pub struct PageState {
     /// Set by `volt export`: the client reads route data from `/_volt/data/<path>.json` files.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub export: bool,
+    /// What each parallel route slot renders, keyed by slot directory (`/dashboard/@team`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub slots: BTreeMap<String, SlotState>,
+    /// Set on a client navigation that only changes slots: the client keeps its current page.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub retain: bool,
+}
+
+/// The page a slot renders. `route` is `None` when no page of the slot matches the URL: a hard load renders the
+/// slot's `default`, a client navigation keeps what the slot showed before.
+#[derive(Debug, Clone, Serialize)]
+pub struct SlotState {
+    pub route: Option<String>,
+    pub params: Value,
+    pub data: Value,
+}
+
+impl Default for SlotState {
+    fn default() -> Self {
+        Self { route: None, params: Value::Object(Default::default()), data: Value::Null }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -316,6 +339,8 @@ mod tests {
             build_id: String::new(),
             site: Site { name: String::new(), url: String::new() },
             export: false,
+            slots: BTreeMap::new(),
+            retain: false,
         };
         let head =
             Document { manifest: &manifest, route: None, state: &state, dev: false, base_path: "", inserted: "" }

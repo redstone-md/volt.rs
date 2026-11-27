@@ -25,7 +25,7 @@ impl<'a> Export<'a> {
     /// Everything that cannot work without the server, one line each.
     pub fn blockers(&self) -> Vec<String> {
         let mut out = Vec::new();
-        for route in self.manifest.routes.iter().filter(|r| !r.id.starts_with("/_")) {
+        for route in self.manifest.routes.iter().filter(|r| r.is_page()) {
             let id = &route.id;
             if self.info.loaders.contains(id) {
                 out.push(format!("{id}: has a Rust #[loader]"));

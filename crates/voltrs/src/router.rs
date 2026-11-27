@@ -263,6 +263,14 @@ impl<T> Router<T> {
         self.routes.iter().find_map(|(pattern, value)| pattern.matches(path).map(|params| (pattern, value, params)))
     }
 
+    /// The most specific match among the values that `accept` allows.
+    pub fn find_by(&self, path: &str, mut accept: impl FnMut(&T) -> bool) -> Option<(&RoutePattern, &T, Params)> {
+        self.routes
+            .iter()
+            .filter(|(_, value)| accept(value))
+            .find_map(|(pattern, value)| pattern.matches(path).map(|params| (pattern, value, params)))
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&RoutePattern, &T)> {
         self.routes.iter().map(|(p, v)| (p, v))
     }
@@ -331,6 +339,7 @@ mod tests {
         assert_eq!(*router.find("/blog/new").unwrap().1, 2);
         assert_eq!(*router.find("/blog/x").unwrap().1, 1);
         assert_eq!(*router.find("/a/b").unwrap().1, 0);
+        assert_eq!(*router.find_by("/blog/new", |v| *v != 2).unwrap().1, 1);
     }
 
     #[test]

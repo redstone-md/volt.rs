@@ -32,6 +32,7 @@ mod metadata;
 mod multipart;
 mod response;
 mod server;
+mod slots;
 mod stream;
 
 pub mod assets;

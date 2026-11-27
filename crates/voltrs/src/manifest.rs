@@ -24,6 +24,9 @@ pub struct Manifest {
     /// Metadata routes defined in code (`app/sitemap.ts`, ...), by name: see [`crate::seo::MetadataRoute`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata_routes: Vec<String>,
+    /// Parallel route slots (`@name` folders) of every layout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<SlotEntry>,
     /// Set by `volt dev` when the last rebuild failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -82,6 +85,51 @@ pub struct RouteEntry {
     /// and empty `searchParams`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force_static: bool,
+    /// Keys of the `app/` directories from the root to the page (`/`, `/dashboard`, ...), whose slots it renders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<String>,
+    /// Set on intercepting routes (`(.)x`, `(..)x`, `(...)x`), which only render on client navigations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercept: Option<Intercept>,
+    /// Key of the directory whose `default` page this route renders: the URL only exists in its slots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+}
+
+/// What an intercepting route replaces during client-side navigation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Intercept {
+    /// Pattern of the intercepted URL, e.g. `/photos/[id]`.
+    pub target: String,
+    /// Directory key the navigation must start under for the interception to apply.
+    pub scope: String,
+}
+
+/// A parallel route slot: the `@name` folder of a layout.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SlotEntry {
+    /// Directory key of the slot, e.g. `/dashboard/@team`.
+    pub key: String,
+    /// Directory key of the layout that receives the slot.
+    pub segment: String,
+    /// Whether the slot has a `default` page for URLs it does not match.
+    pub default: bool,
+    pub routes: Vec<SlotRoute>,
+}
+
+/// A page inside a slot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SlotRoute {
+    /// Directory path of the page inside `app/` with groups removed, e.g. `/@modal/(.)photos/[id]`; also its loader route.
+    pub id: String,
+    /// URL pattern the page matches, e.g. `/photos/[id]`.
+    pub pattern: String,
+    /// Matches only on client navigations from inside the slot's layout.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub intercept: bool,
+    /// Directory keys of the page inside the slot, for slots nested in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<String>,
 }
 
 impl Default for RouteEntry {
@@ -97,6 +145,9 @@ impl Default for RouteEntry {
             pages: false,
             static_props: false,
             force_static: false,
+            segments: Vec::new(),
+            intercept: None,
+            fallback: None,
         }
     }
 }
@@ -109,6 +160,11 @@ impl RouteEntry {
     /// Whether responses of this route are kept in the page cache.
     pub fn is_cached(&self) -> bool {
         !self.dynamic || self.revalidate.is_some()
+    }
+
+    /// Whether the route answers its own URL: not a pseudo route like `/_not-found` and not an intercepting route.
+    pub fn is_page(&self) -> bool {
+        !self.id.starts_with("/_") && self.intercept.is_none()
     }
 
     /// Whether `path` is allowed by `dynamicParams`.
