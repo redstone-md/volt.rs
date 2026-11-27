@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { request } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setup } from "./harness.js";
@@ -16,6 +17,27 @@ const get = async (path) => {
   return { response, body: await response.text(), ms: performance.now() - started };
 };
 const stamp = (body) => Number(body.match(/id="time">(\d+)/)?.[1]);
+// fetch() normalises `\` and `//` in paths, so unsafe paths go out as raw request lines.
+const rawGet = (path) =>
+  new Promise((resolve, reject) => {
+    const { hostname, port } = new URL(base);
+    request({ hostname, port, path, method: "GET" }, (response) => {
+      response.resume();
+      resolve({ status: response.statusCode, location: response.headers.location });
+    })
+      .on("error", reject)
+      .end();
+  });
+const exportWith = (toml) => {
+  const config = join(app, "volt.toml");
+  const original = readFileSync(config, "utf8");
+  writeFileSync(config, original + toml);
+  try {
+    return spawnSync(volt, ["export"], { cwd: app, encoding: "utf8" });
+  } finally {
+    writeFileSync(config, original);
+  }
+};
 
 await check("generateStaticParams paths are prerendered at build time", async () => {
   for (const file of ["blog/hello", "blog/world", "docs/guide/intro", "lang/en/about", "lang/fr/about", "index"]) {
@@ -73,10 +95,41 @@ await check("revalidate serves stale pages and regenerates in the background", a
   assert.equal(stamp(cached.body), stamp(fresh.body));
 });
 
+await check("getStaticPaths paths are prerendered and fallback: false answers 404", async () => {
+  const manifest = JSON.parse(readFileSync(join(app, ".volt", "manifest.json"), "utf8"));
+  const posts = manifest.routes.find((r) => r.id === "/posts/[id]");
+  assert.deepEqual(posts.prerendered, ["/posts/1", "/posts/2"]);
+  for (const id of ["1", "2"]) {
+    const { response, body } = await get(`/posts/${id}`);
+    assert.equal(response.status, 200);
+    assert.match(body, new RegExp(`Pages post (<!-- -->)?${id}`));
+  }
+  assert.equal((await get("/posts/3")).response.status, 404);
+});
+
+await check("revalidate = 0 renders on every request", async () => {
+  assert.ok(!existsSync(join(app, ".volt", "prerender", "now.html")), "not prerendered");
+  for (let i = 0; i < 3; i++) {
+    const before = Date.now();
+    const { response, body } = await get("/now");
+    assert.ok(stamp(body) >= before, `request ${i} rendered fresh (${stamp(body)} vs ${before})`);
+    assert.match(response.headers.get("cache-control"), /no-store/);
+    await sleep(20);
+  }
+});
+
 await check("trailing slashes redirect to the canonical URL", async () => {
   const { response } = await get("/blog/hello/?x=1");
   assert.equal(response.status, 308);
   assert.equal(response.headers.get("location"), "/blog/hello?x=1");
+});
+
+await check("slash normalisation never redirects to another host", async () => {
+  for (const path of ["//evil.com/", "/\\evil.com/", "///evil.com/", "/\\/evil.com"]) {
+    const { status, location } = await rawGet(path);
+    assert.equal(status, 308, path);
+    assert.equal(location, "/evil.com", path);
+  }
 });
 
 await check("sitemap lists generated paths", async () => {
@@ -94,6 +147,23 @@ await check("client navigation between prerendered pages", async () => {
   assert.equal(await page.evaluate(() => window.__marker), 1);
   assert.equal(await page.title(), "Post hello · static-generation");
   await page.close();
+});
+
+await check("volt export refuses an export_dir that holds project files", async () => {
+  for (const dir of ["app", "../..", "/tmp"]) {
+    const result = exportWith(`\n[build]\nexport_dir = ${JSON.stringify(dir)}\n`);
+    assert.notEqual(result.status, 0, dir);
+    assert.match(result.stderr + result.stdout, /export_dir/, dir);
+    assert.ok(existsSync(join(app, "app", "page.tsx")), `sources survive ${dir}`);
+    assert.ok(existsSync(join(app, "volt.toml")), `project survives ${dir}`);
+  }
+});
+
+await check("volt export lists pages that need the server", async () => {
+  const result = spawnSync(volt, ["export"], { cwd: app, encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr + result.stdout, /\/now: renders on every request/);
+  rmSync(join(app, "app", "now"), { recursive: true });
 });
 
 await check("volt export writes a static site", async () => {

@@ -14,7 +14,7 @@ port = 3000
 workers = 0                       # QuickJS render workers, 0 = number of CPUs
 memory_limit_mb = 256             # heap limit per render worker
 compress = true                   # gzip dynamic responses
-page_cache = 1000                 # pages rendered at runtime kept in memory (prerendered pages always are)
+page_cache_mb = 50                # memory for pages cached on demand (LRU); build-time pages are not counted
 
 [build]
 minify = true
@@ -24,7 +24,7 @@ aliases = { "@ui" = "./components/ui" }
 define = { "__API_VERSION__" = "\"2\"" }
 base_path = "/docs"               # serve the app under a path prefix
 trailing_slash = false            # true: /about/ is canonical, the other form redirects with 308
-export_dir = "out"                # output of `volt export`
+export_dir = "out"                # output of `volt export`, a relative path inside the project
 
 [seo]
 sitemap = true

@@ -65,6 +65,6 @@ volt speaks HTTP/1.1 and HTTP/2 (h2c). Put TLS in front with nginx, Caddy or a l
 | `public/*` | `public, max-age=0, must-revalidate` with ETag |
 | `/_volt/image` | `public, max-age=86400, stale-while-revalidate=604800` with ETag |
 
-Pages that export `revalidate = <seconds>` are cached in memory; once expired they are served stale while one background render refreshes them. `ctx.revalidate_path` purges them on demand. See [static generation](static-generation.md#incremental-static-regeneration).
+Pages that export `revalidate = <seconds>` are cached in memory (pages rendered on demand within `[server] page_cache_mb`); once expired they are served stale while one background render refreshes them. `ctx.revalidate_path` purges them on demand. See [static generation](static-generation.md#incremental-static-regeneration).
 
 The server shuts down gracefully on SIGTERM and SIGINT, finishing in-flight requests for up to 10 seconds.

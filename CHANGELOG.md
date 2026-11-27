@@ -10,6 +10,7 @@
 - `volt export` writes a static site with client navigation from exported route data.
 - `[build] base_path`, `trailing_slash` (308 normalisation) and `export_dir`.
 - `<Image>` serves original files when `[images] optimize = false`.
+- `revalidate = 0` renders on every request; the page cache keeps on-demand pages within `[server] page_cache_mb` (LRU).
 - `volt dev` no longer rebuilds on events of the `.volt` directory itself.
 
 ## 0.0.1

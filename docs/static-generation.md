@@ -68,6 +68,10 @@ export async function getStaticPaths() {
 
 `export const revalidate = 60` keeps a page in the cache for 60 seconds. After that the next request still gets the cached copy immediately while one background task renders a fresh one; concurrent requests keep getting the stale copy and do not start more renders. If the background render fails the stale copy stays and the next request retries; if it answers 404 the page is dropped. Prerendered pages with `revalidate` start their timer when the server starts.
 
+`export const revalidate = 0` means the page is never cached: it is not prerendered and renders on every request, like `dynamic = "force-dynamic"`.
+
+Pages rendered on demand (paths not known at build time, and every query string variant) share the `[server] page_cache_mb` budget (50 MB by default); the least recently used are evicted first. Build-time paths stay in memory and do not count against it. A purge also discards renders that were already in flight, so an older render never replaces a purged page.
+
 Revalidated pages are sent with `Cache-Control: public, max-age=0, s-maxage=<seconds>, stale-while-revalidate` so a CDN in front behaves the same way.
 
 ## On-demand revalidation
@@ -109,8 +113,10 @@ The export fails with a list of everything that needs the server:
 
 - routes with a Rust `#[loader]`,
 - server actions and API routes,
-- dynamic routes without `generateStaticParams` or `getStaticPaths`, and `dynamic = "force-dynamic"`,
+- dynamic routes without `generateStaticParams` or `getStaticPaths`, and pages with `dynamic = "force-dynamic"` or `revalidate = 0`,
 - paths that could not be prerendered.
+
+`export_dir` is emptied before writing, so it must be a relative path inside the project without `..`. It cannot be or contain `app/`, `public/`, `.volt/`, `node_modules/`, `server/`, `src/` or `target/`, and an existing non-empty directory is only replaced when a previous export wrote it.
 
 `[[redirects]]`, `[[rewrites]]`, `[headers]` and `revalidate` are reported as ignored. Configure redirects and headers on the host, and point its 404 page to `404.html`.
 
@@ -124,4 +130,4 @@ trailing_slash = true   # canonical URLs end with a slash
 
 `base_path` is applied to routing (requests outside it answer 404), `Link` and router hrefs, asset and media URLs, actions, `/_volt/data`, `<Image>`, the dev live reload, redirects (configured ones and those raised by loaders and actions), the sitemap, `robots.txt` and the export. Write hrefs, redirects and `<Image src>` without it: `<Link href="/about">` renders `/docs/about/`, and `usePathname()` returns `/about`. Plain `<img>` and `<a>` tags pointing at `public/` files need the prefix written out.
 
-With `trailing_slash = false` (the default) `/about/` redirects to `/about` with 308; with `true`, `/about` redirects to `/about/`. Paths whose last segment contains a dot (files) and `/_volt/*` endpoints are left alone.
+With `trailing_slash = false` (the default) `/about/` redirects to `/about` with 308; with `true`, `/about` redirects to `/about/`. Paths whose last segment contains a dot (files) and `/_volt/*` endpoints are left alone. Repeated leading slashes and backslashes collapse to one `/`, so `//evil.com/` redirects to `/evil.com` on the same host.
