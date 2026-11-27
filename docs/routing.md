@@ -11,6 +11,8 @@ volt uses the Next.js App Router file conventions. Every folder in `app/` is a U
 | `app/shop/[[...rest]]/page.tsx` | `/shop` and `/shop/a/b` |
 | `app/(marketing)/pricing/page.tsx` | `/pricing` (groups do not affect the URL) |
 | `app/_components/x.tsx` | not routable (private folder) |
+| `app/@modal/page.tsx` | a [slot](#parallel-routes) of the root layout, not a URL segment |
+| `app/@modal/(.)photos/[id]/page.tsx` | [intercepts](#intercepting-routes) `/photos/1` on client navigation |
 
 When several routes match, static segments win over dynamic ones, and dynamic ones over catch-alls.
 
@@ -25,6 +27,7 @@ When several routes match, static segments win over dynamic ones, and dynamic on
 | `global-error.tsx` | At the app root only: replaces the root layout when it fails. Renders its own `<html>` and `<body>`. |
 | `not-found.tsx` | Rendered for `notFound()` thrown below its segment and, at the root, for unknown URLs. |
 | `template.tsx` | Like a layout, but remounted when the segment below it changes. |
+| `default.tsx` | Rendered by a [parallel route](#parallel-routes) slot that has no page for the URL. |
 
 Files may use `.tsx`, `.ts`, `.jsx` or `.js`. Metadata files (`icon.png`, `opengraph-image.jpg`, `sitemap.ts`, ...) are described in [Metadata and SEO](./metadata-seo.md).
 
@@ -38,7 +41,7 @@ Error and not-found boundaries reset when the pathname changes. Layouts inside t
 
 ### Active segments
 
-`useSelectedLayoutSegment()` returns the active segment one level below the layout that calls it, and `useSelectedLayoutSegments()` all of them. In `app/layout.tsx` on `/blog/hello`, they return `"blog"` and `["blog", "hello"]`; in `app/blog/layout.tsx`, `"hello"` and `["hello"]`. Dynamic segments return their value, route groups their folder name (`"(shop)"`), and the page itself `null`. Parallel route slots are not supported, so a key other than `"children"` returns `null` / `[]`.
+`useSelectedLayoutSegment()` returns the active segment one level below the layout that calls it, and `useSelectedLayoutSegments()` all of them. In `app/layout.tsx` on `/blog/hello`, they return `"blog"` and `["blog", "hello"]`; in `app/blog/layout.tsx`, `"hello"` and `["hello"]`. Dynamic segments return their value, route groups their folder name (`"(shop)"`), and the page itself `null`. Reading the active segment of a [parallel route](#parallel-routes) slot is not supported: a key other than `"children"` returns `null` / `[]`.
 
 ```tsx
 "use client";
@@ -87,6 +90,90 @@ export default function Post({ params, searchParams }: PageProps<undefined, { sl
 `params` and `searchParams` are plain objects that can also be awaited, so code written for Next.js 15 (`const { slug } = await params`) keeps working.
 
 Pages with a Rust loader get its result as `data`; see [Data](./data.md).
+
+## Parallel routes
+
+A folder named `@name` inside a segment is a **slot**: its pages render next to the segment's page, and the segment's layout receives each slot as a prop alongside `children`. Slots do not affect the URL.
+
+```
+app/dashboard/
+├── layout.tsx              receives { children, analytics, team }
+├── page.tsx                /dashboard
+├── default.tsx             children of /dashboard/views (only a slot has that URL)
+├── settings/page.tsx       /dashboard/settings
+├── @analytics/
+│   ├── page.tsx            analytics at /dashboard
+│   ├── views/page.tsx      analytics at /dashboard/views
+│   └── default.tsx         analytics anywhere else
+└── @team/
+    ├── page.tsx            team at /dashboard
+    ├── settings/page.tsx   team at /dashboard/settings
+    └── default.tsx
+```
+
+```tsx
+// app/dashboard/layout.tsx
+import type { LayoutProps } from "volt-rs";
+
+export default function Dashboard({ children, analytics, team }: LayoutProps<{}, "analytics" | "team">) {
+  return (
+    <>
+      {children}
+      <aside>{analytics}{team}</aside>
+    </>
+  );
+}
+```
+
+Each slot is matched against the URL on its own and can have its own `layout`, `loading`, `error`, `not-found` and `template` files and nested folders, dynamic segments and catch-alls included. Slot pages receive `{ data, params, searchParams }` like pages; `default.tsx` receives `{ params }` (`DefaultProps`).
+
+When a slot has no page for the URL:
+
+- on a **client navigation** it keeps what it showed before (soft navigation), so `/dashboard` → `/dashboard/settings` keeps the analytics overview;
+- on a **hard load** (first visit, refresh) it renders its `default.tsx`. A slot without `default.tsx` makes the whole page a 404, as in Next.js.
+
+A URL that only a slot matches (`/dashboard/views` above) keeps the current page on client navigation and renders the segment's own `default.tsx` as `children` on a hard load.
+
+Metadata comes from the page and its layouts only, and `useData()` inside a slot returns the page's data; slot pages get their own data as the `data` prop. A slot page can have a Rust loader: register it under the page's folder path, groups removed, e.g. `#[loader("/dashboard/@team/settings")]`.
+
+## Intercepting routes
+
+A folder named `(.)x`, `(..)x`, `(..)(..)x` or `(...)x` intercepts the route `x` during client-side navigation: the intercepting page renders instead, while a hard load or refresh of the same URL renders the original route. The prefix is relative to route segments (slots and groups do not count): `(.)` is the same level, `(..)` one level up, `(..)(..)` two levels up and `(...)` the app root.
+
+The classic use is a modal: a photo opens over the gallery when clicked, and has its own full page when shared or refreshed.
+
+```
+app/
+├── layout.tsx                         receives { children, modal }
+├── @modal/
+│   ├── default.tsx                    returns null
+│   ├── [...catchAll]/page.tsx         returns null: closes the modal on other navigations
+│   └── (.)photos/[id]/page.tsx        the modal
+└── photos/
+    ├── page.tsx                       the gallery
+    └── [id]/page.tsx                  the full page
+```
+
+```tsx
+// app/@modal/(.)photos/[id]/page.tsx
+import { useRouter } from "volt-rs/navigation";
+
+export default function PhotoModal({ params }: { params: { id: string } }) {
+  const router = useRouter();
+  return (
+    <dialog open>
+      <img src={`/photos/${params.id}.jpg`} alt="" />
+      <button onClick={() => router.back()}>Close</button>
+    </dialog>
+  );
+}
+```
+
+Clicking `<Link href="/photos/1">` in the gallery keeps the gallery mounted and renders the modal into `@modal`; the URL becomes `/photos/1`. Back closes the modal and forward reopens it, because each history entry remembers how it was resolved. Refreshing `/photos/1` renders `app/photos/[id]/page.tsx`.
+
+Interception applies when the client navigates from a page inside the segment that holds the interception folder (any page for a folder in `app/` or `app/@modal`, pages under `/feed` for `app/feed/(..)photo/[id]`). An interception folder outside a slot, like `app/feed/(..)photo/[id]`, replaces the page itself on those navigations instead of rendering into a slot.
+
+The client runtime sends the route it navigates from in an `x-volt-from` header on `/_volt/data` requests; that is how the server tells a client navigation from a hard load. With `volt export` there is no server to resolve interceptions, so client navigations render the original route; slots still keep their state.
 
 ## Linking and navigation
 

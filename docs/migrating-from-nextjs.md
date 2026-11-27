@@ -10,6 +10,7 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 | `favicon.ico`, `icon.*`, `apple-icon.*`, `opengraph-image.*`, `twitter-image.*`, `manifest.json`, `robots.txt`, `sitemap.xml` files | same (image files only: no `opengraph-image.tsx`) |
 | `app/sitemap.ts`, `app/robots.ts`, `app/manifest.ts` | same, plus Rust `#[sitemap]` providers |
 | `[slug]`, `[...slug]`, `[[...slug]]`, `(group)`, `_private` | same |
+| `@slot` parallel routes with `default.tsx`, `(.)` / `(..)` / `(...)` intercepting routes | same, see [Routing](./routing.md#parallel-routes) |
 | `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/cache`, `next/server` | aliased to `volt-rs/*` (`next/cache` and `next/server` only export `unstable_noStore` and `connection`) |
 | `pages/**`, `_app`, `_document`, `404`, `500`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` | same, see [Pages Router](./pages-router.md) |
 | `export const metadata`, `generateMetadata`, `export const viewport` | same |
@@ -74,7 +75,7 @@ export default function Post({ data }: PageProps<"/posts/[id]">) {
 ## Not supported yet
 
 - React Server Components. Every component renders on the server (streaming Suspense boundaries) and hydrates in the browser; data that needs the server comes from Rust loaders, which run before rendering starts.
-- Parallel (`@slot`) and intercepting (`(.)`) routes.
+- Intercepting routes in `volt export` builds (client navigations render the original route) and `metadata` from slot pages.
 - `next/og`, edge runtime.
 - `next/font` metric-adjusted fallback fonts (`adjustFontFallback`) and the Google `axes` option.
 - Pages Router `getInitialProps`, i18n routing and `req`/`res` in `getServerSideProps` (see [Pages Router](./pages-router.md#not-supported)).

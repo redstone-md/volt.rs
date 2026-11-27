@@ -86,7 +86,7 @@ export default function Home({ data }: PageProps<"/">) {
 
 ## Features
 
-- **App Router conventions**: `page`, `layout`, `loading`, `error`, `global-error`, `not-found` (nested too), `template`; `[slug]`, `[...slug]`, `[[...slug]]`, `(groups)`, `_private` folders; `export const dynamic` (`force-static`, `force-dynamic`, `error`); `useSelectedLayoutSegment(s)` and `useServerInsertedHTML`.
+- **App Router conventions**: `page`, `layout`, `loading`, `error`, `global-error`, `not-found` (nested too), `template`; `[slug]`, `[...slug]`, `[[...slug]]`, `(groups)`, `_private` folders; parallel routes (`@slot`, `default`) and intercepting routes (`(.)`, `(..)`, `(...)`) for modals; `export const dynamic` (`force-static`, `force-dynamic`, `error`); `useSelectedLayoutSegment(s)` and `useServerInsertedHTML`.
 - **Pages Router** next to it: `pages/`, `_app`, `_document`, `404`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` and `next/router` with router events.
 - **Server-side rendering** of React 19 with hydration, then client-side navigation with prefetching, scroll restoration and per-route code splitting.
 - **Streaming SSR**: the shell goes out first and each `<Suspense>` boundary (`use(promise)`, `lazy`, `next/dynamic`) streams in as it resolves; crawlers get the complete page. `loading.tsx` shows instantly on client navigation.
@@ -126,7 +126,7 @@ export default function Home({ data }: PageProps<"/">) {
 
 ## Status
 
-volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components, parallel and intercepting routes, and React Fast Refresh (dev uses full reloads). See [CHANGELOG.md](./CHANGELOG.md).
+volt.rs is at 0.0.1. The core is usable: routing, SSR, hydration, navigation, actions, metadata, styling and builds are covered by end-to-end tests. Not there yet: React Server Components and React Fast Refresh (dev uses full reloads). See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Contributing
 

@@ -56,6 +56,8 @@ The client entry hydrates the document, then owns navigation: links fetch `/_vol
 
 Routes with a `loading` file in any segment also get a small shell chunk with their segments but no page. On navigation the client matches the URL against the route patterns, and if the data has not arrived when the shell chunk has, it commits the target layouts around a page that suspends (an urgent update, not a transition), so the nearest `loading` boundary shows; the real view replaces it in a transition once the data and the page chunk are there.
 
+Parallel route slots are resolved by the server with the same router as pages: the manifest lists every slot with its URL patterns, and the page state carries the page each slot renders (`state.slots`). On client navigations the runtime sends the current route in `x-volt-from`; the server uses it to apply intercepting routes and answers `retain: true` when only slots change, and the client merges the result over the current view, keeping slots that did not match.
+
 ## Type bridge
 
 `#[model]` and `#[derive(Type)]` implement `voltrs::Type`, which describes a Rust type as TypeScript. `#[action]` and `#[loader]` register themselves with `inventory`. Running the server binary with `--emit-sdk <dir>` walks the registry and writes `api.ts` (actions, models, `Loaders`, `PageProps`) and `server.json` (used by the CLI to decide which pages can be prerendered).

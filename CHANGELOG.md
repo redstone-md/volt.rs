@@ -7,6 +7,8 @@
 - `TextEncoder` and `TextDecoder` in the server runtime are native, and complete documents are collected in Rust instead of being decoded in JavaScript.
 - `dynamic()` server-renders its content in place and honours `ssr: false`.
 - Client navigation to a route with `loading.tsx` shows the target layouts and loading UI at once while the loader data and page chunk load.
+- Parallel routes: `@slot` folders render as layout props next to `children`, each with its own pages, boundaries and nested segments; unmatched slots keep their state on client navigation and render `default.tsx` on hard loads (404 without one). URLs that only a slot matches render the segment's `default.tsx`. Slot pages can have Rust loaders.
+- Intercepting routes: `(.)`, `(..)`, `(..)(..)` and `(...)` folders render instead of the target route on client navigation (into a slot, keeping the current page, or as the page), while hard loads render the original route; back and forward restore how each entry was resolved. The client names its current route in an `x-volt-from` header on `/_volt/data`.
 - Pages Router next to the App Router: `pages/` routes, `_app`, `_document` (`next/document`), `404`, `500` / `_error`, `getServerSideProps`, `getStaticProps` with `revalidate`, `getStaticPaths` prerendering, Rust loader props merged into page props, and `next/router` (`volt-rs/router`) with `useRouter`, `withRouter`, the `Router` singleton and router events.
 - `next` and `next/*` imports type-check through `volt-rs/env`.
 - `generateStaticParams` (pages and layouts), `dynamicParams` and Pages Router `getStaticPaths`, evaluated at build time; generated paths are prerendered and listed in the sitemap.
