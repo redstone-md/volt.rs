@@ -1,7 +1,7 @@
 //! Google Fonts downloads, cached under `.volt/cache/fonts` so builds work offline once fetched.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
@@ -9,6 +9,8 @@ use crate::util::hash;
 
 const CSS_API: &str = "https://fonts.googleapis.com/css2";
 const METADATA_API: &str = "https://fonts.google.com/metadata/fonts";
+/// How long the downloaded family catalog is trusted before it is fetched again.
+const CATALOG_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// A current browser user agent makes the API answer with WOFF2 files split by unicode subset.
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -47,6 +49,18 @@ impl Query {
     }
 }
 
+/// The parsed family catalog, and whether it was just downloaded.
+struct Catalog {
+    value: serde_json::Value,
+    fresh: bool,
+}
+
+impl Catalog {
+    fn family(&self, family: &str) -> Option<&serde_json::Value> {
+        self.value["familyMetadataList"].as_array()?.iter().find(|f| f["family"] == family)
+    }
+}
+
 /// One `@font-face` from the API response.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteFace {
@@ -73,33 +87,90 @@ impl Google {
         response.body_mut().with_config().limit(64 * 1024 * 1024).read_to_vec()
     }
 
+    fn cache_path(&self, url: &str, ext: &str) -> PathBuf {
+        self.cache.join(format!("{}.{ext}", hash(url.as_bytes())))
+    }
+
     fn cached(&self, url: &str, ext: &str, fetch: impl FnOnce() -> Result<Vec<u8>>) -> Result<Vec<u8>> {
-        let path = self.cache.join(format!("{}.{ext}", hash(url.as_bytes())));
+        let path = self.cache_path(url, ext);
         if let Ok(bytes) = std::fs::read(&path) {
             return Ok(bytes);
         }
-        let bytes = fetch()?;
+        self.store(&path, fetch()?)
+    }
+
+    fn store(&self, path: &Path, bytes: Vec<u8>) -> Result<Vec<u8>> {
         std::fs::create_dir_all(&self.cache)?;
-        std::fs::write(&path, &bytes)?;
+        std::fs::write(path, &bytes)?;
         Ok(bytes)
     }
 
-    /// The weight axis of a variable family, e.g. `100..900`, from the Google Fonts catalog.
-    fn variable_weights(&self, family: &str) -> Option<String> {
-        let bytes =
-            self.cached(METADATA_API, "json", || self.get(METADATA_API).map_err(|e| anyhow::anyhow!("{e}"))).ok()?;
+    /// The Google Fonts family catalog. A copy older than a week is refreshed, or reused with a warning offline.
+    fn catalog(&self, refresh: bool) -> Result<Catalog> {
+        let path = self.cache_path(METADATA_API, "json");
+        let age = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok());
+        let stale = refresh || age.is_none_or(|age| age > CATALOG_MAX_AGE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) if !stale => bytes,
+            cached => match self.get(METADATA_API) {
+                Ok(bytes) => self.store(&path, bytes)?,
+                Err(error) => match cached {
+                    Ok(bytes) => {
+                        voltrs::log::warn(&format!(
+                            "cannot refresh the Google Fonts catalog ({error}); using the cached copy"
+                        ));
+                        bytes
+                    }
+                    Err(_) => bail!("cannot download the Google Fonts catalog from fonts.google.com: {error}"),
+                },
+            },
+        };
         let text = String::from_utf8_lossy(&bytes);
-        let catalog: serde_json::Value = serde_json::from_str(text.trim_start_matches(")]}'")).ok()?;
-        let entry = catalog["familyMetadataList"].as_array()?.iter().find(|f| f["family"] == family)?;
-        let axis = entry["axes"].as_array()?.iter().find(|a| a["tag"] == "wght")?;
-        Some(format!("{}..{}", axis["min"].as_f64()?, axis["max"].as_f64()?))
+        let value: serde_json::Value = serde_json::from_str(text.trim_start_matches(")]}'"))
+            .context("the Google Fonts catalog is not valid JSON")?;
+        Ok(Catalog { value, fresh: stale })
+    }
+
+    /// The weights to request when none are given: the variable axis, or the only static weight.
+    fn default_weights(&self, family: &str) -> Result<Option<String>> {
+        let mut catalog = self.catalog(false)?;
+        if catalog.family(family).is_none() && !catalog.fresh {
+            catalog = self.catalog(true)?;
+        }
+        let Some(entry) = catalog.family(family) else { return Ok(None) };
+        if let Some(axis) = entry["axes"].as_array().and_then(|axes| axes.iter().find(|a| a["tag"] == "wght"))
+            && let (Some(min), Some(max)) = (axis["min"].as_f64(), axis["max"].as_f64())
+        {
+            return Ok(Some(format!("{min}..{max}")));
+        }
+        let mut weights: Vec<String> = entry["fonts"]
+            .as_object()
+            .map(|fonts| fonts.keys().map(|k| k.trim_end_matches('i').to_owned()).collect())
+            .unwrap_or_default();
+        weights.sort_by_key(|w| w.parse::<u32>().unwrap_or(0));
+        weights.dedup();
+        match weights.as_slice() {
+            [only] => Ok(Some(only.clone())),
+            _ => bail!(
+                "Google font `{family}` is not a variable font; set `weight` to one of {}",
+                weights.iter().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(", ")
+            ),
+        }
     }
 
     pub fn faces(&self, query: &Query) -> Result<Vec<RemoteFace>> {
         let mut query = query.clone();
         let variable = query.weights.is_empty() || query.weights.iter().any(|w| w == "variable");
-        if variable && let Some(range) = self.variable_weights(&query.family) {
-            query.weights = vec![range];
+        if variable {
+            let weights = self
+                .default_weights(&query.family)
+                .with_context(|| format!("cannot resolve the default weight of Google font `{}`", query.family))?;
+            if let Some(weights) = weights {
+                query.weights = vec![weights];
+            }
         }
         let url = query.url();
         let result = self.cached(&url, "css", || {
