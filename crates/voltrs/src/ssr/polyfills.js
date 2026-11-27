@@ -98,10 +98,16 @@
       return "utf-8";
     }
     encode(input = "") {
-      return encodeUtf8(String(input));
+      const s = String(input);
+      return host.encode(s) ?? encodeUtf8(s);
     }
     encodeInto(input, dest) {
       const s = String(input);
+      const whole = host.encode(s);
+      if (whole && whole.length <= dest.length) {
+        dest.set(whole);
+        return { read: s.length, written: whole.length };
+      }
       let read = 0;
       let written = 0;
       while (read < s.length) {
@@ -116,9 +122,19 @@
       return { read, written };
     }
   };
+  /** Length of a UTF-8 sequence cut off at the end of `bytes`, kept back for the next streamed chunk. */
+  const incompleteTail = (bytes) => {
+    for (let back = 1; back <= Math.min(3, bytes.length); back++) {
+      const b = bytes[bytes.length - back];
+      if ((b & 0xc0) === 0x80) continue;
+      const size = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1;
+      return size > back ? back : 0;
+    }
+    return 0;
+  };
   g.TextDecoder ??= class TextDecoder {
     constructor() {
-      this.pending = [];
+      this.pending = new Uint8Array(0);
     }
     get encoding() {
       return "utf-8";
@@ -129,43 +145,15 @@
         : ArrayBuffer.isView(input)
           ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
           : new Uint8Array(input);
-      const bytes = this.pending.length ? Uint8Array.from([...this.pending, ...view]) : view;
-      this.pending = [];
-      const units = [];
-      let out = "";
-      let i = 0;
-      while (i < bytes.length) {
-        const b = bytes[i];
-        const size = b < 0x80 ? 1 : b >= 0xf8 ? 0 : b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc2 ? 2 : 0;
-        if (size === 0) {
-          units.push(0xfffd);
-          i++;
-        } else if (i + size > bytes.length) {
-          if (options?.stream) this.pending = [...bytes.subarray(i)];
-          else units.push(0xfffd);
-          break;
-        } else {
-          let c = size === 1 ? b : b & (0xff >> (size + 1));
-          let valid = true;
-          for (let k = 1; k < size; k++) {
-            const next = bytes[i + k];
-            if ((next & 0xc0) !== 0x80) valid = false;
-            c = (c << 6) | (next & 63);
-          }
-          if (!valid) {
-            units.push(0xfffd);
-            i++;
-            continue;
-          }
-          i += size;
-          if (c >= 0x10000) {
-            c -= 0x10000;
-            units.push(0xd800 + (c >> 10), 0xdc00 + (c & 0x3ff));
-          } else units.push(c);
-        }
-        if (units.length >= 8192) out += String.fromCharCode(...units.splice(0));
+      let bytes = view;
+      if (this.pending.length) {
+        bytes = new Uint8Array(this.pending.length + view.length);
+        bytes.set(this.pending);
+        bytes.set(view, this.pending.length);
       }
-      return out + String.fromCharCode(...units);
+      const tail = options?.stream ? incompleteTail(bytes) : 0;
+      this.pending = bytes.slice(bytes.length - tail);
+      return host.decode(bytes.subarray(0, bytes.length - tail));
     }
   };
 

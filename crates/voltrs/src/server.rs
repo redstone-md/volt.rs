@@ -77,8 +77,17 @@ struct Rendered {
     /// Pages Router props that replace the loader data in the serialized state.
     #[serde(default)]
     data: Option<Value>,
+    /// The render ran out of time and left its pending Suspense boundaries to the browser.
+    #[serde(default)]
+    incomplete: bool,
     #[serde(flatten)]
     hints: CacheHints,
+}
+
+/// React's output for [`Server::assemble`]: buffered, or the events that follow a streamed shell.
+enum Output {
+    Buffered(Vec<u8>),
+    Streamed(tokio::sync::mpsc::UnboundedReceiver<StreamEvent>),
 }
 
 #[derive(Deserialize)]
@@ -113,6 +122,8 @@ struct Page {
     response: Response,
     hints: CacheHints,
     data: Option<Value>,
+    /// Rendered after a timeout with boundaries left to the browser: served, but never cached.
+    incomplete: bool,
     /// The body when the page streams; `response.body` is empty then.
     stream: Option<PageStream>,
 }
@@ -682,7 +693,7 @@ impl Server {
         }
         let ticket = self.cache.ticket();
         let page = self.generate(ctx, &build, path, &search, self.mode(Some(ctx), true)).await;
-        if page.response.status == StatusCode::OK {
+        if page.response.status == StatusCode::OK && !page.incomplete {
             self.cache.put(key, &page.cached(), Self::ttl(&build, path, &page), ticket);
         }
         page
@@ -702,7 +713,9 @@ impl Server {
             let ticket = server.cache.ticket();
             let page = server.generate(&ctx, &build, &path, &search, server.mode(None, true)).await;
             match page.response.status {
-                StatusCode::OK => server.cache.put(key, &page.cached(), Self::ttl(&build, &path, &page), ticket),
+                StatusCode::OK if !page.incomplete => {
+                    server.cache.put(key, &page.cached(), Self::ttl(&build, &path, &page), ticket)
+                }
                 StatusCode::NOT_FOUND => server.cache.remove(&key),
                 status => {
                     log::warn(&format!("revalidating {path} returned {status}; serving the stale page"));
@@ -743,9 +756,11 @@ impl Server {
                 if let Some(data) = page.data {
                     state.data = data;
                 }
+                // A page that timed out at build time is left to be rendered on request.
+                let status = if page.incomplete { StatusCode::SERVICE_UNAVAILABLE } else { page.response.status };
                 Prerendered {
                     path: path.to_owned(),
-                    status: page.response.status,
+                    status,
                     html: String::from_utf8_lossy(&page.response.body).into_owned(),
                     data: serde_json::to_string(&state).unwrap_or_default(),
                     revalidate: page.hints.revalidate,
@@ -885,28 +900,45 @@ impl Server {
 
     async fn render_once(&self, build: &Build, state: &PageState, mode: RenderMode) -> Result<Page> {
         let payload = serde_json::to_string(state)?;
-        if mode != RenderMode::Stream {
+        if mode == RenderMode::String {
             let output = self.engine.call(mode.method(), payload).await?;
-            return self.assemble(build, state, serde_json::from_str(&output)?, None);
+            return self.buffered(build, state, &output);
         }
         let mut events = self.engine.stream(mode.method(), payload)?;
-        match events.recv().await {
-            Some(StreamEvent::Shell(shell)) => self.assemble(build, state, serde_json::from_str(&shell)?, Some(events)),
+        let shell = match events.recv().await {
+            Some(StreamEvent::Shell(shell)) => serde_json::from_str(&shell)?,
             // Pages Router routes and redirects answer with a complete result instead of a shell.
-            Some(StreamEvent::Done(Ok(output))) => self.assemble(build, state, serde_json::from_str(&output)?, None),
-            Some(StreamEvent::Done(Err(message))) => Err(Error::internal(message)),
-            Some(StreamEvent::Chunk(_)) | None => Err(Error::internal("the render stream ended before its shell")),
+            Some(StreamEvent::Done(Ok(output))) => return self.buffered(build, state, &output),
+            Some(StreamEvent::Done(Err(message))) => return Err(Error::internal(message)),
+            Some(StreamEvent::Chunk(_)) | None => {
+                return Err(Error::internal("the render stream ended before its shell"));
+            }
+        };
+        if mode == RenderMode::Stream {
+            return self.assemble(build, state, shell, Output::Streamed(events));
         }
+        // The chunks are collected here rather than joined into a JavaScript string and parsed back.
+        let mut html = Vec::new();
+        loop {
+            match events.recv().await {
+                Some(StreamEvent::Chunk(chunk)) => html.extend_from_slice(&chunk),
+                Some(StreamEvent::Done(Ok(_))) => break,
+                Some(StreamEvent::Done(Err(message))) => return Err(Error::internal(message)),
+                Some(StreamEvent::Shell(_)) | None => return Err(Error::internal("the render stream ended early")),
+            }
+        }
+        self.assemble(build, state, shell, Output::Buffered(html))
+    }
+
+    /// Assembles a complete JSON result (`{ html, status, ... }`).
+    fn buffered(&self, build: &Build, state: &PageState, output: &str) -> Result<Page> {
+        let mut rendered: Rendered = serde_json::from_str(output)?;
+        let html = std::mem::take(&mut rendered.html).into_bytes();
+        self.assemble(build, state, rendered, Output::Buffered(html))
     }
 
     /// Builds the page response around React's output, or around the stream that follows its shell.
-    fn assemble(
-        &self,
-        build: &Build,
-        state: &PageState,
-        rendered: Rendered,
-        events: Option<tokio::sync::mpsc::UnboundedReceiver<StreamEvent>>,
-    ) -> Result<Page> {
+    fn assemble(&self, build: &Build, state: &PageState, rendered: Rendered, output: Output) -> Result<Page> {
         if let Some(redirect) = rendered.redirect {
             let status = StatusCode::from_u16(redirect.status).unwrap_or(StatusCode::TEMPORARY_REDIRECT);
             return Ok(Response::redirect(status, &redirect.location).into());
@@ -932,12 +964,16 @@ impl Server {
             dev: self.dev,
             base_path: self.config.base_path(),
         };
-        let (html, stream) = match events {
-            Some(events) => (String::new(), Some(PageStream::new(events, document.splice(), &state.pathname))),
-            None => (document.render(&rendered.html), None),
+        let (html, stream) = match output {
+            Output::Streamed(events) => {
+                (String::new(), Some(PageStream::new(events, document.splice(), &state.pathname)))
+            }
+            Output::Buffered(html) => (document.render(&html), None),
         };
         let status = StatusCode::from_u16(rendered.status).unwrap_or(StatusCode::OK);
-        let shared = route.filter(|r| !self.dev && !r.id.starts_with("/_") && (r.is_cached() || hints.is_static));
+        let shared = route.filter(|r| {
+            !self.dev && !rendered.incomplete && !r.id.starts_with("/_") && (r.is_cached() || hints.is_static)
+        });
         let cache = match shared {
             Some(route) => cache::cache_control(hints.revalidate.or(route.revalidate)),
             None => HeaderValue::from_static(PRIVATE_CACHE),
@@ -947,7 +983,7 @@ impl Server {
             // nginx buffers proxied responses by default, which would hold the shell back.
             response.headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
         }
-        Ok(Page { response, hints, data: rendered.data, stream })
+        Ok(Page { response, hints, data: rendered.data, incomplete: rendered.incomplete, stream })
     }
 
     /// Security headers, configured headers and on-the-fly gzip.
@@ -999,13 +1035,13 @@ impl Page {
 
 impl From<Response> for Page {
     fn from(response: Response) -> Self {
-        Self { response, hints: CacheHints::default(), data: None, stream: None }
+        Self { response, hints: CacheHints::default(), data: None, incomplete: false, stream: None }
     }
 }
 
 impl From<CachedPage> for Page {
     fn from(page: CachedPage) -> Self {
-        Self { response: page.response, hints: CacheHints::default(), data: page.data, stream: None }
+        Self { response: page.response, hints: CacheHints::default(), data: page.data, incomplete: false, stream: None }
     }
 }
 

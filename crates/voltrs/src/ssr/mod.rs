@@ -16,9 +16,12 @@ use crate::error::{Error, Result};
 
 const POLYFILLS: &str = include_str!("polyfills.js");
 const RENDER_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an aborted render may take to flush its client-rendered boundaries before it is failed.
+const ABORT_GRACE: Duration = Duration::from_secs(2);
 const GC_THRESHOLD: usize = 8 * 1024 * 1024;
-/// Renders one worker interleaves while they wait on timers; beyond it, other workers take new jobs.
-const MAX_ACTIVE: usize = 32;
+/// Renders one worker interleaves while they wait on timers. It is kept small because all their work
+/// after the timers runs on this one thread: further jobs stay in the shared queue for idler workers.
+const MAX_ACTIVE: usize = 8;
 
 struct Job {
     method: &'static str,
@@ -54,7 +57,8 @@ pub enum StreamEvent {
 }
 
 /// The channel a streaming render writes to. Writes fail once the receiver is gone or the job has ended,
-/// which tells the JavaScript side to abort rendering.
+/// which tells the JavaScript side to abort rendering. The render may set `sink.abort(reason)`, which the
+/// worker calls when the render runs past its deadline or waits on a promise nothing can resolve.
 struct Sink {
     events: Mutex<Option<mpsc::UnboundedSender<StreamEvent>>>,
 }
@@ -165,7 +169,28 @@ impl Engine {
 struct Active<'js> {
     promise: Promise<'js>,
     reply: Reply,
-    started: Instant,
+    /// The sink object of a streaming job, whose `abort` ends the render early.
+    sink: Option<Object<'js>>,
+    deadline: Instant,
+    aborted: bool,
+}
+
+impl Active<'_> {
+    /// Asks the render to finish now; returns `false` when it cannot be asked (no `abort`, or asked already).
+    fn abort(&mut self, reason: &str) -> bool {
+        if self.aborted {
+            return false;
+        }
+        let Some(abort) = self.sink.as_ref().and_then(|sink| sink.get::<_, Function>("abort").ok()) else {
+            return false;
+        };
+        self.aborted = true;
+        self.deadline = Instant::now() + ABORT_GRACE;
+        if let Err(error) = abort.call::<_, ()>((reason,)) {
+            crate::log::js("error", &describe(abort.ctx(), error));
+        }
+        true
+    }
 }
 
 struct Worker {
@@ -263,14 +288,22 @@ impl Worker {
                     }
                 };
                 if wait < 0 {
+                    let reason = "the render awaits a promise nothing resolves";
+                    let mut asked = false;
+                    for job in &mut active {
+                        asked |= self.guarded(|| job.abort(reason));
+                    }
+                    if asked {
+                        continue;
+                    }
                     for job in active.drain(..) {
-                        job.reply.finish(Err("render never settled: it awaits a promise nothing resolves".into()));
+                        job.reply.finish(Err(format!("render never settled: {reason}")));
                     }
                     break;
                 }
                 let until_deadline = active
                     .iter()
-                    .map(|job| (job.started + RENDER_TIMEOUT).saturating_duration_since(Instant::now()))
+                    .map(|job| job.deadline.saturating_duration_since(Instant::now()))
                     .min()
                     .unwrap_or(RENDER_TIMEOUT);
                 let timeout = Duration::from_millis(wait as u64).min(until_deadline).max(Duration::from_millis(1));
@@ -286,18 +319,25 @@ impl Worker {
 
     /// Calls the job's function; a non-promise result or a synchronous error finishes it at once.
     fn start<'js>(&self, ctx: &Ctx<'js>, job: Job) -> Option<Active<'js>> {
-        let started = Instant::now();
+        let deadline = Instant::now() + RENDER_TIMEOUT;
+        let mut sink = None;
         let called = self.guarded(|| -> rquickjs::Result<Value<'js>> {
             let volt: Object = ctx.globals().get("__VOLT__")?;
             let function: Function = volt.get(job.method)?;
             match &job.reply {
                 Reply::Call(_) => function.call((job.payload.as_str(),)),
-                Reply::Stream(sink) => function.call((job.payload.as_str(), sink_object(ctx, sink)?)),
+                Reply::Stream(channel) => {
+                    let object = sink_object(ctx, channel)?;
+                    sink = Some(object.clone());
+                    function.call((job.payload.as_str(), object))
+                }
             }
         });
         match called {
             Ok(value) => match value.as_promise() {
-                Some(promise) => Some(Active { promise: promise.clone(), reply: job.reply, started }),
+                Some(promise) => {
+                    Some(Active { promise: promise.clone(), reply: job.reply, sink, deadline, aborted: false })
+                }
                 None => {
                     job.reply.finish(value.get::<String>().map_err(|e| describe(ctx, e)));
                     None
@@ -310,13 +350,19 @@ impl Worker {
         }
     }
 
-    /// Replies to settled and timed-out jobs and returns the ones still pending.
+    /// Replies to settled jobs, aborts or fails timed-out ones and returns the ones still pending. An
+    /// aborted render still completes its document, with the boundaries left pending rendered in the browser.
     fn settle<'js>(&self, ctx: &Ctx<'js>, active: Vec<Active<'js>>) -> Vec<Active<'js>> {
         let mut pending = Vec::with_capacity(active.len());
-        for job in active {
+        for mut job in active {
             match job.promise.state() {
-                PromiseState::Pending if job.started.elapsed() > RENDER_TIMEOUT => {
-                    job.reply.finish(Err(format!("render timed out after {}s", RENDER_TIMEOUT.as_secs())));
+                PromiseState::Pending if Instant::now() > job.deadline => {
+                    let reason = format!("render timed out after {}s", RENDER_TIMEOUT.as_secs());
+                    if self.guarded(|| job.abort(&reason)) {
+                        pending.push(job);
+                    } else {
+                        job.reply.finish(Err(reason));
+                    }
                 }
                 PromiseState::Pending => pending.push(job),
                 _ => {
@@ -367,6 +413,24 @@ fn install_host<'js>(ctx: &Ctx<'js>, env: &str) -> rquickjs::Result<()> {
         "log",
         Function::new(ctx.clone(), |level: String, message: String| {
             crate::log::js(&level, &message);
+        })?,
+    )?;
+    // Native UTF-8 conversions for TextEncoder and TextDecoder, which React calls for every chunk it writes.
+    host.set(
+        "encode",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, text: rquickjs::String<'js>| -> rquickjs::Result<Value<'js>> {
+            match text.to_string() {
+                Ok(text) => TypedArray::<u8>::new(ctx, text.into_bytes()).map(|array| array.into_value()),
+                // Lone surrogates have no UTF-8 form: the JavaScript encoder replaces them.
+                Err(_) => Ok(Value::new_null(ctx)),
+            }
+        })?,
+    )?;
+    host.set(
+        "decode",
+        Function::new(ctx.clone(), |bytes: TypedArray<'js, u8>| {
+            // SAFETY: the bytes are read before any JavaScript runs again.
+            unsafe { bytes.as_bytes() }.map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
         })?,
     )?;
     let epoch = Instant::now();
@@ -423,6 +487,19 @@ globalThis.__VOLT__ = {
     sink.write(new TextEncoder().encode(payload));
     return new Promise((resolve) => setTimeout(() => resolve(String(sink.write(new TextEncoder().encode("é")))), 30));
   },
+  hang(payload, sink) {
+    return new Promise((resolve) => {
+      sink.abort = (reason) => resolve(`aborted: ${reason}`);
+    });
+  },
+  stuck: () => new Promise(() => {}),
+  chunked() {
+    const decoder = new TextDecoder();
+    const bytes = new TextEncoder().encode("aé😀");
+    let out = "";
+    for (const byte of bytes) out += decoder.decode(new Uint8Array([byte]), { stream: true });
+    return out + decoder.decode() + new TextDecoder().decode(new TextEncoder().encode("x\ud800y"));
+  },
 };
 "#;
 
@@ -458,6 +535,16 @@ globalThis.__VOLT__ = {
         let text = "a é 😀 \u{2028}";
         assert_eq!(engine.call("text", text.into()).await.unwrap(), text);
         assert_eq!(engine.call("read", String::new()).await.unwrap(), "ab");
+        assert_eq!(engine.call("chunked", String::new()).await.unwrap(), "aé😀x\u{fffd}y");
+    }
+
+    #[tokio::test]
+    async fn aborts_renders_that_cannot_settle() {
+        let engine = engine("abort");
+        let mut events = engine.stream("hang", String::new()).unwrap();
+        assert!(matches!(events.recv().await, Some(StreamEvent::Done(Ok(out))) if out.starts_with("aborted: ")));
+        let error = engine.call("stuck", String::new()).await.unwrap_err();
+        assert!(error.message().contains("never settled"), "{}", error.message());
     }
 
     #[tokio::test]

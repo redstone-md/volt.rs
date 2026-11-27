@@ -71,9 +71,9 @@ pub struct Document<'a> {
 
 impl Document<'_> {
     /// The complete document around React's buffered output.
-    pub fn render(&self, html: &str) -> String {
+    pub fn render(&self, html: &[u8]) -> String {
         let mut splice = self.splice();
-        let mut out = splice.push(html.as_bytes());
+        let mut out = splice.push(html);
         out.extend(splice.finish());
         String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
     }
@@ -156,6 +156,15 @@ impl Splice {
     /// Returns the remaining bytes once the output is complete.
     pub fn finish(&mut self) -> Vec<u8> {
         self.process(true)
+    }
+
+    /// Returns the remaining bytes of output that stopped early, closing the document React did not close.
+    pub fn cut(&mut self) -> Vec<u8> {
+        let mut out = self.process(true);
+        if self.shape == Shape::Document && !out.trim_ascii_end().ends_with(b"</html>") {
+            out.extend_from_slice(b"</body></html>");
+        }
+        out
     }
 
     fn process(&mut self, end: bool) -> Vec<u8> {
@@ -349,5 +358,13 @@ mod tests {
         let late = splice.push(b"<div hidden id=\"S:0\">late</div></body></html>");
         assert!(String::from_utf8_lossy(&late).contains("late"));
         assert_eq!(splice.finish(), b"[B]</body></html>");
+    }
+
+    #[test]
+    fn closes_cut_documents() {
+        let mut splice = Splice::new(String::new(), "[B]".into());
+        let mut out = splice.push(b"<!DOCTYPE html><html><head></head><body><p>shell</p>");
+        out.extend(splice.cut());
+        assert!(out.ends_with(b"<p>shell</p>[B]</body></html>"));
     }
 }

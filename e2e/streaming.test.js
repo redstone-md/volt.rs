@@ -57,6 +57,18 @@ await check("notFound() before the shell sets the status", async () => {
   assert.equal((await chunks("/gone", "Googlebot/2.1")).status, 404);
 });
 
+await check("a boundary that never settles still ends a well-formed document", async () => {
+  const streamed = await chunks("/never");
+  const crawled = await chunks("/never", "Googlebot/2.1");
+  for (const { status, body } of [streamed, crawled]) {
+    assert.equal(status, 200);
+    assert.ok(body.trimEnd().endsWith("</html>"), "the document is closed");
+    assert.equal(body.match(/<\/body>/g).length, 1);
+    assert.ok(body.includes("__VOLT_DATA__"));
+  }
+  assert.equal(crawled.headers["cache-control"], streamed.headers["cache-control"]);
+});
+
 await check("concurrent streams do not wait for each other", async () => {
   const started = Date.now();
   const all = await Promise.all(Array.from({ length: 12 }, () => chunks("/stream")));
@@ -93,6 +105,17 @@ await check("shows loading.tsx at once while a slow loader runs", async () => {
   assert.ok(Date.now() - clicked >= 1400, "the page waited for the loader");
 });
 
+await check("Back during the loading UI keeps the URL and the content together", async () => {
+  await page.goto(base, { waitUntil: "networkidle" });
+  await page.click("a[href='/slow']");
+  await page.locator("#slow-loading").waitFor({ timeout: 1000 });
+  await page.goBack();
+  await page.waitForTimeout(2500);
+  assert.equal(new URL(page.url()).pathname, "/");
+  assert.equal(await page.locator("main h1").textContent(), "Home");
+  assert.equal(await page.locator("#slow-title").count(), 0);
+});
+
 await check("keeps transitions for routes without loading.tsx", async () => {
   await page.click("a[href='/quick']");
   await page.locator("#quick-title").waitFor();
@@ -101,6 +124,14 @@ await check("keeps transitions for routes without loading.tsx", async () => {
   await page.goBack();
   await page.locator("#quick-title").waitFor();
   assert.deepEqual(errors, []);
+});
+
+await check("hydrates a page whose boundary the server gave up on", async () => {
+  const other = await browser.newPage();
+  await other.goto(`${base}/never`);
+  await other.locator("#mounted").waitFor();
+  await other.locator("#never", { hasText: "Rendered on the client" }).waitFor();
+  await other.close();
 });
 
 await done();

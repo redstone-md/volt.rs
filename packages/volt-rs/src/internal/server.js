@@ -28,38 +28,28 @@ async function renderDocument(document, main, state) {
   return renderToString(h(DocumentContext.Provider, { value: { main } }, h(Doc, props ?? {})));
 }
 
-async function readAll(stream) {
-  const chunks = [];
-  let length = 0;
-  for await (const chunk of stream) {
-    chunks.push(chunk);
-    length += chunk.byteLength;
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(bytes);
-}
-
 /**
- * Renders an App Router tree. `"string"` uses `renderToString`; `"complete"` waits for every Suspense
- * boundary; `"stream"` reports the shell to `sink` once it is ready and then writes each chunk as React
- * flushes it, returning `null`. A `notFound()` or `redirect()` raised before the shell is sent is thrown,
- * so it still decides the status code, even when a Suspense boundary caught it.
+ * Renders an App Router tree. `"string"` uses `renderToString`. The other modes report the shell to
+ * `sink.shell(json)` and each chunk to `sink.write(bytes)`, then resolve to `null`: `"complete"` waits
+ * for every Suspense boundary first, `"stream"` writes chunks as React flushes them. A `notFound()` or
+ * `redirect()` raised before the shell is sent is thrown, so it still decides the status code, even when
+ * a Suspense boundary caught it. `sink.abort(reason)`, called by the engine when the render runs out of
+ * time, makes React finish the document with the boundaries still pending rendered in the browser.
  */
 async function renderApp(element, state, mode, sink) {
   const status = state.status ?? 200;
   if (mode === "string") return { html: renderToString(element), status };
   let raised = null;
   const controller = new AbortController();
+  sink.abort = (message) => {
+    console.warn(`${state.pathname}: ${message}; pending Suspense boundaries are left to the browser`);
+    controller.abort(Object.assign(new Error(message), { volt: "abort" }));
+  };
   const stream = await renderToReadableStream(element, {
     signal: controller.signal,
     onError(error) {
       if (isNotFound(error) || readRedirect(error)) raised ??= error;
-      else console.error(error);
+      else if (error?.volt !== "abort") console.error(error);
       return typeof error?.digest === "string" ? error.digest : undefined;
     },
   });
@@ -68,8 +58,8 @@ async function renderApp(element, state, mode, sink) {
     controller.abort();
     throw raised;
   }
-  if (mode === "complete") return { html: await readAll(stream), status };
-  if (!sink.shell(JSON.stringify({ status, route: state.route }))) {
+  const incomplete = controller.signal.aborted;
+  if (!sink.shell(JSON.stringify({ status, route: state.route, incomplete }))) {
     controller.abort();
     return null;
   }
@@ -159,8 +149,11 @@ export function createServer(routes, options = {}) {
   globalThis.__VOLT__ = {
     /** The page rendered with `renderToString` (`[server] streaming = false`). */
     render: (payload) => respond(routes, options, payload, "string"),
-    /** The complete page with every Suspense boundary resolved, for caches, prerendering and crawlers. */
-    document: (payload) => respond(routes, options, payload, "complete"),
+    /**
+     * The complete page with every Suspense boundary resolved, for caches, prerendering and crawlers,
+     * written to `sink` like `stream` once it is ready.
+     */
+    document: (payload, sink) => respond(routes, options, payload, "complete", sink),
     /**
      * Streams the page to `sink` (`shell(json)`, then `write(bytes)` per chunk) and resolves to `""`;
      * Pages Router pages and redirects resolve to a complete result instead.

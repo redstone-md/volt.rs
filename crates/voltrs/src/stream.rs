@@ -64,11 +64,16 @@ impl Body for PageStream {
             match self.events.poll_recv(cx) {
                 Poll::Ready(Some(StreamEvent::Chunk(chunk))) => out.extend(self.splice.push(&chunk)),
                 Poll::Ready(Some(StreamEvent::Shell(_))) => {}
+                Poll::Ready(Some(StreamEvent::Done(Ok(_)))) => {
+                    out.extend(self.splice.finish());
+                    self.done = true;
+                    break;
+                }
                 Poll::Ready(event) => {
                     if let Some(StreamEvent::Done(Err(message))) = event {
                         crate::log::error(&format!("streaming {} failed: {message}", self.path));
                     }
-                    out.extend(self.splice.finish());
+                    out.extend(self.splice.cut());
                     self.done = true;
                     break;
                 }
