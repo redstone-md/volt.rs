@@ -172,12 +172,211 @@ pub struct ImageConfig {
     pub optimize: bool,
     /// Concurrent resize jobs. `0` picks the CPU count.
     pub concurrency: usize,
+    /// Modern output formats in order of preference, picked by the request's `Accept` header:
+    /// `image/avif` and `image/webp`. Empty keeps the source format.
+    pub formats: Vec<String>,
+    /// Widths of `srcset` candidates for full-width layouts (`sizes` in `vw`, `fill`, no `width`).
+    pub device_sizes: Vec<u32>,
+    /// Widths of `srcset` candidates for fixed-size images; joined with `device_sizes`.
+    pub image_sizes: Vec<u32>,
+    /// Remote URLs the optimizer may fetch; anything else is refused.
+    pub remote_patterns: Vec<RemotePattern>,
+    /// Seconds a fetched remote original is reused before it is downloaded again, and the `max-age` of
+    /// optimized remote images.
+    pub minimum_cache_ttl: u64,
+    /// Serves SVG sources through the optimizer (unchanged, under `content_security_policy`).
+    pub dangerously_allow_svg: bool,
+    /// Lets remote hosts resolve to loopback, private and link-local addresses.
+    pub dangerously_allow_local_ip: bool,
+    /// `Content-Security-Policy` of every optimizer response, so an SVG opened directly cannot run scripts.
+    pub content_security_policy: String,
+    /// `inline` or `attachment` for the `Content-Disposition` of optimizer responses.
+    pub content_disposition_type: String,
+    /// Largest accepted source in pixels (width times height); larger images are refused before decoding.
+    pub max_pixels: u64,
+    /// Largest accepted source width or height in pixels.
+    pub max_dimension: u32,
 }
+
+/// Formats `[images] formats` accepts.
+pub const IMAGE_FORMATS: [&str; 2] = ["image/avif", "image/webp"];
 
 impl Default for ImageConfig {
     fn default() -> Self {
-        Self { optimize: true, concurrency: 0 }
+        Self {
+            optimize: true,
+            concurrency: 0,
+            formats: vec!["image/webp".into()],
+            device_sizes: vec![640, 750, 828, 1080, 1200, 1920, 2048, 3840],
+            image_sizes: vec![16, 32, 48, 64, 96, 128, 256, 384],
+            remote_patterns: Vec::new(),
+            minimum_cache_ttl: 14_400,
+            dangerously_allow_svg: false,
+            dangerously_allow_local_ip: false,
+            content_security_policy: "script-src 'none'; frame-src 'none'; sandbox;".into(),
+            content_disposition_type: "inline".into(),
+            max_pixels: 50_000_000,
+            max_dimension: 16_384,
+        }
     }
+}
+
+impl ImageConfig {
+    /// Every width `/_volt/image` accepts, ascending: `image_sizes` and `device_sizes` joined.
+    pub fn widths(&self) -> Vec<u32> {
+        let mut widths: Vec<u32> = self.image_sizes.iter().chain(&self.device_sizes).copied().collect();
+        widths.sort_unstable();
+        widths.dedup();
+        widths
+    }
+
+    /// Whether a remote URL matches one of `remote_patterns`.
+    pub fn allows_remote(&self, url: &RemoteUrl) -> bool {
+        self.remote_patterns.iter().any(|pattern| pattern.matches(url))
+    }
+
+    fn validate(&mut self) -> Result<(), String> {
+        if let Some(bad) = self.formats.iter().find(|f| !IMAGE_FORMATS.contains(&f.as_str())) {
+            return Err(format!("images.formats: `{bad}` is not one of {IMAGE_FORMATS:?}"));
+        }
+        for (name, sizes) in [("device_sizes", &mut self.device_sizes), ("image_sizes", &mut self.image_sizes)] {
+            if let Some(bad) = sizes.iter().find(|w| !(1..=10_000).contains(*w)) {
+                return Err(format!("images.{name}: {bad} is not a width between 1 and 10000"));
+            }
+            sizes.sort_unstable();
+            sizes.dedup();
+        }
+        if self.device_sizes.is_empty() {
+            return Err("images.device_sizes must list at least one width".into());
+        }
+        if !matches!(self.content_disposition_type.as_str(), "inline" | "attachment") {
+            return Err("images.content_disposition_type must be `inline` or `attachment`".into());
+        }
+        for (i, pattern) in self.remote_patterns.iter_mut().enumerate() {
+            pattern.validate().map_err(|e| format!("images.remote_patterns[{i}]: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// One `[[images.remote_patterns]]` entry, matched like Next.js `remotePatterns`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemotePattern {
+    /// `http` or `https`; either when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// Host name; `*.example.com` matches one subdomain level, `**.example.com` any number.
+    pub hostname: String,
+    /// Exact port; any port when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Path glob: `*` matches within a segment, `**` across segments. Every path when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pathname: Option<String>,
+    /// Exact query string including `?`; any query when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+}
+
+impl RemotePattern {
+    fn validate(&mut self) -> Result<(), String> {
+        if let Some(protocol) = &mut self.protocol {
+            *protocol = protocol.trim_end_matches(':').to_ascii_lowercase();
+            if !matches!(protocol.as_str(), "http" | "https") {
+                return Err(format!("protocol `{protocol}` must be `http` or `https`"));
+            }
+        }
+        self.hostname = self.hostname.to_ascii_lowercase();
+        if self.hostname.is_empty() || self.hostname.contains(['/', ':', '@']) {
+            return Err(format!("hostname `{}` is not a host name", self.hostname));
+        }
+        if self.pathname.as_deref().is_some_and(|p| !p.starts_with('/')) {
+            return Err("pathname must start with `/`".into());
+        }
+        Ok(())
+    }
+
+    /// Whether `url` is covered by this pattern.
+    pub fn matches(&self, url: &RemoteUrl) -> bool {
+        self.protocol.as_deref().is_none_or(|p| p == url.protocol)
+            && self.port.is_none_or(|p| Some(p) == url.port)
+            && glob_match(&self.hostname, &url.hostname, '.')
+            && glob_match(self.pathname.as_deref().unwrap_or("**"), &url.pathname, '/')
+            && self.search.as_deref().is_none_or(|s| s == url.search)
+    }
+}
+
+/// The parts of an absolute `http(s)` URL that remote patterns look at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteUrl {
+    pub protocol: String,
+    pub hostname: String,
+    pub port: Option<u16>,
+    pub pathname: String,
+    /// The query including `?`, or empty.
+    pub search: String,
+}
+
+impl RemoteUrl {
+    /// Parses `http(s)://host[:port]/path?query`. Credentials, IPv6 literals, backslashes and dot segments are
+    /// rejected, so the URL that was matched is exactly the one fetched.
+    pub fn parse(url: &str) -> Option<Self> {
+        let (protocol, rest) = url.split_once("://")?;
+        let protocol = protocol.to_ascii_lowercase();
+        if !matches!(protocol.as_str(), "http" | "https") {
+            return None;
+        }
+        let rest = rest.split('#').next().unwrap_or(rest);
+        if rest.contains(['\\', ' ']) {
+            return None;
+        }
+        let (authority, tail) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
+        let (hostname, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port.parse::<u16>().ok()?)),
+            None => (authority, None),
+        };
+        if hostname.is_empty() || !hostname.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+            return None;
+        }
+        let (pathname, search) = tail.split_at(tail.find('?').unwrap_or(tail.len()));
+        if pathname.split('/').any(|segment| matches!(segment, "." | "..")) {
+            return None;
+        }
+        Some(Self {
+            protocol,
+            hostname: hostname.to_ascii_lowercase(),
+            port,
+            pathname: if pathname.is_empty() { "/".into() } else { pathname.into() },
+            search: if search == "?" { String::new() } else { search.into() },
+        })
+    }
+
+    /// The URL to fetch, rebuilt from the parsed parts.
+    pub fn href(&self) -> String {
+        let port = self.port.map(|p| format!(":{p}")).unwrap_or_default();
+        format!("{}://{}{port}{}{}", self.protocol, self.hostname, self.pathname, self.search)
+    }
+}
+
+/// Glob match where `**` spans separators and `*` stays within one part.
+fn glob_match(pattern: &str, text: &str, separator: char) -> bool {
+    let mut expression = String::from("^");
+    let mut rest = pattern;
+    while let Some(c) = rest.chars().next() {
+        if let Some(tail) = rest.strip_prefix("**") {
+            expression.push_str(".*");
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix('*') {
+            expression.push_str(&format!("[^{}]*", regex::escape(&separator.to_string())));
+            rest = tail;
+        } else {
+            expression.push_str(&regex::escape(&c.to_string()));
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    expression.push('$');
+    regex::Regex::new(&expression).is_ok_and(|re| re.is_match(text))
 }
 
 /// `[i18n]`: locale-prefixed routing. The default locale is served without a prefix.
@@ -361,6 +560,7 @@ impl Config {
         }
         config.server.bot_pattern().map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
         config.i18n.validate().map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
+        config.images.validate().map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
         config.apply_env();
         Ok(config)
     }
@@ -591,6 +791,80 @@ mod tests {
         assert_eq!(regions.negotiate("en-GB, en;q=0.9"), Some("en-GB"));
         let mut bad = I18nConfig { locales: vec!["en".into()], default_locale: "de".into(), ..I18nConfig::default() };
         assert!(bad.validate().is_err());
+    }
+
+    fn pattern(hostname: &str, pathname: Option<&str>) -> RemotePattern {
+        let mut pattern = RemotePattern {
+            protocol: Some("https:".into()),
+            hostname: hostname.into(),
+            port: None,
+            pathname: pathname.map(String::from),
+            search: None,
+        };
+        pattern.validate().unwrap();
+        pattern
+    }
+
+    fn url(raw: &str) -> RemoteUrl {
+        RemoteUrl::parse(raw).unwrap_or_else(|| panic!("{raw} should parse"))
+    }
+
+    #[test]
+    fn matches_remote_patterns() {
+        let exact = pattern("cdn.example.com", Some("/img/**"));
+        assert!(exact.matches(&url("https://cdn.example.com/img/a/b.png")));
+        assert!(exact.matches(&url("https://CDN.example.com/img/a.png?v=1")));
+        assert!(!exact.matches(&url("http://cdn.example.com/img/a.png")));
+        assert!(!exact.matches(&url("https://cdn.example.com/other/a.png")));
+        assert!(!exact.matches(&url("https://cdn.example.com.evil.dev/img/a.png")));
+        let one = pattern("*.example.com", Some("/*.png"));
+        assert!(one.matches(&url("https://a.example.com/x.png")));
+        assert!(!one.matches(&url("https://a.b.example.com/x.png")));
+        assert!(!one.matches(&url("https://a.example.com/dir/x.png")));
+        assert!(!one.matches(&url("https://example.com/x.png")));
+        let any = pattern("**.example.com", None);
+        assert!(any.matches(&url("https://a.b.example.com/deep/x.png")));
+        let mut port = pattern("localhost", None);
+        port.port = Some(8080);
+        assert!(port.matches(&url("https://localhost:8080/a")));
+        assert!(!port.matches(&url("https://localhost:9090/a")));
+        assert_eq!(url("https://Localhost:8080/a?b#c").href(), "https://localhost:8080/a?b");
+    }
+
+    #[test]
+    fn rejects_ambiguous_remote_urls() {
+        for bad in [
+            "https://user@cdn.example.com/a.png",
+            "https://cdn.example.com@evil.dev/a.png",
+            "ftp://cdn.example.com/a.png",
+            "https:///a.png",
+            "https://cdn.example.com:99999/a.png",
+            "https://cdn.example.com/a/../b.png",
+            "https://cdn.example.com\\@evil.dev/",
+            "//cdn.example.com/a.png",
+        ] {
+            assert!(RemoteUrl::parse(bad).is_none(), "{bad}");
+        }
+        assert_eq!(url("https://cdn.example.com").pathname, "/");
+    }
+
+    #[test]
+    fn validates_image_config() {
+        let mut images = ImageConfig { formats: vec!["image/jxl".into()], ..ImageConfig::default() };
+        assert!(images.validate().is_err());
+        let mut images = ImageConfig { device_sizes: vec![1200, 640, 640], ..ImageConfig::default() };
+        images.validate().unwrap();
+        assert_eq!(images.device_sizes, [640, 1200]);
+        assert_eq!(images.widths().first(), Some(&16));
+        let mut images = ImageConfig::default();
+        images.remote_patterns.push(RemotePattern {
+            protocol: Some("ftp".into()),
+            hostname: "x".into(),
+            port: None,
+            pathname: None,
+            search: None,
+        });
+        assert!(images.validate().is_err());
     }
 
     #[test]

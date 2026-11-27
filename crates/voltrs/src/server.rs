@@ -327,14 +327,13 @@ impl Server {
 
         #[cfg(feature = "images")]
         let images = crate::images::Images::new(
-            config.public_dir(),
-            config.base_path(),
+            &config,
             &out_dir,
             match config.images.concurrency {
                 0 => config.workers(),
                 n => n,
             },
-        );
+        )?;
         let server = Arc::new(Self {
             #[cfg(feature = "images")]
             images,
@@ -488,7 +487,7 @@ impl Server {
         }
         #[cfg(feature = "images")]
         if path == "/_volt/image" && self.config.images.optimize {
-            return self.images.serve(ctx.query_string()).await.into();
+            return self.images.serve(ctx.query_string(), ctx.headers()).await.into();
         }
         if let Some(error) = self.failure.read().ok().and_then(|f| f.clone()) {
             return Response::html(error_overlay("Build failed", &error, self.config.base_path()))

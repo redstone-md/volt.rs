@@ -23,12 +23,15 @@ flate2 = "1"
 grass = { version = "0.13", default-features = false }
 flume = { version = "0.11", default-features = false }
 http = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "avif", "rayon"] }
 imagesize = "0.14"
 include_dir = "0.7"
 lightningcss = { version = "1.0.0-alpha.72", default-features = false, features = ["browserslist", "bundler"] }
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 http-body-util = "0.1"
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "tls12", "webpki-roots"] }
+tower-service = "0.3"
+base64 = "0.23"
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful"] }
 inventory = "0.3"

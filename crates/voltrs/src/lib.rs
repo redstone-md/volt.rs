@@ -55,6 +55,8 @@ pub use context::Ctx;
 pub use error::{Error, ErrorKind, FieldErrors, Result, not_found, redirect};
 pub use file::File;
 pub use form::{FormData, FormValue};
+#[cfg(feature = "images")]
+pub use images::{BlurPlaceholder, blur_placeholder};
 pub use response::{Cookie, Html, IntoResponse, Json, Response, SameSite};
 pub use seo::{ChangeFrequency, SitemapEntry};
 pub use types::Type;
