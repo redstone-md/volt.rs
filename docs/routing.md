@@ -193,6 +193,8 @@ router.prefetch("/settings");
 
 `<Link>` renders a plain `<a>`, so pages work without JavaScript. With JavaScript, navigation is client-side: volt fetches the target route's loader data from `/_volt/data` and its code chunk, then swaps the page without a full reload. Links prefetch when they enter the viewport and on hover. Scroll position is restored on back and forward.
 
+With [`[i18n]`](i18n.md), hrefs are written without the locale prefix: `<Link>` and `router.push` keep the current locale, `locale="de"` switches it, `locale={false}` uses the href as given, and `useLocale()` returns the active locale.
+
 `next/link`, `next/navigation`, `next/image`, `next/script`, `next/head`, `next/form` and `next/dynamic` resolve to their volt equivalents, so existing components and shadcn blocks work unchanged.
 
 ## Loading UI and streaming

@@ -20,6 +20,7 @@ Key facts:
 - [Metadata and SEO](https://github.com/redstone-md/volt.rs/blob/main/docs/metadata-seo.md): metadata API, JSON-LD, sitemap.xml, robots.txt, llms.txt
 - [Styling and assets](https://github.com/redstone-md/volt.rs/blob/main/docs/styling.md): Tailwind CSS, shadcn/ui, CSS Modules, Sass, PostCSS, fonts, images, scripts
 - [Static generation](https://github.com/redstone-md/volt.rs/blob/main/docs/static-generation.md): generateStaticParams, dynamicParams, getStaticPaths, ISR, revalidate_path, volt export, base_path, trailing_slash
+- [Internationalized routing](https://github.com/redstone-md/volt.rs/blob/main/docs/i18n.md): [i18n] locales, locale prefixes, detection, useLocale, Link locale, ctx.locale, hreflang, localized sitemaps
 - [Configuration](https://github.com/redstone-md/volt.rs/blob/main/docs/configuration.md): volt.toml, environment variables
 - [Deployment](https://github.com/redstone-md/volt.rs/blob/main/docs/deployment.md): build output, Docker, caching
 - [Coming from Next.js](https://github.com/redstone-md/volt.rs/blob/main/docs/migrating-from-nextjs.md): compatibility table and migration

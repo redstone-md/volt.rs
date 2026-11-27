@@ -264,6 +264,7 @@ Every loader, action and handler can take `ctx: Ctx` as its first argument.
 | `ctx.query::<T>()` / `ctx.query_param("q")` | query string |
 | `ctx.header("user-agent")` / `ctx.headers()` | request headers |
 | `ctx.cookie("session")` | cookie value |
+| `ctx.locale()` / `ctx.locales()` | active [`[i18n]`](i18n.md) locale (from the URL prefix, or the calling page for actions) and the configured locales |
 | `ctx.json::<T>()` / `ctx.form::<T>()` / `ctx.body()` | request body (`form` reads multipart, files included, and any other content type as urlencoded) |
 | `ctx.multipart()` | `FormData`: `text("note")`, `file("photo")`, `files("attachments")`, `iter()`, `decode::<T>()` |
 | `ctx.state::<T>()` | shared state |

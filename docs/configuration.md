@@ -40,6 +40,11 @@ disallow = ["/admin"]
 optimize = true
 concurrency = 0                   # parallel resize jobs, 0 = number of CPUs
 
+[i18n]
+locales = ["en", "de"]            # locale-prefixed routing; empty or absent disables it
+default_locale = "en"             # served without a prefix; the first locale when omitted
+locale_detection = true           # redirect `/` by the locale cookie or Accept-Language
+
 [headers]
 "Strict-Transport-Security" = "max-age=63072000; includeSubDomains; preload"
 
@@ -58,6 +63,8 @@ Unknown keys are rejected, so typos fail loudly.
 `[server] streaming` and `bots` are described in [Loading UI and streaming](routing.md#loading-ui-and-streaming). The default `bots` pattern above covers the common search engine crawlers and link-preview fetchers (Googlebot, Bingbot, Slurp, facebookexternalhit, Twitterbot, Slackbot, WhatsApp, Lighthouse and others). Setting `bots` replaces it rather than adding to it, so extend the default when you only need one more agent; an empty string streams to every client. An invalid pattern fails `volt build` and the server start.
 
 `base_path` and `trailing_slash` are applied to routing, links, assets, redirects, the sitemap and `volt export`; see [static generation](static-generation.md#base-path-and-trailing-slashes). Redirect and rewrite sources and destinations are written without the base path.
+
+`[i18n]` serves the default locale unprefixed and every other locale under `/<locale>/...`; see [internationalized routing](i18n.md). `default_locale` must be one of `locales`. Rewrites apply to the path below the locale prefix; redirects match the full path. Without `[i18n]`, `[site] language` is the locale reported by `useLocale()` and `ctx.locale()`.
 
 ## Environment variables
 

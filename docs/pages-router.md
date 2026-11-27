@@ -68,7 +68,7 @@ export const getServerSideProps: GetServerSideProps = async ({ params, query, re
 };
 ```
 
-- `getServerSideProps(context)` runs on every request and every client navigation. The context has `params`, `query` (search params merged with params) and `resolvedUrl`; `req`, `res`, locales and preview data are not available. Use a Rust loader for cookies, headers and database access.
+- `getServerSideProps(context)` runs on every request and every client navigation. The context has `params`, `query` (search params merged with params), `resolvedUrl` and, with `[i18n]`, `locale`, `locales` and `defaultLocale`; `req`, `res` and preview data are not available. Use a Rust loader for cookies, headers and database access.
 - `getStaticProps({ params })` runs at build time when the page is prerendered. A numeric `revalidate` re-renders the page on the first request after that many seconds. The HTML and its props are cached per pathname (the query string is ignored, as `getStaticProps` cannot see it) and client navigations receive the cached props instead of running `getStaticProps` again. In development it runs on every request.
 - A page with `getStaticProps` and a Rust loader is rendered per request and sent with private cache headers, because the loader can read cookies and headers; `volt build` warns about it. Use `getServerSideProps` or drop `getStaticProps` on such pages.
 - `getStaticPaths()` lists the concrete paths of a dynamic `getStaticProps` page, as `{ params }` objects or strings. They are prerendered at build. With `fallback: false` other paths are 404; with `true` or `"blocking"` they render on the first request and are cached (both behave like `"blocking"`: there is no fallback state). In production `getStaticPaths` runs once per render worker; pages rendered at runtime share the `[server] page_cache_mb` budget of the page cache (prerendered pages are not counted), least recently used first out.
@@ -96,7 +96,7 @@ router.reload();
 router.prefetch("/blog/other");
 ```
 
-`useRouter()` returns `pathname` (the route pattern, `/404` on the not-found page), `route`, `asPath`, `query`, `isReady` (always `true`, pages render on the server), `isFallback` (always `false`), `basePath`, and `push(url, as?, options?)`, `replace`, `back`, `forward`, `reload`, `prefetch`, `beforePopState` and `events`. `shallow: true` updates the URL and `query` on the same pathname without fetching data.
+`useRouter()` returns `pathname` (the route pattern, `/404` on the not-found page), `route`, `asPath` (without the locale prefix), `query`, `locale`, `locales` and `defaultLocale` (with [`[i18n]`](i18n.md), else `undefined`), `isReady` (always `true`, pages render on the server), `isFallback` (always `false`), `basePath`, and `push(url, as?, options?)`, `replace`, `back`, `forward`, `reload`, `prefetch`, `beforePopState` and `events`. `shallow: true` updates the URL and `query` on the same pathname without fetching data.
 
 `router.events` emits `routeChangeStart(url, { shallow })`, `beforeHistoryChange`, `routeChangeComplete` after the new page has rendered, and `routeChangeError(error, url)` (with `error.cancelled` when a newer navigation replaced it):
 
@@ -119,7 +119,7 @@ The default export is the `Router` singleton with the same fields, usable outsid
 ## Not supported
 
 - `getInitialProps` on pages and `_app`.
-- Internationalized routing (`locale`, `locales`), `basePath`, preview and draft mode.
+- i18n locale domains, `basePath` in `next.config` (use `[build] base_path`), preview and draft mode.
 - `req` / `res` in `getServerSideProps` (use a Rust loader).
 - The `fallback: true` loading state (`router.isFallback`); it behaves like `"blocking"`.
 - `pages/api` routes (write Rust handlers).

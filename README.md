@@ -101,6 +101,7 @@ export default function Home({ data }: PageProps<"/">) {
 - **Fonts**: `next/font/google` and `next/font/local` compatible loaders; Google Fonts are downloaded at build time and self-hosted, with preloading.
 - **Images**: `<Image>` with `srcset`, lazy loading, priority preloading and on-demand resizing.
 - **Static prerendering** with `generateStaticParams`, `dynamicParams` and `getStaticPaths`, incremental static regeneration (stale-while-revalidate), on-demand `revalidate_path`, and **static export** (`volt export`) for any static host.
+- **Internationalized routing**: `[i18n] locales` with unprefixed default locale, `/de/...` prefixes, `Accept-Language` and cookie detection, `useLocale()`, `<Link locale>`, `ctx.locale()` in Rust, automatic `hreflang` tags and localized sitemaps.
 - `base_path` and `trailing_slash`, Brotli and gzip precompression, immutable asset caching, security headers, redirects and rewrites.
 - **Dev server** with live reload, CSS hot swap, Rust recompilation and an in-browser error overlay.
 - **Instructions for coding agents** in every generated project (`AGENTS.md`) and [`llms.txt`](./llms.txt) for the framework itself.
@@ -118,6 +119,7 @@ export default function Home({ data }: PageProps<"/">) {
 - [Metadata and SEO](./docs/metadata-seo.md)
 - [Styling and assets](./docs/styling.md)
 - [Static generation, ISR and export](./docs/static-generation.md)
+- [Internationalized routing](./docs/i18n.md)
 - [Configuration](./docs/configuration.md)
 - [Deployment](./docs/deployment.md)
 - [Coming from Next.js](./docs/migrating-from-nextjs.md)

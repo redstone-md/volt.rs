@@ -78,4 +78,4 @@ export default function Post({ data }: PageProps<"/posts/[id]">) {
 - Intercepting routes in `volt export` builds (client navigations render the original route) and `metadata` from slot pages.
 - `next/og`, edge runtime.
 - `next/font` metric-adjusted fallback fonts (`adjustFontFallback`) and the Google `axes` option.
-- Pages Router `getInitialProps`, i18n routing and `req`/`res` in `getServerSideProps` (see [Pages Router](./pages-router.md#not-supported)).
+- Pages Router `getInitialProps`, i18n locale domains and `req`/`res` in `getServerSideProps` (see [Pages Router](./pages-router.md#not-supported)).

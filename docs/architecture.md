@@ -46,6 +46,8 @@ When a render passes its deadline, or waits on a promise nothing can resolve (no
 
 Pages Router routes run `getServerSideProps` / `getStaticProps` in the same render call, merge their props over the loader data and render the `_document` around the page tree, which goes into `<div id="__next">`; the props are returned to Rust so the serialized state matches. Client navigations call `__VOLT__.props` from `/_volt/data` for those routes.
 
+With `[i18n]`, the server strips the locale prefix of a page or data path before route matching and puts the locale into the page state (`locale`) and `Ctx`; the page cache keys entries by route path, query and locale. The client reads the configured locales from build-time defines and adds the prefix back when it builds hrefs.
+
 Error boundaries do not catch on the server, so the render resolves them itself: a `notFound()` that reaches the shell is rendered again with the innermost `not-found.tsx` in place of its segment's children (`state.notFound`, which the client hydrates the same way), and when the error page fails too, `global-error.tsx` replaces the document (`state.globalError`). Elements returned by `useServerInsertedHTML` callbacks are rendered once the shell (or, with `renderToString`, the tree) is complete and returned to Rust as extra head HTML. `__VOLT__.metadataRoute(name)` evaluates `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts`; Rust turns the result into XML, text or JSON.
 
 Workers are plain OS threads pulling jobs from a shared queue, so a slow render never blocks the async HTTP runtime. In development the pool reloads the bundle when the manifest changes, once the renders in flight have finished.

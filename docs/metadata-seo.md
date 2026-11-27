@@ -32,6 +32,8 @@ export async function generateMetadata({ data }: PageProps<"/blog/[slug]">) {
 
 Supported fields: `title` (string, `default`, `template`, `absolute`), `description`, `applicationName`, `generator`, `keywords`, `authors`, `creator`, `publisher`, `referrer`, `category`, `robots` (including `googleBot`), `alternates.canonical`, `alternates.languages`, `manifest`, `icons`, `openGraph`, `twitter`, `verification`, `other`, `metadataBase`; and `viewport` with `width`, `initialScale`, `maximumScale`, `userScalable`, `viewportFit`, `themeColor`, `colorScheme`.
 
+With [`[i18n]`](i18n.md), `alternates.languages` is filled automatically with an `hreflang` link per locale and `x-default`; languages you set win.
+
 Relative URLs in `openGraph.images`, `twitter.images`, `alternates` and `openGraph.url` are resolved against `metadataBase`, which defaults to `site.url` from `volt.toml`. The page title falls back to `site.name`.
 
 Tags are rendered as React 19 head elements: they appear in the server HTML for crawlers and update on client-side navigation.
@@ -116,7 +118,7 @@ import { JsonLd } from "volt-rs/seo";
 
 volt serves these automatically unless a file with the same name exists in `app/` or `public/`, or `app/sitemap.ts` / `app/robots.ts` defines them.
 
-- `/sitemap.xml` lists every static route and every path from `generateStaticParams`. Add dynamic URLs from Rust:
+- `/sitemap.xml` lists every static route and every path from `generateStaticParams`; with [`[i18n]`](i18n.md) every locale variant, with `xhtml:link` alternates. Add dynamic URLs from Rust:
 
   ```rust
   #[sitemap]
