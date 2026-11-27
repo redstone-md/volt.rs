@@ -1,0 +1,6 @@
+[site]
+name = "ts-handlers"
+
+[server]
+# The relay handler fetches another handler of this app.
+fetch_allow = ["localhost", "127.0.0.1"]
