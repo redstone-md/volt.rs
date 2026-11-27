@@ -393,7 +393,14 @@ impl<'a> Bundle<'a> {
         }
     }
 
-    fn route_module(route: &Route, client: bool) -> String {
+    /// Virtual module of a route's segments without its page: what client navigations render
+    /// while the page's data and chunk load.
+    fn shell_key(&self, index: usize) -> String {
+        self.route_key(index).replacen("volt:route/", "volt:shell/", 1)
+    }
+
+    /// Route modules: `{ segments, page }`, with `page: null` for a navigation shell.
+    fn route_module(route: &Route, client: bool, with_page: bool) -> String {
         let mut imports = String::new();
         let mut names = 0;
         let mut module = |module: &Module| -> String {
@@ -418,7 +425,9 @@ impl<'a> Bundle<'a> {
             Kind::App => String::new(),
             Kind::Pages { app } => format!("kind: \"pages\", app: {}, ", module(app)),
         };
-        let page = if client && route.is_pages() {
+        let page = if !with_page {
+            "null".to_owned()
+        } else if client && route.is_pages() {
             let name = format!("m{names}");
             imports.push_str(&Self::import_default(&route.page, &name));
             name
@@ -433,7 +442,7 @@ impl<'a> Bundle<'a> {
             .routes
             .iter()
             .enumerate()
-            .map(|(i, route)| (self.route_key(i), Self::route_module(route, client)))
+            .map(|(i, route)| (self.route_key(i), Self::route_module(route, client, true)))
             .collect();
         let lazy: Vec<String> = self
             .routes
@@ -441,9 +450,20 @@ impl<'a> Bundle<'a> {
             .enumerate()
             .map(|(i, r)| format!("  {:?}: () => import({:?}),", r.id, self.route_key(i)))
             .collect();
+        let mut shells = Vec::new();
+        for (index, route) in self.routes.iter().enumerate() {
+            if client && !route.is_pages() && route.segments.iter().any(|s| s.loading.is_some()) {
+                modules.insert(self.shell_key(index), Self::route_module(route, client, false));
+                shells.push(format!("  {:?}: () => import({:?}),", route.id, self.shell_key(index)));
+            }
+        }
         modules.insert(
             CLIENT_ENTRY.into(),
-            format!("import {{ boot }} from \"volt-rs/internal/client\";\nboot({{\n{}\n}});\n", lazy.join("\n")),
+            format!(
+                "import {{ boot }} from \"volt-rs/internal/client\";\nboot({{\n{}\n}}, {{\n{}\n}});\n",
+                lazy.join("\n"),
+                shells.join("\n")
+            ),
         );
         let imports: Vec<String> =
             (0..self.routes.len()).map(|i| format!("import r{i} from {:?};", self.route_key(i))).collect();

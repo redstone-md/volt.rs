@@ -9,6 +9,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  use,
   useState,
   useTransition,
 } from "react";
@@ -51,19 +52,66 @@ function decodeSegment(segment) {
   }
 }
 
-/** Matches a pathname against a path or route pattern (`/blog/[slug]`, `/docs/[...rest]`, `/[[...all]]`). */
-export function matchPath(pattern, pathname) {
-  const want = pattern.split("?")[0].split("/").filter((s) => s && !isGroup(s));
+const patternSegments = (pattern) => pattern.split("?")[0].split("/").filter((s) => s && !isGroup(s));
+
+/** Params of `pathname` under a route pattern (`/blog/[slug]`, `/docs/[...rest]`, `/[[...all]]`), or `null`. */
+export function matchRoute(pattern, pathname) {
+  const want = patternSegments(pattern);
   const have = pathname.split("/").filter(Boolean).map(decodeSegment);
+  const params = {};
   for (let i = 0; i < want.length; i++) {
     const segment = want[i];
-    if (segment.startsWith("[[...")) return true;
-    if (segment.startsWith("[...")) return have.length > i;
-    if (i >= have.length) return false;
-    if (!isDynamic(segment) && decodeSegment(segment) !== have[i]) return false;
+    if (segment.startsWith("[[...")) {
+      if (have.length > i) params[segment.slice(5, -2)] = have.slice(i);
+      return params;
+    }
+    if (segment.startsWith("[...")) {
+      if (have.length <= i) return null;
+      params[segment.slice(4, -1)] = have.slice(i);
+      return params;
+    }
+    if (i >= have.length) return null;
+    if (isDynamic(segment)) params[segment.slice(1, -1)] = have[i];
+    else if (decodeSegment(segment) !== have[i]) return null;
   }
-  return want.length === have.length;
+  return want.length === have.length ? params : null;
 }
+
+/** Matches a pathname against a path or route pattern. */
+export function matchPath(pattern, pathname) {
+  return matchRoute(pattern, pathname) !== null;
+}
+
+const specificity = (segment) => (segment.startsWith("[[...") ? 0 : segment.startsWith("[...") ? 1 : isDynamic(segment) ? 2 : 3);
+
+/** The page route serving `pathname`, ranked like the server router: static, then dynamic, then catch-all segments. */
+function findRoute(ids, pathname) {
+  let best = null;
+  for (const id of ids) {
+    if (id.startsWith("/_")) continue;
+    const params = matchRoute(id, pathname);
+    if (!params) continue;
+    const ranks = patternSegments(id).map(specificity);
+    const better = () => {
+      for (let i = 0; i < Math.max(ranks.length, best.ranks.length); i++) {
+        const a = ranks[i] ?? -1;
+        const b = best.ranks[i] ?? -1;
+        if (a !== b) return a > b;
+      }
+      return false;
+    };
+    if (!best || better()) best = { id, params, ranks };
+  }
+  return best;
+}
+
+const NEVER = new Promise(() => {});
+
+/** Stands in for a page whose data and chunk are loading, so its nearest `loading` boundary shows. */
+function Pending() {
+  return use(NEVER);
+}
+const PENDING_PAGE = { default: Pending };
 
 /**
  * Applies a server revalidation hint: drops cached route data for matching paths and, unless
@@ -218,8 +266,11 @@ function searchParams(search) {
   return out;
 }
 
-/** Root component: owns the current view and performs client-side navigation. */
-export function App({ routes, initial }) {
+/**
+ * Root component: owns the current view and performs client-side navigation. `shells` holds, for routes
+ * with `loading` UI, lazy modules of their segments without the page, shown while a navigation loads.
+ */
+export function App({ routes, shells = {}, initial }) {
   const [view, setView] = useState(initial);
   const [pending, startTransition] = useTransition();
   const cache = useRef(new Map());
@@ -249,6 +300,32 @@ export function App({ routes, initial }) {
       return promise;
     },
     [routes, exported],
+  );
+
+  /** The loading view of a route with `loading` UI: its layouts around a page that is still pending. */
+  const preview = useCallback(
+    async (path, search) => {
+      const match = findRoute(Object.keys(routes), path);
+      const shell = match && shells[match.id];
+      if (!shell) return null;
+      const entry = routes[match.id];
+      if (typeof entry === "function") entry().catch(() => {});
+      const module = await shell();
+      const state = {
+        ...current.current.state,
+        route: match.id,
+        pathname: path,
+        search,
+        params: match.params,
+        searchParams: searchParams(search),
+        data: null,
+        status: 200,
+        error: undefined,
+        action: undefined,
+      };
+      return { route: { ...(module.default ?? module), page: PENDING_PAGE }, state, metadata: current.current.metadata };
+    },
+    [routes, shells],
   );
 
   const commit = useCallback((next, after, event) => {
@@ -287,9 +364,37 @@ export function App({ routes, initial }) {
         commit({ ...current.current, state }, url.hash ? { hash: url.hash.slice(1) } : target, event);
         return;
       }
+      let entered = false;
+      const enter = () => {
+        if (entered) return;
+        entered = true;
+        routerEvents.emit("beforeHistoryChange", as, { shallow });
+        history[replace ? "replaceState" : "pushState"]({ __volt: key }, "", url.href);
+      };
+      const request = load(path, url.search, fresh);
+      let settled = false;
+      let previewed = false;
+      request.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      // An urgent update, not a transition, so the target's `loading` boundary shows instead of the old page.
+      if (!isPagesView(current.current)) {
+        preview(path, url.search).then(
+          (view) => {
+            if (!view || settled || own !== ticket.current) return;
+            previewed = true;
+            enter();
+            scroll.current = url.hash ? null : target;
+            completing.current = null;
+            setView(view);
+          },
+          () => {},
+        );
+      }
       let next;
       try {
-        next = await load(path, url.search, fresh);
+        next = await request;
       } catch (error) {
         if (own !== ticket.current) return;
         inflight.current = null;
@@ -304,11 +409,10 @@ export function App({ routes, initial }) {
         location.href = url.href;
         return;
       }
-      routerEvents.emit("beforeHistoryChange", as, { shallow });
-      history[replace ? "replaceState" : "pushState"]({ __volt: key }, "", url.href);
-      commit(next, url.hash ? { hash: url.hash.slice(1) } : target, event);
+      enter();
+      commit(next, url.hash ? { hash: url.hash.slice(1) } : previewed ? null : target, event);
     },
-    [load, commit, buildId],
+    [load, commit, preview, buildId],
   );
 
   const revalidate = useCallback(
@@ -337,13 +441,16 @@ export function App({ routes, initial }) {
       forward: () => history.forward(),
       prefetch: (href) => {
         const { url, path } = locate(href);
-        if (path !== null) load(path, url.search, false).catch(() => {});
+        if (path === null) return;
+        load(path, url.search, false).catch(() => {});
+        const match = findRoute(Object.keys(routes), path);
+        if (match && shells[match.id]) shells[match.id]().catch(() => {});
       },
       beforePopState: (callback) => {
         beforePop.current = callback;
       },
     }),
-    [navigate, load],
+    [navigate, load, routes, shells],
   );
 
   useEffect(() => {
