@@ -20,7 +20,7 @@ mod util;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use voltrs::log;
 
@@ -191,9 +191,16 @@ async fn start(project: &Project) -> Result<()> {
     }
     if project.rust {
         let binary = cargo::build(&project.root, true)?;
-        let status =
-            std::process::Command::new(&binary).env("VOLT_ROOT", &project.root).current_dir(&project.root).status()?;
-        std::process::exit(status.code().unwrap_or(1));
+        let mut command = std::process::Command::new(&binary);
+        command.env("VOLT_ROOT", &project.root).current_dir(&project.root);
+        // Replacing this process lets signals sent to `volt start` reach the server instead of orphaning it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            return Err(command.exec()).with_context(|| format!("cannot run {}", binary.display()));
+        }
+        #[cfg(not(unix))]
+        std::process::exit(command.status()?.code().unwrap_or(1));
     }
     voltrs::App::new().root(&project.root).serve().await.map_err(|e| anyhow::anyhow!("{}", e.message()))
 }
