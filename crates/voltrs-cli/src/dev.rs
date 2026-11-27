@@ -22,7 +22,8 @@ enum Change {
 }
 
 fn classify(path: &Path) -> Option<Change> {
-    let text = crate::util::to_slash(path);
+    // The trailing slash also catches events on the ignored directories themselves.
+    let text = format!("{}/", crate::util::to_slash(path));
     if IGNORED.iter().any(|dir| text.contains(dir)) {
         return None;
     }
@@ -219,6 +220,7 @@ mod tests {
         assert_eq!(classify(Path::new("/p/server/main.rs")), Some(Change::Rust));
         assert_eq!(classify(Path::new("/p/volt.toml")), Some(Change::Config));
         assert_eq!(classify(Path::new("/p/.volt/manifest.json")), None);
+        assert_eq!(classify(Path::new("/p/.volt")), None);
         assert_eq!(classify(Path::new("/p/node_modules/react/index.js")), None);
     }
 }
