@@ -5,10 +5,11 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::csstext::hoist_imports;
 use crate::postcss::PostCss;
 use crate::project::Project;
 use crate::styles::Styles;
-use crate::util::{hash, to_slash};
+use crate::util::{hash, relative};
 
 const TAILWIND_CLIS: [&str; 2] = ["@tailwindcss/cli/dist/index.mjs", "tailwindcss/lib/cli.js"];
 
@@ -61,7 +62,7 @@ impl<'a> Css<'a> {
                 Stylesheet::Compiled(css) => Ok(css.clone()),
             })
             .collect::<Result<_>>()?;
-        let css = PostCss::new(self.project).process(parts.join("\n"), false)?;
+        let css = PostCss::new(self.project).process(hoist_imports(&parts.join("\n")), false)?;
         self.styles.finish(&css, self.minify)
     }
 
@@ -124,22 +125,12 @@ impl<'a> Css<'a> {
     }
 }
 
-fn relative(from: &Path, to: &Path) -> String {
-    let from: Vec<_> = from.components().collect();
-    let to_parts: Vec<_> = to.components().collect();
-    let common = from.iter().zip(&to_parts).take_while(|(a, b)| a == b).count();
-    let mut parts: Vec<String> = vec!["..".into(); from.len() - common];
-    parts.extend(to_parts[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
-    to_slash(Path::new(&parts.join("/")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn relative_paths() {
-        assert_eq!(relative(Path::new("/p/.volt/cache"), Path::new("/p/app/globals.css")), "../../app/globals.css");
+    fn detects_tailwind() {
         assert!(uses_tailwind("@import \"tailwindcss\";"));
     }
 }

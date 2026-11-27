@@ -34,7 +34,8 @@ Any `.css`, `.scss` or `.sass` file can be imported from a component. All import
 
 Without Tailwind, every stylesheet goes through [Lightning CSS](https://lightningcss.dev):
 
-- `@import` of relative files and npm packages (`@import "pkg/dist/style.css"`) is inlined.
+- `@import` of relative files and npm packages (`@import "pkg/dist/style.css"`) is inlined, keeping its media, `supports()` and `layer()` conditions. This also applies to `@import` of plain CSS from Sass files and CSS modules.
+- Remote imports (`@import url("https://fonts.googleapis.com/css2?family=Inter")`) are kept and moved to the top of the combined stylesheet, where browsers accept them. A rule that is invalid after combining is dropped with a warning instead of silently.
 - Nesting, modern color syntax and other newer features are lowered and vendor prefixes are added for your browser targets: the `browserslist` field of `package.json` (a query string, an array, or `{ "production": [...] }`), or Next.js' defaults (`chrome 64, edge 79, firefox 67, opera 51, safari 12`).
 - In production the output is minified.
 
@@ -50,7 +51,9 @@ Sass is compiled in Rust by [grass](https://github.com/connorskees/grass), no `s
 }
 ```
 
-As with Sass itself, `url()`s in a partial resolve relative to the file that was compiled (the one you import from code), not the partial.
+Relative `url()`s and plain-CSS `@import "*.css"`s in a partial resolve relative to the partial, as with webpack's `resolve-url-loader` in Next.js, so `app/parts/_bg.scss` can use `url("./img/bg.png")` for `app/parts/img/bg.png`. References built with interpolation or variables (`url(#{$base}/x.png)`) are left as written and resolve relative to the compiled file.
+
+A compile error stops the build (or shows the dev overlay) with the Sass or Lightning CSS message and its location.
 
 ## CSS Modules
 
@@ -68,11 +71,11 @@ import styles from "./page.module.css";
 <h1 className={styles.title}>Hello</h1>; // class="page-module__title__a1B2c3 page-module__base__a1B2c3"
 ```
 
-Class names have the form `[file]__[class]__[hash]`, where the hash is derived from the file path, so they stay the same while you edit the styles. `composes` works with classes of the same file, `composes: x from global`, and `composes: x from "./other.module.css"`. Animation, grid and container names are scoped too; custom properties are not. The scoped CSS joins the global stylesheet.
+Class names have the form `[file]__[class]__[hash]`, where the hash is derived from the file path, so they stay the same while you edit the styles. `composes` works with classes of the same file, `composes: x from global`, and `composes: x from "./other.module.css"`. Animation, grid and container names are scoped too; custom properties are not. The scoped CSS joins the global stylesheet. Importing a module always includes its CSS, even when none of its classes is used.
 
 ## url() assets
 
-Relative `url()` references in CSS, Sass, CSS modules and Tailwind output (`background: url("./hero.png")`, fonts in `@font-face`) are copied to `/_volt/static/media/` with a content hash and served with immutable caching. Absolute paths (`/images/x.png` from `public/`), `data:` URIs and remote URLs are left as written; `~pkg/file.png` resolves from `node_modules`. A reference that does not exist is reported as a warning and kept unchanged.
+Relative `url()` references in CSS, Sass, CSS modules and Tailwind output (`background: url("./hero.png")`, fonts in `@font-face`) are copied to `/_volt/static/media/` with a content hash and served with immutable caching. Absolute paths (`/images/x.png` from `public/`), `data:` URIs and remote URLs are left as written; `~pkg/file.png` resolves from `node_modules`. A reference that does not exist is reported as a warning and kept unchanged. Tailwind inlines `@import`s itself without recording where each rule came from, so in a Tailwind build a `url()` inside a nested `@import`ed file resolves against the directories of the stylesheets imported from code; keep such references relative to those files or use `public/` paths.
 
 ## PostCSS
 
@@ -109,7 +112,7 @@ export default function RootLayout({ children }: LayoutProps) {
 
 Each call becomes `{ className, style: { fontFamily, fontWeight?, fontStyle? }, variable? }`. `className` sets `font-family` (and the weight and style when exactly one was requested); `variable` is a class that defines the CSS custom property, for use in Tailwind (`--font-sans` in `@theme`) or your own CSS. The generated `@font-face` rules use a unique family name (`__Inter_a1b2c3`) and join the global stylesheet.
 
-- **Google fonts** are downloaded from `fonts.googleapis.com` during the build and served from your app; nothing is requested from Google at runtime. Responses and font files are cached in `.volt/cache/fonts`, so later builds work offline. Options: `weight` (a value, an array or `"variable"`; omitted means the full variable weight range, or 400 for static families), `style`, `subsets`, `display` (default `swap`), `variable`, `fallback`, `preload`. Any family works: replace spaces with underscores (`Noto_Sans_JP`). If the download fails the build stops with the requested URL.
+- **Google fonts** are downloaded from `fonts.googleapis.com` during the build and served from your app; nothing is requested from Google at runtime. Responses and font files are cached in `.volt/cache/fonts`, so later builds work offline. Options: `weight` (a value, an array or `"variable"`; omitted means the full variable weight range, or the only weight of a static family; static families with several weights need an explicit `weight`), `style`, `subsets`, `display` (default `swap`), `variable`, `fallback`, `preload`. Any family works: replace spaces with underscores (`Noto_Sans_JP`). The weight ranges come from the Google Fonts family catalog, refreshed when the cached copy is older than a week (an offline build reuses the old copy with a warning). If a download fails the build stops with the requested URL.
 - **Local fonts**: `src` is a path relative to the calling file or an array of `{ path, weight, style }`. Files are copied to `/_volt/static/media/`. Options: `weight`, `style`, `display`, `variable`, `fallback`, `preload`, `declarations` (extra `@font-face` descriptors).
 
 Options must be literals (strings, numbers, arrays, objects) because they are evaluated at build time, and the loader must be called directly (`const inter = Inter({...})`).

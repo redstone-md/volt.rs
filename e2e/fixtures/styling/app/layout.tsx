@@ -1,6 +1,7 @@
 import type { LayoutProps } from "volt-rs";
 import localFont from "next/font/local";
 import "./globals.scss";
+import "./remote.css";
 
 const brand = localFont({
   src: [{ path: "./fonts/Geist.woff2", weight: "400", style: "normal" }],

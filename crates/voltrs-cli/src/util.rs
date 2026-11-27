@@ -21,6 +21,16 @@ pub fn to_slash(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// The slash-separated path from directory `from` to `to`.
+pub fn relative(from: &Path, to: &Path) -> String {
+    let from: Vec<_> = from.components().collect();
+    let to_parts: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to_parts).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".into(); from.len() - common];
+    parts.extend(to_parts[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    to_slash(Path::new(&parts.join("/")))
+}
+
 pub fn reset_dir(dir: &Path) -> std::io::Result<()> {
     if dir.exists() {
         std::fs::remove_dir_all(dir)?;
@@ -48,5 +58,16 @@ mod tests {
         assert_eq!(super::hash(b"volt"), super::hash(b"volt"));
         assert_ne!(super::hash(b"volt"), super::hash(b"volt!"));
         assert_eq!(super::hash(b"").len(), 10);
+    }
+
+    #[test]
+    fn relative_paths() {
+        use std::path::Path;
+        assert_eq!(
+            super::relative(Path::new("/p/.volt/cache"), Path::new("/p/app/globals.css")),
+            "../../app/globals.css"
+        );
+        assert_eq!(super::relative(Path::new("/p/app"), Path::new("/p/app/./parts")), "parts");
+        assert_eq!(super::relative(Path::new("/p/app"), Path::new("/p/app")), "");
     }
 }

@@ -50,6 +50,23 @@ await check("url() assets in css are copied and load", async () => {
   }
 });
 
+await check("css imported from sass, modules and partials is inlined and rebased", async () => {
+  assert.equal(await style("#plain", "color"), "rgb(0, 128, 0)");
+  assert.equal(await style("#fromimport", "color"), "rgb(128, 128, 0)");
+  assert.equal(await style("#remote", "color"), "rgb(0, 0, 255)");
+  const image = await style("#partbg", "background-image");
+  const url = image.match(/url\("?([^")]+)"?\)/)?.[1];
+  assert.match(url ?? "", /\/_volt\/static\/media\/dot-\w+\.png$/);
+  assert.equal((await fetch(new URL(url, base))).status, 200);
+});
+
+await check("remote imports lead the stylesheet and unused modules keep their css", async () => {
+  const href = await page.getAttribute("link[rel=stylesheet]", "href");
+  const css = await (await fetch(base + href)).text();
+  assert.ok(css.startsWith('@import "https://fonts.googleapis.com/css2?family=Inter&display=swap"'), css.slice(0, 120));
+  assert.match(css, /\.side-module__unusedcls__[\w-]+\{outline-offset:3px\}/);
+});
+
 await check("production css is one minified, prefixed stylesheet", async () => {
   const links = await page.$$eval("link[rel=stylesheet]", (l) => l.map((x) => x.getAttribute("href")));
   assert.equal(links.length, 1);

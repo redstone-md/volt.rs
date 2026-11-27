@@ -4,6 +4,7 @@ mod bundler;
 mod cargo;
 mod compress;
 mod css;
+mod csstext;
 mod dev;
 mod env;
 mod export;

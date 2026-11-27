@@ -1,4 +1,6 @@
 @use "./theme";
+@use "./parts/bg";
+@import "./plain.css";
 
 body {
   margin: 0;
