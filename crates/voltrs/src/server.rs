@@ -942,7 +942,11 @@ impl Server {
             Some(route) => cache::cache_control(hints.revalidate.or(route.revalidate)),
             None => HeaderValue::from_static(PRIVATE_CACHE),
         };
-        let response = Response::html(html).status(status).header(header::CACHE_CONTROL, cache);
+        let mut response = Response::html(html).status(status).header(header::CACHE_CONTROL, cache);
+        if stream.is_some() {
+            // nginx buffers proxied responses by default, which would hold the shell back.
+            response.headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
+        }
         Ok(Page { response, hints, data: rendered.data, stream })
     }
 

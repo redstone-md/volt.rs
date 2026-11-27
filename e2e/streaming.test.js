@@ -26,6 +26,7 @@ await check("streams the shell before a delayed Suspense boundary", async () => 
   const { status, headers, received, body } = await chunks("/stream");
   assert.equal(status, 200);
   assert.equal(headers["content-length"], undefined);
+  assert.equal(headers["x-accel-buffering"], "no");
   const fallback = arrival(received, 'id="fallback"');
   const late = arrival(received, "Late content");
   assert.ok(fallback !== undefined, "the fallback is in the stream");
