@@ -100,7 +100,7 @@ export default function Home({ data }: PageProps<"/">) {
 - **Tailwind CSS v4 and shadcn/ui** out of the box; `npx shadcn add` works.
 - **CSS Modules, Sass/SCSS and PostCSS**: `*.module.css` / `*.module.scss` with scoped class names, Sass compiled in Rust, Lightning CSS for `@import` inlining, `url()` assets, vendor prefixes and minification.
 - **Fonts**: `next/font/google` and `next/font/local` compatible loaders; Google Fonts are downloaded at build time and self-hosted, with preloading.
-- **Images**: `<Image>` with `srcset`, lazy loading, priority preloading and on-demand resizing.
+- **Images**: `<Image>` with the `next/image` props (`fill`, `sizes`, `quality`, `priority`, `placeholder="blur"`, `loader`, `overrideSrc`, ...), on-demand resizing to AVIF or WebP negotiated by `Accept`, allowlisted remote images, build-time blur placeholders for static imports, and limits against SVG scripts and decompression bombs.
 - **Static prerendering** with `generateStaticParams`, `dynamicParams` and `getStaticPaths`, incremental static regeneration (stale-while-revalidate), on-demand `revalidate_path`, and **static export** (`volt export`) for any static host.
 - **Internationalized routing**: `[i18n] locales` with unprefixed default locale, `/de/...` prefixes, `Accept-Language` and cookie detection, `useLocale()`, `<Link locale>`, `ctx.locale()` in Rust, automatic `hreflang` tags and localized sitemaps.
 - `base_path` and `trailing_slash`, Brotli and gzip precompression, immutable asset caching, security headers, redirects and rewrites.

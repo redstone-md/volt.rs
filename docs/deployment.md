@@ -65,7 +65,7 @@ Dynamic pages stream with chunked transfer encoding. Proxies that buffer respons
 | pages with `revalidate = N` | `public, max-age=0, s-maxage=N, stale-while-revalidate` |
 | dynamic pages | `private, no-cache, no-store, max-age=0, must-revalidate` |
 | `public/*` | `public, max-age=0, must-revalidate` with ETag |
-| `/_volt/image` | `public, max-age=86400, stale-while-revalidate=604800` with ETag |
+| `/_volt/image` | `public, max-age=86400, stale-while-revalidate=604800` with ETag and `Vary: Accept` (remote images: `max-age` = `[images] minimum_cache_ttl`) |
 
 Pages that export `revalidate = <seconds>` are cached in memory (pages rendered on demand within `[server] page_cache_mb`); once expired they are served stale while one background render refreshes them. `ctx.revalidate_path` purges them on demand. See [static generation](static-generation.md#incremental-static-regeneration).
 

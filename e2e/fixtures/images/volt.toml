@@ -1,0 +1,14 @@
+[site]
+name = "images"
+
+[images]
+formats = ["image/avif", "image/webp"]
+image_sizes = [32, 64, 128, 256]
+max_pixels = 4000000
+# The test's stand-in for a CDN listens on 127.0.0.1.
+dangerously_allow_local_ip = true
+
+[[images.remote_patterns]]
+protocol = "http"
+hostname = "127.0.0.1"
+pathname = "/allowed/**"

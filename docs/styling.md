@@ -135,18 +135,64 @@ import hero from "./hero.jpg";
 <Image src={hero} alt="" priority />;
 ```
 
-Images import as `{ src, width, height }`, other files as a URL string.
+Images import as `{ src, width, height, blurDataURL, blurWidth, blurHeight }`, other files as a URL string. `blurDataURL` is a PNG of at most 8 pixels on its longer side, computed at build time for PNG, JPEG, WebP and GIF imports, so `placeholder="blur"` needs nothing else.
 
 ## Images
 
 ```tsx
-import Image from "volt-rs/image";
+import Image from "volt-rs/image"; // or "next/image"
+import hero from "./hero.jpg";
 
 <Image src="/photos/team.jpg" alt="The team" width={1200} height={800} sizes="(max-width: 768px) 100vw, 50vw" />
-<Image src="/cover.jpg" alt="" fill priority />
+<Image src={hero} alt="" placeholder="blur" priority />
+<div style={{ position: "relative", height: 320 }}>
+  <Image src="https://images.example.com/cover.jpg" alt="" fill />
+</div>
 ```
 
-For local images volt generates a `srcset` served by `/_volt/image`, which resizes on demand and caches the result on disk. JPEG keeps JPEG (with the requested quality), PNG and GIF become PNG, WebP stays WebP. `priority` preloads the image with `fetchpriority="high"`; everything else is lazy-loaded. Set `unoptimized` to serve the original, or pass a custom `loader` for an image CDN.
+`<Image>` renders an `<img>` with explicit dimensions, lazy loading, `decoding="async"` and a `srcset` served by `/_volt/image`, which resizes on demand and caches every variant on disk (`.volt/cache/images`).
+
+| Prop | |
+| --- | --- |
+| `src` | A `public/` path, a static import, or a remote URL allowed by `remote_patterns`. |
+| `width`, `height` | Intrinsic size in pixels. A static import fills in what is missing from its aspect ratio. |
+| `fill` | Covers the parent (which needs `position: relative`, `fixed` or `absolute`) instead; `sizes` defaults to `100vw`. Set `object-fit` with `style`. |
+| `sizes` | Turns the `srcset` into width descriptors; with a `vw` value, widths below that share of the smallest device size are left out. |
+| `quality` | 1 to 100, default 75. |
+| `priority` / `preload` | Preloads the image from `<head>` (`<link rel="preload" as="image" imagesrcset>`) and loads it eagerly with `fetchpriority="high"`. |
+| `placeholder` | `"empty"` (default), `"blur"` (uses `blurDataURL`, blurred with an SVG filter) or a `data:image/...` URL shown as is. The placeholder is removed once the image has loaded. |
+| `blurDataURL` | Placeholder for images that are not static imports. |
+| `onLoad`, `onError` | Called also when the image finished loading before hydration. On error the alt text becomes visible. |
+| `overrideSrc` | Replaces the `src` attribute and keeps the generated `srcset`, e.g. to keep an old URL for SEO. |
+| `loader` | `({ src, width, quality }) => url` for an image CDN; any `src` goes through it. |
+| `unoptimized` | Serves the original file without a `srcset`. |
+
+Without `sizes` an image with a `width` gets `1x` and `2x` candidates; without either it gets the device sizes. `getImageProps(props)` returns the `<img>` attributes without rendering, for `<picture>` art direction. The sizes, remote patterns and SVG policy come from `volt.toml` at build time, so the component only requests URLs the optimizer accepts.
+
+### Formats
+
+`/_volt/image` picks the first format of `[images] formats` that the request's `Accept` header lists (`image/webp` by default; add `image/avif` to prefer AVIF) and answers with `Vary: Accept`; other clients get the source format: JPEG stays JPEG at the requested quality, PNG, WebP and GIF become PNG. AVIF is encoded with rav1e (pure Rust, lossy, honours `quality`). The WebP encoder available without C libraries is lossless, so volt keeps the WebP only when it is smaller than the source format at the same size and serves the JPEG or PNG otherwise: graphics get WebP, photos usually stay JPEG unless AVIF is enabled. Lossy WebP would need `libwebp` through C bindings; the pure-Rust alternatives are licensed under the AGPL. Animated GIF, PNG and WebP, AVIF sources and formats volt cannot decode are served unchanged. JPEG orientation from EXIF is applied.
+
+Responses carry an `ETag` (answered with 304), `Cache-Control: public, max-age=86400, stale-while-revalidate=604800` (remote images: `minimum_cache_ttl`), `Content-Disposition` with a matching file name, and `X-Volt-Cache: HIT` or `MISS`.
+
+### Remote images
+
+Remote URLs are optimized only when they match `[[images.remote_patterns]]`; others render as a plain `<img>` and `/_volt/image` refuses them with 400:
+
+```toml
+[[images.remote_patterns]]
+protocol = "https"
+hostname = "**.example.com"   # `*.` one subdomain level, `**.` any number
+pathname = "/media/**"        # `*` within a segment, `**` across segments
+# port = 8443                 # any port when omitted
+# search = "?v=1"             # exact query; any when omitted
+```
+
+The optimizer downloads the original (HTTP/1.1 or HTTP/2, rustls with the Mozilla root certificates, 5-second connect and 10-second total timeouts, 20 MB at most, `Content-Type: image/*` required), follows up to three redirects that match a pattern as well, and keeps it on disk for `minimum_cache_ttl` seconds (4 hours by default); a failed refresh keeps serving the previous copy. Host names that resolve to loopback, private or link-local addresses are refused unless `dangerously_allow_local_ip = true`.
+
+### Security
+
+SVG can carry scripts, so `<Image>` serves SVG files unoptimized and `/_volt/image` refuses them unless `dangerously_allow_svg = true`, which serves them unchanged. Every optimizer response has `Content-Security-Policy: script-src 'none'; frame-src 'none'; sandbox;` (`content_security_policy`) and `X-Content-Type-Options: nosniff`. Sources over `max_pixels` (50 million) or with a side over `max_dimension` (16384) are refused from their header before anything is decoded, which stops decompression bombs; decoders run with matching memory limits. Widths must be one of `device_sizes` or `image_sizes`.
 
 ## Scripts
 
