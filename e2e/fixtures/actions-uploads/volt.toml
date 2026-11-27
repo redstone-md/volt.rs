@@ -1,0 +1,5 @@
+[site]
+name = "actions-uploads"
+
+[server]
+body_limit_mb = 1
