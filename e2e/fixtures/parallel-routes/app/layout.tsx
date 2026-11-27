@@ -9,7 +9,7 @@ export default function Root({ children, modal }: LayoutProps<{}, "modal">) {
       <body>
         <nav>
           <Link href="/">Home</Link> <Link href="/photos">Photos</Link> <Link href="/dashboard">Dashboard</Link>{" "}
-          <Link href="/strict">Strict</Link>
+          <Link href="/strict">Strict</Link> <Link href="/strict/extra">Strict extra</Link>
         </nav>
         {children}
         {modal}

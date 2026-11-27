@@ -129,12 +129,12 @@ Each slot is matched against the URL on its own and can have its own `layout`, `
 
 When a slot has no page for the URL:
 
-- on a **client navigation** it keeps what it showed before (soft navigation), so `/dashboard` → `/dashboard/settings` keeps the analytics overview;
-- on a **hard load** (first visit, refresh) it renders its `default.tsx`. A slot without `default.tsx` makes the whole page a 404, as in Next.js.
+- on a **client navigation** within the layout it keeps what it showed before (soft navigation), so `/dashboard` → `/dashboard/settings` keeps the analytics overview;
+- on a **hard load** (first visit, refresh), or a client navigation that mounts the layout, it renders its `default.tsx`. A slot without `default.tsx` makes the whole page a 404, as in Next.js.
 
-A URL that only a slot matches (`/dashboard/views` above) keeps the current page on client navigation and renders the segment's own `default.tsx` as `children` on a hard load.
+A URL that only a slot matches (`/dashboard/views` above) works the same way for `children`: a client navigation from inside the segment keeps the current page, and a hard load renders the segment's own `default.tsx` as `children` (a 404 without one). A page always wins: if `app/dashboard/[id]/page.tsx` matches the URL, it renders as `children` even when a slot page matches too. Catch-all slot pages, the usual way to clear a slot on other URLs, render where the URL exists but do not make every URL exist.
 
-Metadata comes from the page and its layouts only, and `useData()` inside a slot returns the page's data; slot pages get their own data as the `data` prop. A slot page can have a Rust loader: register it under the page's folder path, groups removed, e.g. `#[loader("/dashboard/@team/settings")]`.
+Metadata comes from the page and its layouts only. Slot pages get their own data as the `data` prop; inside a slot, `useData()` returns the slot page's data and `useParams()` adds the slot page's params to the page's. A slot page can have a Rust loader: register it under the page's folder path, groups removed, e.g. `#[loader("/dashboard/@team/settings")]`. When the loader fails with `not_found()`, the nearest `not-found.tsx` inside the slot renders in its place; any other error renders the nearest `error.tsx` inside the slot. The rest of the layout renders as usual. Without such a file in the slot, the whole page fails as if the page's own loader had.
 
 ## Intercepting routes
 
@@ -169,7 +169,7 @@ export default function PhotoModal({ params }: { params: { id: string } }) {
 }
 ```
 
-Clicking `<Link href="/photos/1">` in the gallery keeps the gallery mounted and renders the modal into `@modal`; the URL becomes `/photos/1`. Back closes the modal and forward reopens it, because each history entry remembers how it was resolved. Refreshing `/photos/1` renders `app/photos/[id]/page.tsx`.
+Clicking `<Link href="/photos/1">` in the gallery keeps the gallery mounted and renders the modal into `@modal`; the URL becomes `/photos/1`. Back closes the modal and forward reopens it, because each history entry remembers how it was resolved, also after the page was reloaded on another entry. Refreshing `/photos/1` renders `app/photos/[id]/page.tsx`.
 
 Interception applies when the client navigates from a page inside the segment that holds the interception folder (any page for a folder in `app/` or `app/@modal`, pages under `/feed` for `app/feed/(..)photo/[id]`). An interception folder outside a slot, like `app/feed/(..)photo/[id]`, replaces the page itself on those navigations instead of rendering into a slot.
 

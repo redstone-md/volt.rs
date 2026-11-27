@@ -26,6 +26,16 @@ async fn photo_modal(ctx: Ctx) -> Result<Photo> {
     photo(&ctx, "modal")
 }
 
+#[loader("/err/@side")]
+async fn err_side(_ctx: Ctx) -> Result<Photo> {
+    Err(not_found())
+}
+
+#[loader("/err/@boom")]
+async fn err_boom(_ctx: Ctx) -> Result<Photo> {
+    Err(Error::conflict("boom").public())
+}
+
 fn main() {
     App::new().run();
 }
