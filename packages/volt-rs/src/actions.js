@@ -1,39 +1,92 @@
-import { useCallback, useState, useTransition } from "react";
+import { useActionState as useReactActionState, useCallback, useMemo, useState, useTransition } from "react";
 import { endpoint, withBase } from "./internal/config.js";
 import { ActionError } from "./internal/errors.js";
-import { getRouter } from "./internal/router.js";
+import { getRouter, revalidatePaths } from "./internal/router.js";
 
 export { ActionError };
 
+const REVALIDATE_HEADER = "x-volt-revalidate";
+const isBlob = (value) => typeof Blob !== "undefined" && value instanceof Blob;
+// A file input left blank submits an empty, unnamed file; it carries nothing worth a multipart body.
+const isUpload = (value) => isBlob(value) && (value.size > 0 || Boolean(value.name));
+
+function toFormData(input) {
+  const data = new FormData();
+  for (const [key, value] of Object.entries(input)) {
+    for (const item of Array.isArray(value) ? value : [value]) {
+      if (item === undefined || item === null) continue;
+      if (isBlob(item)) data.append(key, item);
+      else data.append(key, typeof item === "object" ? JSON.stringify(item) : String(item));
+    }
+  }
+  return data;
+}
+
+const hasUploads = (input) =>
+  Object.values(input).some((value) => (Array.isArray(value) ? value.some(isUpload) : isUpload(value)));
+
 function encode(input) {
   if (typeof FormData !== "undefined" && input instanceof FormData) {
+    if ([...input.values()].some(isUpload)) return { body: input };
     const params = new URLSearchParams();
     for (const [key, value] of input) if (typeof value === "string") params.append(key, value);
     return { body: params, type: "application/x-www-form-urlencoded" };
   }
+  if (input && typeof input === "object" && !Array.isArray(input) && hasUploads(input)) {
+    return { body: toFormData(input) };
+  }
   return { body: JSON.stringify(input ?? null), type: "application/json" };
 }
 
-/** Creates a typed client for a Rust `#[action]`. Used by the generated `@volt/api`. */
-export function createAction(name) {
-  const action = async (input) => {
-    const { body, type } = encode(input);
-    const response = await fetch(endpoint(`/_volt/action/${name}`), {
-      method: "POST",
-      headers: { "content-type": type, accept: "application/json", "x-volt-action": "1" },
-      body,
-      credentials: "same-origin",
-    });
-    const payload = await response.json().catch(() => ({ error: { status: response.status, message: response.statusText } }));
-    if (payload.error?.redirect) {
-      getRouter()?.push(payload.error.redirect) ?? (location.href = withBase(payload.error.redirect));
-      return undefined;
+function readRevalidate(response) {
+  const header = response.headers.get(REVALIDATE_HEADER);
+  if (!header) return [];
+  return header.split(",").filter(Boolean).map((path) => {
+    try {
+      return decodeURIComponent(path);
+    } catch {
+      return path;
     }
-    if (payload.error) throw new ActionError(payload.error);
-    return payload.data;
-  };
-  Object.defineProperty(action, "$$volt", { value: name });
-  return action;
+  });
+}
+
+async function call(name, input) {
+  const { body, type } = encode(input);
+  const headers = { accept: "application/json", "x-volt-action": "1" };
+  if (type) headers["content-type"] = type;
+  const response = await fetch(endpoint(`/_volt/action/${name}`), { method: "POST", headers, body, credentials: "same-origin" });
+  const payload = await response.json().catch(() => ({ error: { status: response.status, message: response.statusText } }));
+  const paths = readRevalidate(response);
+  const redirect = payload.error?.redirect;
+  const revalidated = paths.length > 0 ? await revalidatePaths(paths, { refresh: !redirect }) : false;
+  if (redirect) {
+    getRouter()?.push(redirect) ?? (location.href = withBase(redirect));
+    return { data: undefined, revalidated: true };
+  }
+  if (payload.error) throw new ActionError(payload.error);
+  return { data: payload.data, revalidated };
+}
+
+/** Progressive enhancement for `<form action={fn}>`: React renders this URL so the form posts without JavaScript. */
+function decorate(fn, name) {
+  return Object.defineProperties(fn, {
+    $$volt: { value: name },
+    $$FORM_ACTION: {
+      value: () => ({ action: endpoint(`/_volt/action/${name}`), method: "POST", encType: "multipart/form-data", data: null }),
+    },
+    // React binds the previous state onto actions (useActionState); keep the markers on bound copies.
+    bind: { value: (self, ...args) => decorate(Function.prototype.bind.call(fn, self, ...args), name) },
+  });
+}
+
+/**
+ * Creates a typed client for a Rust `#[action]`. Used by the generated `@volt/api`.
+ * The last argument is the input, so React's `useActionState` (which passes `prevState, formData`) works.
+ */
+export function createAction(name) {
+  const action = decorate(async (...args) => (await call(name, args[args.length - 1])).data, name);
+  // Resolves to `{ data, revalidated }` so callers skip a refresh the server already triggered.
+  return Object.defineProperty(action, "$$run", { value: (input) => call(name, input) });
 }
 
 /** Runs an action with pending, error and result state. */
@@ -45,10 +98,10 @@ export function useAction(action, { refresh = false } = {}) {
       new Promise((resolve, reject) => {
         startTransition(async () => {
           try {
-            const data = await action(input);
-            setState({ data, error: undefined });
-            if (refresh) getRouter()?.refresh();
-            resolve(data);
+            const result = action.$$run ? await action.$$run(input) : { data: await action(input), revalidated: false };
+            setState({ data: result.data, error: undefined });
+            if (refresh && !result.revalidated) await getRouter()?.refresh();
+            resolve(result.data);
           } catch (error) {
             setState({ data: undefined, error });
             reject(error);
@@ -57,5 +110,26 @@ export function useAction(action, { refresh = false } = {}) {
       }),
     [action, refresh],
   );
-  return { run, pending, ...state };
+  return { run, pending, ...state, fieldErrors: state.error?.fieldErrors };
+}
+
+/**
+ * React's `useActionState` for volt actions: `[state, formAction, isPending, error]`.
+ * An `ActionError` (validation errors included) keeps the previous state and is returned as `error`
+ * instead of reaching the error boundary.
+ */
+export function useActionState(action, initialState, permalink) {
+  const run = useMemo(() => {
+    const wrapped = async (previous, payload) => {
+      try {
+        return { value: await action(previous.value, payload), error: undefined };
+      } catch (error) {
+        if (error instanceof ActionError) return { value: previous.value, error };
+        throw error;
+      }
+    };
+    return action.$$volt ? decorate(wrapped, action.$$volt) : wrapped;
+  }, [action]);
+  const [state, dispatch, pending] = useReactActionState(run, { value: initialState, error: undefined }, permalink);
+  return [state.value, dispatch, pending, state.error];
 }

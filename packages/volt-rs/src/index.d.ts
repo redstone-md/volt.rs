@@ -5,8 +5,8 @@ export { default as Image } from "./image";
 export { default as Script } from "./script";
 export { default as Head } from "./head";
 export { default as Form, useFormPending } from "./form";
-export { ActionError, createAction, useAction } from "./actions";
-export type { Action } from "./actions";
+export { ActionError, createAction, useAction, useActionState } from "./actions";
+export type { Action, FieldErrors } from "./actions";
 export { JsonLd } from "./seo";
 export {
   getRouter,

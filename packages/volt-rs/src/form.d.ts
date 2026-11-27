@@ -2,7 +2,8 @@ import type { FormHTMLAttributes, ForwardRefExoticComponent, RefAttributes } fro
 import type { Action } from "./actions";
 
 export interface FormProps<Output = unknown> extends Omit<FormHTMLAttributes<HTMLFormElement>, "action"> {
-  action: Action<any, Output> | string;
+  /** An action from `@volt/api`, a URL, or a React form action such as a `useActionState` dispatcher. */
+  action: Action<any, Output> | string | ((formData: FormData) => void | Promise<void>);
   /** Re-run the route loader after a successful submit. Defaults to `true`. */
   refresh?: boolean;
   onSuccess?: (result: Output, form: HTMLFormElement) => void;

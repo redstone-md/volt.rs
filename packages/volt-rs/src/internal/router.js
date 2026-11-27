@@ -23,7 +23,7 @@ const PREFETCH_TTL = 30_000;
 
 export const RouterContext = createContext(null);
 
-const controller = { router: null, state: null };
+const controller = { router: null, state: null, revalidate: null };
 
 /** Router of the mounted app, for use outside React components. */
 export function getRouter() {
@@ -39,6 +39,39 @@ const kindOf = (route) => route.kind ?? "app";
 
 /** Whether a view renders a Pages Router page. */
 export const isPagesView = (view) => kindOf(view.route) === "pages";
+
+const isDynamic = (segment) => segment.startsWith("[");
+const isGroup = (segment) => segment.startsWith("(") && segment.endsWith(")");
+
+function decodeSegment(segment) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/** Matches a pathname against a path or route pattern (`/blog/[slug]`, `/docs/[...rest]`, `/[[...all]]`). */
+export function matchPath(pattern, pathname) {
+  const want = pattern.split("?")[0].split("/").filter((s) => s && !isGroup(s));
+  const have = pathname.split("/").filter(Boolean).map(decodeSegment);
+  for (let i = 0; i < want.length; i++) {
+    const segment = want[i];
+    if (segment.startsWith("[[...")) return true;
+    if (segment.startsWith("[...")) return have.length > i;
+    if (i >= have.length) return false;
+    if (!isDynamic(segment) && decodeSegment(segment) !== have[i]) return false;
+  }
+  return want.length === have.length;
+}
+
+/**
+ * Applies a server revalidation hint: drops cached route data for matching paths and, unless
+ * `refresh` is false, re-runs the current route's loader when it matches. Resolves to whether it refreshed.
+ */
+export async function revalidatePaths(paths, options) {
+  return controller.revalidate ? controller.revalidate(paths, options) : false;
+}
 
 const thenable = (value) => Object.assign(Promise.resolve(value), value);
 const component = (module) => module?.default ?? module;
@@ -278,6 +311,18 @@ export function App({ routes, initial }) {
     [load, commit, buildId],
   );
 
+  const revalidate = useCallback(
+    async (paths, { refresh = true } = {}) => {
+      const hit = (pathname) => paths.some((path) => path === "*" || matchPath(path, pathname));
+      for (const key of [...cache.current.keys()]) if (hit(key.split("?")[0])) cache.current.delete(key);
+      const current = stripBase(location.pathname);
+      if (!refresh || current === null || !hit(current)) return false;
+      await navigate(`${current}${location.search}${location.hash}`, { replace: true, scroll: false, fresh: true });
+      return true;
+    },
+    [navigate],
+  );
+
   const router = useMemo(
     () => ({
       push: (href, options) => navigate(href, options),
@@ -305,6 +350,7 @@ export function App({ routes, initial }) {
     controller.router = router;
     controller.state = current.current.state;
     routerEvents.emit("ready");
+    controller.revalidate = revalidate;
     history.scrollRestoration = "manual";
     if (!history.state?.__volt) history.replaceState({ __volt: historyKey() }, "", location.href);
     const onPopState = async (event) => {
@@ -328,7 +374,7 @@ export function App({ routes, initial }) {
     };
     addEventListener("popstate", onPopState);
     return () => removeEventListener("popstate", onPopState);
-  }, [router, load, commit, buildId]);
+  }, [router, revalidate, load, commit, buildId]);
 
   useEffect(() => {
     controller.state = view.state;

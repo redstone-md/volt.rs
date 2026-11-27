@@ -33,5 +33,6 @@ export class ActionError extends Error {
     super(error?.message ?? "Action failed");
     this.name = "ActionError";
     this.status = error?.status ?? 500;
+    this.fieldErrors = error?.fieldErrors;
   }
 }
