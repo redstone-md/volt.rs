@@ -166,6 +166,48 @@ await check("dynamic = force-static ignores the query and caches publicly", asyn
   assert.match(headers.get("cache-control"), /public/);
 });
 
+await check("force-static runs a Rust loader without the visitor's cookies or query", async () => {
+  const alice = await fetch(`${base}/who?q=1`, { headers: { cookie: "user=alice" } });
+  const aliceBody = await alice.text();
+  assert.match(alice.headers.get("cache-control"), /public/);
+  assert.match(aliceBody, /id="who">anonymous</);
+  assert.match(aliceBody, /id="who-query">none</);
+  const bob = await fetch(`${base}/who`, { headers: { cookie: "user=bob" } });
+  assert.match(await bob.text(), /id="who">anonymous</);
+  const data = await fetch(`${base}/_volt/data?path=${encodeURIComponent("/who?q=2")}`, {
+    headers: { cookie: "user=bob" },
+  });
+  assert.deepEqual((await data.json()).data, { user: null, query: null });
+});
+
+await check("a page remounts when a dynamic param changes", async () => {
+  await page.goto(`${base}/items/1`, { waitUntil: "networkidle" });
+  await page.click("#inc");
+  await page.click("#inc");
+  assert.equal(await text("#count"), "2");
+  await page.click("a[href='/items/2']");
+  await page.locator("#item", { hasText: "Item 2" }).waitFor();
+  assert.equal(await text("#count"), "0");
+  assert.equal(await page.evaluate(() => window.rootMounts), 1);
+});
+
+await check("metadata files below a catch-all segment are served", async () => {
+  const { body } = await html("/docs/a/b");
+  const href = /rel="icon" href="(\/docs\/a\/b\/icon\.png\?[0-9a-z]+)"/.exec(body)?.[1];
+  assert.ok(href, "icon link");
+  const icon = await fetch(base + href);
+  assert.equal(icon.headers.get("content-type"), "image/png");
+  assert.deepEqual(Buffer.from(await icon.arrayBuffer()), readFileSync(join(app, "docs", "[...slug]", "icon.png")));
+});
+
+await check("code metadata routes are rendered once and cached", async () => {
+  const first = await html("/sitemap.xml");
+  const second = await html("/sitemap.xml");
+  assert.match(first.body, /\/render\/[0-9a-z]+</);
+  assert.equal(second.body, first.body);
+  assert.equal(first.headers.get("cache-control"), "public, max-age=0, s-maxage=3600, stale-while-revalidate");
+});
+
 await check("no uncaught page errors besides the intentional crash", async () => {
   assert.deepEqual(
     errors.filter((message) => !message.includes("root layout crashed")),

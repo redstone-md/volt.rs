@@ -69,6 +69,12 @@ await check("volt export honours base_path and trailing_slash", async () => {
     assert.ok(existsSync(join(out, file)), file);
   }
   assert.match(readFileSync(join(out, "sitemap.xml"), "utf8"), /https:\/\/base\.example\/docs\/posts\/2\//);
+  // Metadata files of a dynamic segment are copied under each exported path, as the pages link them.
+  const og = readFileSync(join(app, "app", "posts", "[id]", "opengraph-image.png"));
+  for (const id of [1, 2, 3]) {
+    assert.deepEqual(readFileSync(join(out, "posts", String(id), "opengraph-image.png")), og);
+  }
+  assert.match(readFileSync(join(out, "posts/1/index.html"), "utf8"), /\/docs\/posts\/1\/opengraph-image\.png\?/);
 
   const port = Number(process.env.PORT ?? 3900) + 1;
   const site = await serveStatic(out, port, "/docs");

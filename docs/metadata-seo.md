@@ -50,7 +50,7 @@ Image and manifest files placed in `app/` are served at their Next.js URLs and a
 | `manifest.(json\|webmanifest)` | `app/` only | `<link rel="manifest">` |
 | `robots.txt`, `sitemap.xml` | `app/` only | served as is, replacing the generated files |
 
-The alt text of `opengraph-image.png` is read from `opengraph-image.alt.txt` next to it (same for `twitter-image`). Sizes come from the image headers; SVG icons get `sizes="any"`. A file in a nested segment, such as `app/blog/opengraph-image.png`, replaces the parent's for the routes below it, and files in dynamic segments (`app/blog/[slug]/opengraph-image.png`) are served for every value of the param.
+The alt text of `opengraph-image.png` is read from `opengraph-image.alt.txt` next to it (same for `twitter-image`). Sizes come from the image headers; SVG icons get `sizes="any"`. A file in a nested segment, such as `app/blog/opengraph-image.png`, replaces the parent's for the routes below it, and files in dynamic segments (`app/blog/[slug]/opengraph-image.png`, `app/docs/[...slug]/icon.png`) are served for every value of the param. Two files with the same URL, such as `app/icon.png` and `app/(shop)/icon.png`, fail the build. `volt export` copies files of dynamic segments under every exported path below them.
 
 Head tags link images as `<url>?<content hash>`, served with `Cache-Control: immutable`; requests without the hash (`/favicon.ico`, crawlers) revalidate with an ETag. Metadata files win over `metadata` exports of the same segment, and a deeper segment's `icons`, `openGraph.images` or `twitter.images` win over a parent's files. Files in `app/` take precedence over `public/` files at the same URL.
 
@@ -58,7 +58,7 @@ Images generated with code (`opengraph-image.tsx` returning `ImageResponse`) are
 
 ## Metadata routes in code
 
-`app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts` export a default function (sync or async) returning the same objects as in Next.js. They run in QuickJS on each request, so they can read anything bundled with the app but have no Node APIs.
+`app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts` export a default function (sync or async) returning the same objects as in Next.js. They run in QuickJS, so they can read anything bundled with the app but have no Node APIs. As in Next.js, their output is rendered once and cached (`Cache-Control: public, s-maxage`); `export const revalidate = 3600` renders it again on the first request after an hour (other requests keep getting the cached copy meanwhile), `ctx.revalidate_path("/sitemap.xml")` drops it, and `export const dynamic = "force-dynamic"` (or `revalidate = 0`) renders it on every request. When the output is cached, `#[sitemap]` providers receive a request without cookies or headers.
 
 ```ts
 // app/sitemap.ts → /sitemap.xml

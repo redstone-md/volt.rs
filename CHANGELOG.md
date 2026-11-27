@@ -44,6 +44,11 @@
 - `useSelectedLayoutSegment` and `useSelectedLayoutSegments`, `useServerInsertedHTML` (injected into the head of server-rendered pages), and `unstable_noStore` / `connection` no-ops; `next/cache` and `next/server` resolve to `volt-rs/cache` and `volt-rs/server`.
 - `export const dynamic = "force-static"` caches one render per pathname without the query (also for routes with a Rust loader), `"error"` fails the build for routes with a Rust loader, and `dynamic` is read from layouts too. Other segment config exports (`fetchCache`, `runtime`, ...) are ignored.
 - Error and not-found boundaries reset on navigation instead of remounting, so layouts nested in them keep their state; templates remount when the segment below them changes, as in Next.js.
+- The subtree below a layout remounts when one of its segments changes (`/items/1` to `/items/2`), as in Next.js, while the layout keeps its state.
+- `force-static` routes run their Rust loader with a request without query, cookies or headers, so no visitor's data is shared through the cache; client navigations get the same data.
+- Metadata files under catch-all segments (`app/docs/[...slug]/icon.png`) are served; route patterns accept segments after a catch-all.
+- Two metadata files resolving to the same URL fail the build; `volt export` copies metadata files of dynamic segments under each exported path.
+- `sitemap.ts`, `robots.ts` and `manifest.ts` output is cached, honouring `revalidate` and `dynamic = "force-dynamic"` exports.
 
 ## 0.0.1
 

@@ -34,7 +34,7 @@ Files may use `.tsx`, `.ts`, `.jsx` or `.js`. Metadata files (`icon.png`, `openg
 
 `error.tsx` catches errors of its segment on the client. On the server, a failing render falls back to the root `error.tsx` inside the root layout with status 500. When the root layout itself throws (on the server, or later in the browser), `app/global-error.tsx` is rendered instead of the whole document; without a root `error.tsx` it is also the server error page. `global-error.tsx` receives `{ error, reset }` and must render `<html>` and `<body>`. In development, the error overlay is shown instead.
 
-Error and not-found boundaries reset when the pathname changes. Layouts inside them keep their state across navigations; templates are keyed by the segment directly below them, so `app/blog/template.tsx` remounts when going from `/blog/a` to `/blog/b` but a root template does not.
+Error and not-found boundaries reset when the pathname changes. Layouts inside them keep their state across navigations; templates are keyed by the segment directly below them, so `app/blog/template.tsx` remounts when going from `/blog/a` to `/blog/b` but a root template does not. As in Next.js, everything below a layout remounts when one of the segments between it and the next layout changes, dynamic param values included: going from `/items/1` to `/items/2` resets the state of `app/items/[id]/page.tsx`, while the layouts above keep theirs.
 
 ### Active segments
 
@@ -57,7 +57,7 @@ export function NavLink({ slug, children }: { slug: string; children: React.Reac
 | --- | --- |
 | `dynamic = "auto"` | Default: static routes are prerendered, routes with a Rust loader or dynamic segments render per request. |
 | `dynamic = "force-dynamic"` | Renders on every request. |
-| `dynamic = "force-static"` | One cached render per pathname shared by every visitor, even with a Rust loader (its first output is cached; without a loader the page is prerendered). `searchParams` is always empty. |
+| `dynamic = "force-static"` | One cached render per pathname shared by every visitor, even with a Rust loader (its first output is cached; without a loader the page is prerendered). `searchParams` is always empty, and a Rust loader sees a request without query, cookies or headers (only the route params), so no visitor's data ends up in the shared render. Client navigations get the same data. |
 | `dynamic = "error"` | Like `force-static`, and the build fails if the route has a Rust loader, which reads the request. |
 | `revalidate`, `dynamicParams` | See [Static generation](./static-generation.md). |
 | `fetchCache`, `runtime`, `preferredRegion`, `maxDuration` | Accepted and ignored. |

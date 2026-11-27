@@ -11,7 +11,7 @@ volt renders pages ahead of time whenever it can, serves them from memory, refre
 
 The HTML lands in `.volt/prerender/<path>.html`, the route data used by client navigation in `.volt/prerender/<path>.json`, and the paths are recorded in `.volt/manifest.json` (`paths` and `prerendered` of each route). The server loads them into its page cache at startup, so they are answered from memory without touching QuickJS.
 
-Rust loaders run inside your server binary and are not available while `volt build` renders, so routes with a loader are always rendered per request (with `dynamic = "force-static"`, the first render of each pathname is cached and shared instead). Their `generateStaticParams` still feeds `dynamicParams = false` and the sitemap. Set `[build] prerender = false` to skip prerendering entirely.
+Rust loaders run inside your server binary and are not available while `volt build` renders, so routes with a loader are always rendered per request (with `dynamic = "force-static"`, the first render of each pathname is cached and shared instead, and the loader then sees no query, cookies or headers). Their `generateStaticParams` still feeds `dynamicParams = false` and the sitemap. Set `[build] prerender = false` to skip prerendering entirely.
 
 ## `generateStaticParams`
 

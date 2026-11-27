@@ -1,0 +1,14 @@
+[package]
+name = "app-conventions"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "app-conventions"
+path = "server/main.rs"
+
+[dependencies]
+voltrs = "0.0.1"
+
+[workspace]
