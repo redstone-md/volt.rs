@@ -256,9 +256,12 @@ function AppTree({ view }) {
   if (state.globalError && GlobalError) return h(GlobalError, { error: state.error, reset: () => location.reload() });
   let node = state.route === ERROR_ROUTE ? h(Page, { error: state.error, reset: () => location.reload() }) : h(Page, props);
   const resetKey = state.pathname;
+  // Depth of the next layout down (or of the page), whose subtree is keyed by the segments in between.
+  let inner = route.path?.length ?? 0;
   for (let i = route.segments.length - 1; i >= 0; i--) {
     const segment = route.segments[i];
-    const below = segmentsBelow(route, segment.path?.length ?? 0, state.params);
+    const depth = segment.path?.length ?? 0;
+    const below = segmentsBelow(route, depth, state.params);
     if (segment.notFound) {
       const fallback = component(segment.notFound);
       node = h(NotFoundBoundary, { resetKey, fallback, forced: state.notFound === i }, node);
@@ -269,7 +272,12 @@ function AppTree({ view }) {
     if (segment.template) node = h(component(segment.template), { key: below[0] ?? "" }, node);
     if (i === 0) node = h(Fragment, null, h(Metadata, { metadata }), node);
     if (segment.layout) {
+      // As in Next.js, the subtree below a layout remounts when one of its segments changes (`/items/1` to
+      // `/items/2`), while the layout itself stays mounted.
+      const key = segmentsBelow({ path: (route.path ?? []).slice(0, inner) }, depth, state.params).join("/");
+      node = h(Fragment, { key }, node);
       node = h(LayoutSegmentContext.Provider, { value: below }, h(component(segment.layout), { params: props.params }, node));
+      inner = depth;
     }
   }
   return GlobalError ? h(GlobalErrorBoundary, { resetKey: view, fallback: GlobalError }, node) : node;
