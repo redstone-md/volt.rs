@@ -135,6 +135,20 @@ await check("a slot without default.tsx makes unmatched hard loads 404", async (
   assert.equal(await text("#side"), "Side panel");
 });
 
+await check("an intercepting route outside a slot replaces the page from its segment only", async () => {
+  await page.goto(`${base}/feed`, { waitUntil: "networkidle" });
+  await page.click("#item-7");
+  await page.waitForURL(`${base}/items/7`);
+  assert.equal(await text("#item"), "Feed preview of item 7");
+  await page.reload({ waitUntil: "networkidle" });
+  assert.equal(await text("#item"), "Item 7");
+  const direct = await page.evaluate(async () => {
+    const response = await fetch("/_volt/data?path=%2Fitems%2F7", { headers: { "x-volt-from": "/" } });
+    return response.json();
+  });
+  assert.equal(direct.route, "/items/[id]");
+});
+
 await check("no client errors", async () => {
   assert.deepEqual(errors, []);
 });
