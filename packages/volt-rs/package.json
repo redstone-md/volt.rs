@@ -1,6 +1,6 @@
 {
   "name": "volt-rs",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "React framework with a Rust server: SSR, server actions and file-system routing with Next.js ergonomics",
   "license": "MIT",
   "type": "module",
@@ -46,10 +46,10 @@
     "react-dom": ">=19"
   },
   "optionalDependencies": {
-    "@volt-rs/cli-darwin-arm64": "0.0.1",
-    "@volt-rs/cli-darwin-x64": "0.0.1",
-    "@volt-rs/cli-linux-arm64": "0.0.1",
-    "@volt-rs/cli-linux-x64": "0.0.1",
-    "@volt-rs/cli-win32-x64": "0.0.1"
+    "@volt-rs/cli-darwin-arm64": "0.0.2",
+    "@volt-rs/cli-darwin-x64": "0.0.2",
+    "@volt-rs/cli-linux-arm64": "0.0.2",
+    "@volt-rs/cli-linux-x64": "0.0.2",
+    "@volt-rs/cli-win32-x64": "0.0.2"
   }
 }

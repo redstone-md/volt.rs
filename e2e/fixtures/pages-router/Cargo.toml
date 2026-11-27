@@ -9,6 +9,6 @@ name = "pages-router"
 path = "server/main.rs"
 
 [dependencies]
-voltrs = "0.0.1"
+voltrs = "0.0.2"
 
 [workspace]

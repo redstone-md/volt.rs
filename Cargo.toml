@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 license = "MIT"
 authors = ["redstone-md"]
@@ -12,8 +12,8 @@ homepage = "https://github.com/redstone-md/volt.rs"
 rust-version = "1.88"
 
 [workspace.dependencies]
-voltrs = { path = "crates/voltrs", version = "0.0.1" }
-voltrs-macros = { path = "crates/voltrs-macros", version = "0.0.1" }
+voltrs = { path = "crates/voltrs", version = "0.0.2" }
+voltrs-macros = { path = "crates/voltrs-macros", version = "0.0.2" }
 anyhow = "1"
 arcstr = "1"
 brotli = { version = "8", default-features = false, features = ["std"] }
