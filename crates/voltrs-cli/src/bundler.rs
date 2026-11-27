@@ -116,7 +116,13 @@ impl VoltPlugin {
         let url = self.0.media.add(path, &bytes)?;
         let code = match imagesize::blob_size(&bytes) {
             Ok(size) if !matches!(ext, "woff" | "woff2" | "ttf" | "otf" | "mp4") => {
-                format!("export default {{ src: {url:?}, width: {}, height: {} }};", size.width, size.height)
+                let mut image = serde_json::json!({ "src": url, "width": size.width, "height": size.height });
+                if let Some(blur) = voltrs::blur_placeholder(&bytes) {
+                    image["blurDataURL"] = blur.data_url.into();
+                    image["blurWidth"] = blur.width.into();
+                    image["blurHeight"] = blur.height.into();
+                }
+                format!("export default {image};")
             }
             _ => format!("export default {url:?};"),
         };
@@ -177,6 +183,17 @@ impl VoltPlugin {
         }
         files
     }
+}
+
+/// The `[images]` settings `volt-rs/image` needs to build the same URLs the optimizer accepts.
+fn image_settings(images: &voltrs::config::ImageConfig) -> String {
+    serde_json::json!({
+        "deviceSizes": images.device_sizes,
+        "imageSizes": images.image_sizes,
+        "remotePatterns": images.remote_patterns,
+        "dangerouslyAllowSVG": images.dangerously_allow_svg,
+    })
+    .to_string()
 }
 
 /// Modules reachable from `entry` in ES evaluation order: imports before importers, in source order.
@@ -677,6 +694,7 @@ impl<'a> Bundle<'a> {
             ("process.env.__VOLT_IMAGE_OPTIMIZATION__".to_owned(), optimize_images.to_string()),
             ("process.env.__VOLT_LOCALES__".to_owned(), format!("{:?}", config.i18n.locales.join(","))),
             ("process.env.__VOLT_DEFAULT_LOCALE__".to_owned(), format!("{:?}", config.default_locale())),
+            ("process.env.__VOLT_IMAGES__".to_owned(), image_settings(&config.images)),
         ]);
         define.extend(build.define.iter().map(|(k, v)| (k.clone(), v.clone())));
         let sdk = to_slash(&self.project.sdk_file());
