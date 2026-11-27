@@ -75,11 +75,13 @@ struct Asset {
 #[derive(Default)]
 pub struct StaticAssets {
     files: HashMap<String, Asset>,
+    /// Development builds keep their file names across rebuilds, so browsers must revalidate them.
+    revalidate: bool,
 }
 
 impl StaticAssets {
-    pub fn load(dir: &Path) -> Self {
-        let mut assets = Self::default();
+    pub fn load(dir: &Path, dev: bool) -> Self {
+        let mut assets = Self { revalidate: dev, ..Self::default() };
         assets.collect(dir, dir);
         assets
     }
@@ -123,7 +125,14 @@ impl StaticAssets {
             _ => (asset.body.clone(), None),
         };
         let mut response = Response::with_type(StatusCode::OK, asset.content_type, body)
-            .header(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"))
+            .header(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static(if self.revalidate {
+                    "no-cache"
+                } else {
+                    "public, max-age=31536000, immutable"
+                }),
+            )
             .header(header::VARY, HeaderValue::from_static("Accept-Encoding"));
         if let Some(encoding) = encoding {
             response.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));

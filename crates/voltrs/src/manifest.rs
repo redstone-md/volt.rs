@@ -36,6 +36,31 @@ pub struct Manifest {
     /// Set by `volt dev` when the last rebuild failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Counts the successful `volt dev` builds; 0 for production builds.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: u64,
+    /// Set by `volt dev` when the browser can apply this build in place with React Fast Refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot: Option<HotUpdate>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// The client modules that `volt dev` rebuilds changed since the build of revision `base`, all applicable in
+/// place: a page showing any revision from `base` on updates by evaluating them again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotUpdate {
+    pub base: u64,
+    pub modules: Vec<HotModule>,
+}
+
+/// A changed app module: the id its components are registered under and the URL of its new code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotModule {
+    pub id: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -248,7 +273,10 @@ impl Manifest {
 
     pub fn save(&self, out_dir: &Path) -> std::io::Result<()> {
         let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(out_dir.join(MANIFEST_FILE), text)
+        // Renamed into place so the dev server, which polls the file, never reads a partial manifest.
+        let partial = out_dir.join(format!("{MANIFEST_FILE}.tmp"));
+        std::fs::write(&partial, text)?;
+        std::fs::rename(partial, out_dir.join(MANIFEST_FILE))
     }
 
     pub fn route(&self, id: &str) -> Option<&RouteEntry> {

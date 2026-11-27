@@ -86,7 +86,7 @@ impl Build {
             .filter_map(|(i, r)| r.intercept.as_ref().map(|intercept| (intercept.target.clone(), i)))
             .collect();
         let slots = Slots::new(&manifest.slots);
-        let assets = StaticAssets::load(&out_dir.join("static"));
+        let assets = StaticAssets::load(&out_dir.join("static"), manifest.dev);
         let metadata = MetadataAssets::load(out_dir, &manifest.metadata);
         let handlers = manifest.handlers.iter().enumerate().map(|(i, h)| (h.id.clone(), i)).collect();
         let prerendered = Self::prerendered_handlers(&manifest, out_dir);
@@ -287,6 +287,8 @@ pub(crate) struct Server {
     apis: HashMap<Method, Router<&'static ApiDef>>,
     cache: Arc<PageCache>,
     hub: Option<Hub>,
+    /// The error of the last `volt dev` rebuild when it failed; the previous build keeps serving meanwhile.
+    failure: RwLock<Option<String>>,
     /// User agents that get complete documents instead of streams.
     bots: Option<regex::Regex>,
     #[cfg(feature = "images")]
@@ -339,6 +341,7 @@ impl Server {
             cache: PageCache::shared(config.server.page_cache_mb * 1024 * 1024, config.i18n.clone()),
             fetcher: Fetcher::new(FetchOptions::from_config(&config.server)),
             hub: dev.then(Hub::default),
+            failure: RwLock::new(build.manifest.error.clone().filter(|_| dev)),
             bots,
             config: Arc::new(config),
             state: Arc::new(state),
@@ -377,17 +380,21 @@ impl Server {
                 let out_dir = server.config.out_dir();
                 match Build::load(&out_dir) {
                     Ok(build) => {
-                        let previous = server.current();
-                        let css_only = previous.manifest.server == build.manifest.server
-                            && previous.manifest.client.entry == build.manifest.client.entry
-                            && previous.manifest.client.css != build.manifest.client.css;
-                        let bundle = out_dir.join(&build.manifest.server);
-                        if let Ok(mut slot) = server.build.write() {
-                            *slot = Arc::new(build);
+                        let (event, data) = crate::dev::event(&server.current().manifest, &build.manifest);
+                        if let Ok(mut failure) = server.failure.write() {
+                            failure.clone_from(&build.manifest.error);
                         }
-                        server.engine.reload(bundle);
+                        // A failed rebuild leaves partial static files behind: the open pages keep loading
+                        // modules from the previous build, which stays in memory.
+                        if build.manifest.error.is_none() {
+                            let bundle = out_dir.join(&build.manifest.server);
+                            if let Ok(mut slot) = server.build.write() {
+                                *slot = Arc::new(build);
+                            }
+                            server.engine.reload(bundle);
+                        }
                         if let Some(hub) = &server.hub {
-                            hub.broadcast(if css_only { "css" } else { "reload" }, "");
+                            hub.broadcast(event, &data);
                         }
                     }
                     Err(error) => log::error(error.message()),
@@ -483,8 +490,8 @@ impl Server {
         if path == "/_volt/image" && self.config.images.optimize {
             return self.images.serve(ctx.query_string()).await.into();
         }
-        if let Some(error) = self.current().manifest.error.as_deref().filter(|_| self.dev) {
-            return Response::html(error_overlay("Build failed", error, self.config.base_path()))
+        if let Some(error) = self.failure.read().ok().and_then(|f| f.clone()) {
+            return Response::html(error_overlay("Build failed", &error, self.config.base_path()))
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into();
         }

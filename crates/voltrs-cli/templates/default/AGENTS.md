@@ -6,7 +6,7 @@ This is a [volt.rs](https://github.com/redstone-md/volt.rs) app: React 19 pages,
 
 | Task | Command |
 | --- | --- |
-| Dev server with live reload | `npm run dev` |
+| Dev server with Fast Refresh (component edits keep state) | `npm run dev` |
 | Production build | `npm run build` |
 | Run production server | `npm run start` |
 | Type-check TypeScript | `npm run typecheck` |
@@ -70,6 +70,7 @@ This is a [volt.rs](https://github.com/redstone-md/volt.rs) app: React 19 pages,
 - After a mutation, purge cached pages with `ctx.revalidate_path("/posts/[slug]")` or `ctx.revalidate_prefix("/posts")`.
 - Styling: Tailwind CSS v4 in `app/globals.css`. Merge classes with `cn()`. CSS Modules (`*.module.css`, `*.module.scss`) and Sass also work.
 - Fonts: `next/font/google` (`Inter({ subsets: ["latin"], variable: "--font-sans" })`) or `next/font/local` called at module top level with literal options; apply `font.className` or `font.variable` in the root layout.
+- Fast Refresh: `npm run dev` applies edits to components in place and keeps their state. Keep component files exporting components (plus unchanged route exports like `metadata`); editing a constant, hook or helper that other files import reloads the page.
 
 ## Before you finish
 

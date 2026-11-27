@@ -165,6 +165,12 @@ pub async fn run(project: Project) -> Result<()> {
         }
     })?;
     watcher.watch(&project.root, RecursiveMode::Recursive)?;
+    // Listening from a task of its own keeps a signal that arrives during a rebuild from being lost.
+    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        shutdown().await;
+        let _ = stop.send(());
+    });
 
     let mut ready = session.compile() && session.frontend().await;
     if ready {
@@ -176,7 +182,7 @@ pub async fn run(project: Project) -> Result<()> {
     loop {
         let first = tokio::select! {
             path = rx.recv() => path,
-            _ = shutdown() => None,
+            _ = &mut stopped => None,
         };
         let Some(first) = first else { break };
         tokio::time::sleep(Duration::from_millis(60)).await;

@@ -34,6 +34,8 @@ use crate::util::{hash, to_slash};
 
 const CLIENT_ENTRY: &str = "volt:client";
 const SERVER_ENTRY: &str = "volt:server";
+/// Installs the Fast Refresh runtime before React DOM loads; development client builds only.
+const REFRESH_ENTRY: &str = "volt:refresh";
 const MEDIA: [&str; 13] =
     ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "ico", "woff", "woff2", "ttf", "otf", "mp4"];
 const SCRIPTS: [&str; 8] = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
@@ -72,6 +74,10 @@ struct Shared {
     order: Mutex<Vec<String>>,
     /// Full messages of load hook errors; rolldown reports only "plugin `volt` threw an error" for them.
     failures: Mutex<Vec<String>>,
+    /// Whether app modules get the React Refresh transform: development client builds.
+    refresh: bool,
+    /// Refresh ids of the instrumented modules, by module id.
+    refreshed: Mutex<HashMap<String, String>>,
 }
 
 impl Shared {
@@ -291,12 +297,12 @@ impl Plugin for VoltPlugin {
         }
         let id = strip_query(args.id);
         let kept = stylesheet_imports(id, args.code);
-        let transformed = match crate::fonts::transform(&self.0.fonts, id, args.code)? {
+        let mut transformed = match crate::fonts::transform(&self.0.fonts, id, args.code)? {
             Some(mut transformed) => {
                 transformed.code.push_str(&kept);
-                transformed
+                Some(transformed)
             }
-            None if kept.is_empty() => return Ok(None),
+            None if kept.is_empty() => None,
             None => {
                 let mut magic = MagicString::new(args.code);
                 magic.append(kept);
@@ -305,10 +311,24 @@ impl Plugin for VoltPlugin {
                     include_content: true,
                     ..Default::default()
                 });
-                crate::fonts::Transformed { code: magic.to_string(), map }
+                Some(crate::fonts::Transformed { code: magic.to_string(), map })
             }
         };
-        Ok(Some(HookTransformOutput {
+        if self.0.refresh && crate::refresh::is_app_module(&self.0.root, id) {
+            let module = crate::refresh::module_id(&self.0.root, id);
+            let code = transformed.as_ref().map_or(args.code.as_str(), |t| t.code.as_str());
+            if let Some(instrumented) = crate::refresh::instrument(id, code, &module) {
+                let map = match &transformed {
+                    Some(previous) => rolldown_sourcemap::collapse_sourcemaps(&[&previous.map, &instrumented.map]),
+                    None => instrumented.map,
+                };
+                if let Ok(mut refreshed) = self.0.refreshed.lock() {
+                    refreshed.insert(args.id.to_owned(), module);
+                }
+                transformed = Some(crate::fonts::Transformed { code: instrumented.code, map });
+            }
+        }
+        Ok(transformed.map(|transformed| HookTransformOutput {
             code: Some(transformed.code),
             map: transformed.map.into(),
             ..Default::default()
@@ -401,6 +421,19 @@ pub struct ClientBundle {
     pub entry: String,
     pub preload: Vec<String>,
     pub routes: HashMap<String, Vec<String>>,
+    /// Every file of a development build, one per module, compared across rebuilds by `volt dev`.
+    pub modules: Vec<ClientModule>,
+}
+
+/// A file of a development client build.
+pub struct ClientModule {
+    pub url: String,
+    /// Content hash of the code.
+    pub digest: String,
+    /// The refresh id of the app module it holds, when that module is instrumented for Fast Refresh.
+    pub refresh: Option<String>,
+    /// Whether it holds an installed package module.
+    pub dependency: bool,
 }
 
 pub struct Bundle<'a> {
@@ -558,10 +591,18 @@ impl<'a> Bundle<'a> {
                 shells.push(format!("  {:?}: () => import({:?}),", route.id, self.shell_key(index)));
             }
         }
+        let refresh = client && self.dev;
+        if refresh {
+            modules.insert(
+                REFRESH_ENTRY.into(),
+                format!("import {{ inject }} from {:?};\ninject();\n", crate::refresh::RUNTIME),
+            );
+        }
         modules.insert(
             CLIENT_ENTRY.into(),
             format!(
-                "import {{ boot }} from \"volt-rs/internal/client\";\nboot({{\n{}\n}}, {{\n{}\n}});\n",
+                "{}import {{ boot }} from \"volt-rs/internal/client\";\nboot({{\n{}\n}}, {{\n{}\n}});\n",
+                if refresh { format!("import {REFRESH_ENTRY:?};\n") } else { String::new() },
                 lazy.join("\n"),
                 shells.join("\n")
             ),
@@ -616,6 +657,8 @@ impl<'a> Bundle<'a> {
             preload_fonts: Mutex::default(),
             order: Mutex::default(),
             failures: Mutex::default(),
+            refresh: client && self.dev,
+            refreshed: Mutex::default(),
         })
     }
 
@@ -643,6 +686,10 @@ impl<'a> Bundle<'a> {
             alias.push((from.clone(), vec![Some(target)]));
         }
         let minify = client && build.minify && !self.dev;
+        // Development client builds emit one file per module under a stable name, so Fast Refresh can import
+        // the new code of a changed module alone while its imports keep resolving to the loaded instances.
+        let modular = client && self.dev;
+        let names = if modular { "[name].js" } else { "[name]-[hash].js" };
         BundlerOptions {
             input: Some(vec![InputItem {
                 name: Some(if client { "main" } else { "server" }.into()),
@@ -652,8 +699,9 @@ impl<'a> Bundle<'a> {
             platform: Some(Platform::Browser),
             format: Some(if client { OutputFormat::Esm } else { OutputFormat::Iife }),
             dir: Some(to_slash(&self.project.static_dir().join("js"))),
-            entry_filenames: Some("[name]-[hash].js".to_string().into()),
-            chunk_filenames: Some("[name]-[hash].js".to_string().into()),
+            entry_filenames: Some(names.to_string().into()),
+            chunk_filenames: Some(names.to_string().into()),
+            preserve_modules: modular.then_some(true),
             minify: Some(if minify { RawMinifyOptions::Bool(true) } else { RawMinifyOptions::DeadCodeEliminationOnly }),
             sourcemap: (client && (self.dev || build.sourcemap)).then_some(SourceMapType::File),
             define: Some(define.into_iter().collect()),
@@ -721,7 +769,8 @@ impl<'a> Bundle<'a> {
     /// Builds the browser bundle with one lazy chunk per route.
     pub async fn client(&self) -> Result<ClientBundle> {
         crate::util::reset_dir(&self.project.static_dir().join("js"))?;
-        let assets = self.run(CLIENT_ENTRY, true, self.shared(true), true).await?;
+        let shared = self.shared(true);
+        let assets = self.run(CLIENT_ENTRY, true, shared.clone(), true).await?;
         let chunks: HashMap<&str, &rolldown_common::OutputChunk> = assets
             .iter()
             .filter_map(|a| match a {
@@ -762,10 +811,26 @@ impl<'a> Bundle<'a> {
                 routes.insert(route.id.clone(), files);
             }
         }
+        let refreshed = shared.refreshed.lock().map(|r| r.clone()).unwrap_or_default();
+        let modules = chunks
+            .values()
+            .filter(|_| self.dev)
+            .map(|chunk| ClientModule {
+                url: url(&chunk.filename),
+                digest: hash(chunk.code.as_bytes()),
+                refresh: match chunk.module_ids.as_slice() {
+                    [id] => refreshed.get(id.as_str()).cloned(),
+                    _ => None,
+                },
+                dependency: !chunk.module_ids.is_empty()
+                    && chunk.module_ids.iter().all(|id| id.as_str().contains("/node_modules/")),
+            })
+            .collect();
         Ok(ClientBundle {
             entry: url(&entry_chunk.filename),
             preload: entry_files.iter().skip(1).map(|f| url(f)).collect(),
             routes,
+            modules,
         })
     }
 }

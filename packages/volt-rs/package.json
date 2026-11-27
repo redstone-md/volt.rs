@@ -38,6 +38,9 @@
   },
   "files": ["bin", "src"],
   "sideEffects": false,
+  "dependencies": {
+    "react-refresh": "^0.19.0"
+  },
   "peerDependencies": {
     "react": ">=19",
     "react-dom": ">=19"

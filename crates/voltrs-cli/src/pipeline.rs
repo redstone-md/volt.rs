@@ -1,7 +1,7 @@
 //! The build pipeline shared by `volt dev`, `volt build` and `volt export`.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -16,6 +16,7 @@ use voltrs::ssr::{Engine, EngineOptions};
 use crate::bundler::{Assets, Bundle};
 use crate::css::Css;
 use crate::fonts::Fonts;
+use crate::hot::Hot;
 use crate::media::Media;
 use crate::project::Project;
 use crate::routes::Route;
@@ -87,11 +88,13 @@ impl StaticParams {
 pub struct Pipeline<'a> {
     project: &'a Project,
     dev: bool,
+    /// What the browsers of `volt dev` have loaded, to tell hot updates from reloads.
+    hot: Mutex<Hot>,
 }
 
 impl<'a> Pipeline<'a> {
     pub fn new(project: &'a Project, dev: bool) -> Self {
-        Self { project, dev }
+        Self { project, dev, hot: Mutex::default() }
     }
 
     /// Writes `@volt/api` from the Rust server binary, or an empty one for frontend-only apps.
@@ -150,9 +153,18 @@ impl<'a> Pipeline<'a> {
             handlers: bundle.handlers().iter().map(|h| HandlerEntry { id: h.id.clone(), prerendered: None }).collect(),
             middleware: bundle.middleware().map(|m| m.entry()),
             error: None,
+            revision: 0,
+            hot: None,
         };
         let fingerprint = format!("{}{}{:?}", manifest.server, manifest.client.entry, manifest.client.css);
         manifest.build_id = hash(fingerprint.as_bytes());
+        if self.dev {
+            let mut hot = self.hot.lock().map_err(|_| anyhow::anyhow!("dev state poisoned"))?;
+            let revision = hot.record(&client.modules, std::mem::take(&mut manifest.build_id));
+            manifest.revision = revision.number;
+            manifest.hot = revision.hot;
+            manifest.build_id = revision.build_id;
+        }
         manifest.save(&self.project.out_dir)?;
 
         if !self.dev {
