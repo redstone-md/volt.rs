@@ -1,0 +1,7 @@
+[site]
+name = "i18n"
+url = "https://example.com"
+
+[i18n]
+locales = ["en", "de"]
+default_locale = "en"

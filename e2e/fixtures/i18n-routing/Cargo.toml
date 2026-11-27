@@ -1,0 +1,14 @@
+[package]
+name = "i18n-routing"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "i18n-routing"
+path = "server/main.rs"
+
+[dependencies]
+voltrs = "0.0.1"
+
+[workspace]
