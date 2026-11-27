@@ -1,0 +1,12 @@
+@use "./theme";
+
+$pad: 20px;
+
+.card {
+  padding: $pad;
+  border: 1px solid theme.$accent;
+
+  &:hover {
+    color: blue;
+  }
+}

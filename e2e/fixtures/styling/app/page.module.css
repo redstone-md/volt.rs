@@ -1,0 +1,14 @@
+.base {
+  letter-spacing: 2px;
+}
+
+.title {
+  composes: base;
+  color: rgb(255, 0, 0);
+}
+
+.icon {
+  width: 4px;
+  height: 4px;
+  background: url(./assets/dot.png) no-repeat;
+}

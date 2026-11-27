@@ -1,0 +1,19 @@
+@use "./theme";
+
+body {
+  margin: 0;
+}
+
+.dotted {
+  padding: theme.$gap;
+  color: theme.$accent;
+  background-image: url("./assets/dot.png");
+
+  .inner {
+    user-select: none;
+  }
+}
+
+.mono {
+  font-family: var(--font-brand);
+}
