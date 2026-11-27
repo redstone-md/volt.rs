@@ -208,6 +208,15 @@ impl I18nConfig {
         {
             return Err(format!("i18n.locales: `{bad}` is not a locale such as `en` or `pt-BR`"));
         }
+        // Prefixes match case-insensitively, so `en` and `EN` would make the second unreachable.
+        if let Some((i, twin)) = self
+            .locales
+            .iter()
+            .enumerate()
+            .find_map(|(i, l)| self.locales[..i].iter().any(|seen| seen.eq_ignore_ascii_case(l)).then_some((i, l)))
+        {
+            return Err(format!("i18n.locales: `{twin}` is listed twice (entry {})", i + 1));
+        }
         if self.default_locale.is_empty() {
             self.default_locale = self.locales[0].clone();
         }
@@ -234,12 +243,15 @@ impl I18nConfig {
     }
 
     /// App path of `path` in `locale`: prefixed unless `locale` is the default.
+    /// Leading slashes and backslashes collapse to one `/`, so a tail such as `//host` taken from
+    /// `/en//host` can never become a protocol-relative URL to another host.
     pub fn localize(&self, locale: &str, path: &str) -> String {
+        let path = format!("/{}", path.trim_start_matches(['/', '\\']));
         if !self.is_enabled() || locale == self.default_locale {
-            return path.to_owned();
+            return path;
         }
-        match path {
-            "/" | "" => format!("/{locale}"),
+        match path.as_str() {
+            "/" => format!("/{locale}"),
             _ => format!("/{locale}{path}"),
         }
     }
@@ -262,8 +274,9 @@ impl I18nConfig {
         default.chain(others).map(|locale| (locale, self.localize(locale, path))).collect()
     }
 
-    /// Best supported locale for an `Accept-Language` header: exact tags first, then a shared
-    /// primary language (`de-AT` picks `de`, `pt` picks `pt-BR`), in the header's quality order.
+    /// Best supported locale for an `Accept-Language` header, in the header's quality order: each range
+    /// takes its exact tag, else its primary language (`de-AT` and `en-US` pick `de` and `en` over a
+    /// sibling region), else a locale sharing that language (`pt` picks `pt-BR`).
     pub fn negotiate(&self, accept_language: &str) -> Option<&str> {
         let mut ranges: Vec<(&str, f32)> = accept_language
             .split(',')
@@ -279,7 +292,10 @@ impl I18nConfig {
         ranges.sort_by(|a, b| b.1.total_cmp(&a.1));
         let primary = |tag: &str| tag.split('-').next().unwrap_or(tag).to_ascii_lowercase();
         ranges.iter().find_map(|(tag, _)| {
-            self.find(tag).or_else(|| self.locales.iter().find(|l| primary(l) == primary(tag)).map(String::as_str))
+            let language = primary(tag);
+            self.find(tag)
+                .or_else(|| self.find(&language))
+                .or_else(|| self.locales.iter().find(|l| primary(l) == language).map(String::as_str))
         })
     }
 }
@@ -291,6 +307,14 @@ pub struct Redirect {
     pub destination: String,
     #[serde(default)]
     pub permanent: bool,
+    /// With `[i18n]`, the source also matches below every locale prefix and the destination keeps
+    /// that locale. `false` matches the full path as written.
+    #[serde(default = "matches_locales")]
+    pub locale: bool,
+}
+
+fn matches_locales() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -529,6 +553,25 @@ mod tests {
     }
 
     #[test]
+    fn localized_paths_stay_on_the_same_host() {
+        let i18n = i18n();
+        let (locale, tail) = i18n.split("/en//evil.com");
+        assert_eq!((locale, tail), (Some("en"), "//evil.com"));
+        assert_eq!(i18n.localize("en", tail), "/evil.com");
+        assert_eq!(i18n.localize("en", "/\\evil.com"), "/evil.com");
+        assert_eq!(i18n.localize("en", "/\\/evil.com/x"), "/evil.com/x");
+        assert_eq!(i18n.localize("de", "//evil.com"), "/de/evil.com");
+    }
+
+    #[test]
+    fn rejects_duplicate_locales() {
+        for locales in [["en", "EN"], ["de", "de"]] {
+            let mut i18n = I18nConfig { locales: locales.map(String::from).to_vec(), ..I18nConfig::default() };
+            assert!(i18n.validate().is_err(), "{locales:?}");
+        }
+    }
+
+    #[test]
     fn negotiates_accept_language() {
         let i18n = i18n();
         assert_eq!(i18n.negotiate("fr;q=0.9, de-AT;q=0.8, en;q=0.5"), Some("de"));
@@ -536,6 +579,9 @@ mod tests {
         assert_eq!(i18n.negotiate("pt"), Some("pt-BR"));
         assert_eq!(i18n.negotiate("fr, *"), None);
         assert_eq!(i18n.negotiate("de;q=0"), None);
+        let regions = I18nConfig { locales: vec!["en-GB".into(), "en".into()], ..I18nConfig::default() };
+        assert_eq!(regions.negotiate("en-US, en;q=0.9"), Some("en"));
+        assert_eq!(regions.negotiate("en-GB, en;q=0.9"), Some("en-GB"));
         let mut bad = I18nConfig { locales: vec!["en".into()], default_locale: "de".into(), ..I18nConfig::default() };
         assert!(bad.validate().is_err());
     }

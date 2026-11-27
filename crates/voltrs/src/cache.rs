@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use http::{HeaderValue, header};
 use serde_json::Value;
 
-use crate::config::Config;
+use crate::config::{Config, I18nConfig};
 use crate::manifest::{RouteEntry, prerender_file, same_path};
 use crate::response::Response;
 use crate::router::RoutePattern;
@@ -102,6 +102,8 @@ pub struct PageCache {
     capacity: usize,
     clock: AtomicU64,
     epoch: AtomicU64,
+    /// Locales of the server, so revalidating `/de/about` purges only the German entry.
+    i18n: I18nConfig,
 }
 
 /// Cache key of a request: route path (without its locale prefix), raw query string and locale.
@@ -110,8 +112,10 @@ pub fn key(path: &str, query: &str, locale: &str) -> String {
     format!("{path}?{query}#{locale}")
 }
 
-fn key_path(key: &str) -> &str {
-    key.split_once('?').map_or(key, |(path, _)| path)
+/// Route path and locale of a cache key.
+fn key_parts(key: &str) -> (&str, &str) {
+    let path = key.split_once('?').map_or(key, |(path, _)| path);
+    (path, key.rsplit_once('#').map_or("", |(_, locale)| locale))
 }
 
 /// `Cache-Control` of a cached page: long-lived when static, `s-maxage` when revalidated every `revalidate` seconds.
@@ -134,12 +138,13 @@ impl PageCache {
             capacity,
             clock: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
+            i18n: I18nConfig::default(),
         }
     }
 
     /// Creates a cache reachable from the global revalidation functions.
-    pub fn shared(capacity: usize) -> Arc<Self> {
-        let cache = Arc::new(Self::new(capacity));
+    pub fn shared(capacity: usize, i18n: I18nConfig) -> Arc<Self> {
+        let cache = Arc::new(Self { i18n, ..Self::new(capacity) });
         if let Ok(mut caches) = CACHES.lock() {
             caches.retain(|c| c.strong_count() > 0);
             caches.push(Arc::downgrade(&cache));
@@ -194,13 +199,21 @@ impl PageCache {
         }
     }
 
-    /// Drops every entry whose path satisfies `matches`; the next request renders it again.
-    pub fn invalidate(&self, matches: impl Fn(&str) -> bool) -> usize {
+    /// Drops every entry whose `(route path, locale)` satisfies `matches`; the next request renders it again.
+    pub fn invalidate(&self, matches: impl Fn(&str, &str) -> bool) -> usize {
         let Ok(mut entries) = self.entries.write() else {
             return 0;
         };
         self.epoch.fetch_add(1, Ordering::AcqRel);
-        let keys: Vec<String> = entries.map.keys().filter(|key| matches(key_path(key))).cloned().collect();
+        let keys: Vec<String> = entries
+            .map
+            .keys()
+            .filter(|key| {
+                let (path, locale) = key_parts(key);
+                matches(path, locale)
+            })
+            .cloned()
+            .collect();
         for key in &keys {
             entries.remove(key);
         }
@@ -274,8 +287,16 @@ impl Target {
         }
     }
 
+    /// Purges matching entries of `cache`. A locale prefix (`/de/about`) limits the purge to that
+    /// locale; an unprefixed target purges every locale.
     pub(crate) fn apply(&self, cache: &PageCache) -> usize {
-        cache.invalidate(|path| self.matches(path))
+        let (Self::Path(target) | Self::Prefix(target)) = self;
+        let (locale, rest) = cache.i18n.split(target);
+        let scoped = match self {
+            Self::Path(_) => Self::Path(rest.to_owned()),
+            Self::Prefix(_) => Self::Prefix(rest.to_owned()),
+        };
+        cache.invalidate(|path, entry| locale.is_none_or(|locale| locale == entry) && scoped.matches(path))
     }
 
     fn apply_all(&self) -> usize {
@@ -346,6 +367,24 @@ mod tests {
         }
         assert!(cached(&cache, "/about?#de"));
         assert_eq!(Target::Path("/about".into()).apply(&cache), 2);
+    }
+
+    #[test]
+    fn revalidating_a_prefixed_path_purges_that_locale() {
+        let locales = vec!["en".into(), "de".into()];
+        let i18n = I18nConfig { locales, default_locale: "en".into(), ..I18nConfig::default() };
+        let cache = PageCache { i18n, ..PageCache::new(1 << 20) };
+        for locale in ["en", "de"] {
+            for path in ["/about", "/blog/a"] {
+                cache.put(key(path, "", locale), &page(locale), None, cache.ticket());
+            }
+        }
+        assert_eq!(Target::Path("/de/about".into()).apply(&cache), 1);
+        assert!(cached(&cache, "/about?#en"));
+        assert_eq!(Target::Path("/EN/blog/[slug]".into()).apply(&cache), 1);
+        assert!(cached(&cache, "/blog/a?#de"));
+        assert_eq!(Target::Prefix("/de".into()).apply(&cache), 1);
+        assert!(cached(&cache, "/about?#en"));
     }
 
     #[test]

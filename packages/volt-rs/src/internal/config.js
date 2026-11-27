@@ -53,8 +53,10 @@ export function splitLocale(pathname) {
 
 /** App path of a route path in `locale`: prefixed unless it is the default locale. */
 export function localizePath(path, locale) {
-  if (!LOCALES.length || !locale || locale === DEFAULT_LOCALE) return path;
-  return path === "/" || path === "" ? `/${locale}` : `/${locale}${path}`;
+  // Collapsing leading slashes keeps `/en//host` from turning into the protocol-relative `//host`.
+  const local = `/${path.replace(/^[/\\]+/, "")}`;
+  if (!LOCALES.length || !locale || locale === DEFAULT_LOCALE) return local;
+  return local === "/" ? `/${locale}` : `/${locale}${local}`;
 }
 
 /**

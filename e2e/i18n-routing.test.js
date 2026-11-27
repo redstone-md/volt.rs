@@ -34,6 +34,40 @@ await check("the default locale prefix redirects to the unprefixed URL", async (
   assert.equal((await get("/DE/about")).headers.get("location"), "/de/about");
 });
 
+await check("the default locale prefix never redirects to another host", async () => {
+  for (const [path, location] of [
+    ["/en//evil.com", "/evil.com"],
+    ["/EN//evil.com/x?y=1", "/evil.com/x?y=1"],
+    ["/en/\\evil.com", "/evil.com"],
+    ["/de//evil.com", "/de/evil.com"],
+  ]) {
+    const response = await get(path);
+    assert.equal(response.status, 308, path);
+    assert.equal(response.headers.get("location"), location, path);
+  }
+});
+
+await check("redirects to API routes and public files keep their path", async () => {
+  for (const prefix of ["", "/de"]) {
+    assert.equal((await get(`${prefix}/to-file`)).headers.get("location"), "/file.txt", prefix);
+    assert.equal((await get(`${prefix}/to-api`)).headers.get("location"), "/api/ping?x=1", prefix);
+  }
+  assert.equal(await (await get("/file.txt")).text(), "a public file\n");
+  assert.equal(await (await get("/de/file.txt")).text(), "a public file\n", "localized links still resolve");
+  assert.equal(await (await get("/de/api/ping")).text(), "pong:de");
+  assert.equal(await (await get("/api/ping")).text(), "pong:en");
+});
+
+await check("[[redirects]] apply below every locale prefix unless locale = false", async () => {
+  const plain = await get("/legacy-old");
+  assert.equal(plain.status, 307);
+  assert.equal(plain.headers.get("location"), "/about");
+  assert.equal((await get("/de/legacy-old")).headers.get("location"), "/de/about");
+  assert.equal((await get("/en/legacy-old")).headers.get("location"), "/about");
+  assert.equal((await get("/de/full-path")).headers.get("location"), "/blog/hello");
+  assert.equal((await get("/full-path")).status, 404);
+});
+
 await check("prefixed routes render with the locale on the server", async () => {
   const html = await (await get("/de/about")).text();
   assert.match(html, /<html lang="de"/);

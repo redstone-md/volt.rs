@@ -159,7 +159,7 @@ export function pagesRouter(router, state) {
     reload: () => location.reload(),
     back: () => router.back(),
     forward: () => router.forward(),
-    prefetch: (url, as) => Promise.resolve(router.prefetch(resolveHref(url, as))),
+    prefetch: (url, as, options) => Promise.resolve(router.prefetch(resolveHref(url, as), options)),
     beforePopState: (callback) => router.beforePopState(callback),
   };
 }

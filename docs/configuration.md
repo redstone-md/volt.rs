@@ -52,6 +52,7 @@ locale_detection = true           # redirect `/` by the locale cookie or Accept-
 source = "/old-blog/[slug]"
 destination = "/blog/[slug]"
 permanent = true
+locale = true                     # with [i18n]: also match below locale prefixes (false: full path only)
 
 [[rewrites]]
 source = "/docs"
@@ -64,7 +65,7 @@ Unknown keys are rejected, so typos fail loudly.
 
 `base_path` and `trailing_slash` are applied to routing, links, assets, redirects, the sitemap and `volt export`; see [static generation](static-generation.md#base-path-and-trailing-slashes). Redirect and rewrite sources and destinations are written without the base path.
 
-`[i18n]` serves the default locale unprefixed and every other locale under `/<locale>/...`; see [internationalized routing](i18n.md). `default_locale` must be one of `locales`. Rewrites apply to the path below the locale prefix; redirects match the full path. Without `[i18n]`, `[site] language` is the locale reported by `useLocale()` and `ctx.locale()`.
+`[i18n]` serves the default locale unprefixed and every other locale under `/<locale>/...`; see [internationalized routing](i18n.md). `default_locale` must be one of `locales`, and no locale may be listed twice (case-insensitively). Rewrites apply to the path below the locale prefix. Redirects match below every locale prefix and keep the locale in the destination; `locale = false` on a rule matches the full path instead. Without `[i18n]`, `[site] language` is the locale reported by `useLocale()` and `ctx.locale()`.
 
 ## Environment variables
 

@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::app::Prerendered;
-use crate::assets::{StaticAssets, compressible, serve_public};
+use crate::assets::{StaticAssets, compressible, safe_join, serve_public};
 use crate::cache::{self, CachedPage, Lookup, PageCache};
 use crate::config::Config;
 use crate::context::{Ctx, RequestParts, State};
@@ -281,7 +281,7 @@ impl Server {
         let server = Arc::new(Self {
             #[cfg(feature = "images")]
             images,
-            cache: PageCache::shared(config.server.page_cache_mb * 1024 * 1024),
+            cache: PageCache::shared(config.server.page_cache_mb * 1024 * 1024, config.i18n.clone()),
             hub: dev.then(Hub::default),
             bots,
             config: Arc::new(config),
@@ -429,8 +429,9 @@ impl Server {
         }
         let ctx = &ctx.with_locale(prefix.unwrap_or(self.config.default_locale()));
         let path = self.rewrite(route_path);
-        // API routes, metadata files, public files and SEO files live outside the locale prefixes.
-        if prefix.is_none() {
+        // API routes, metadata files, public files and SEO files live outside the locale prefixes; below a prefix
+        // they still answer when no page matches, so a localized link to `/api/x` or `/file.pdf` works.
+        if prefix.is_none() || self.current().entry(&path).is_none() {
             if let Some(response) = self.api(ctx, &path).await {
                 return response.into();
             }
@@ -538,12 +539,51 @@ impl Server {
         }
     }
 
+    /// Applies the first matching `[[redirects]]` rule. Rules match below every locale prefix
+    /// (unless `locale = false`) and send a prefixed request to the same locale's destination.
     fn redirect(&self, path: &str) -> Option<Response> {
+        let (prefix, route_path) = self.config.i18n.split(path);
         self.config.redirects.iter().find_map(|rule| {
-            let params = RoutePattern::parse(&rule.source).matches(path)?;
+            let localized = rule.locale && self.config.i18n.is_enabled();
+            let params = RoutePattern::parse(&rule.source).matches(if localized { route_path } else { path })?;
+            let mut destination = fill(&rule.destination, &params);
+            if let Some(locale) = prefix.filter(|_| localized) {
+                destination = self.localize_location(locale, &destination);
+            }
             let status = if rule.permanent { StatusCode::PERMANENT_REDIRECT } else { StatusCode::TEMPORARY_REDIRECT };
-            Some(Response::redirect(status, &fill(&rule.destination, &params)))
+            Some(Response::redirect(status, &destination))
         })
+    }
+
+    /// Redirect target `href` in `locale`. Targets served outside the locale prefixes (API routes,
+    /// public files, SEO files) keep their path, so a German page can still redirect to `/api/logout`.
+    fn localize_location(&self, locale: &str, href: &str) -> String {
+        let path = &href[..href.find(['?', '#']).unwrap_or(href.len())];
+        if href.starts_with('/') && self.unlocalized(&self.rewrite(path)) {
+            return href.to_owned();
+        }
+        self.config.i18n.localize_href(locale, href)
+    }
+
+    /// Whether an app path names an API route, a public file or an SEO file rather than a page.
+    fn unlocalized(&self, path: &str) -> bool {
+        self.apis.values().any(|router| router.find(path).is_some())
+            || safe_join(&self.config.public_dir(), path).is_some_and(|file| file.is_file())
+            || self.current().metadata.contains(path)
+            || self.serves_seo(path)
+    }
+
+    /// Whether an SEO file is enabled in `[seo]` or built from a code metadata route.
+    fn serves_seo(&self, path: &str) -> bool {
+        let seo = &self.config.seo;
+        let source = self.seo_source(path).is_some();
+        match path {
+            "/robots.txt" => seo.robots || source,
+            "/sitemap.xml" => seo.sitemap || source,
+            "/llms.txt" => seo.llms,
+            "/manifest.webmanifest" => source,
+            _ => false,
+        }
     }
 
     fn rewrite(&self, path: &str) -> String {
@@ -626,7 +666,7 @@ impl Server {
             Err(error) => error,
         };
         if let ErrorKind::Redirect(location) = error.kind() {
-            return Response::redirect(StatusCode::SEE_OTHER, &self.config.i18n.localize_href(ctx.locale(), location));
+            return Response::redirect(StatusCode::SEE_OTHER, &self.localize_location(ctx.locale(), location));
         }
         if error.status().is_server_error() {
             log::error(&format!("action `{name}` failed: {}", error.message()));
@@ -751,18 +791,10 @@ impl Server {
 
     /// Renders an SEO file, with `Some(revalidate)` when the output may be shared with every visitor.
     async fn render_seo(&self, ctx: &Ctx, path: &str) -> Option<Result<(Response, Option<Option<u64>>)>> {
-        let seo = &self.config.seo;
-        let source = self.seo_source(path);
-        let enabled = match path {
-            "/robots.txt" => seo.robots || source.is_some(),
-            "/sitemap.xml" => seo.sitemap || source.is_some(),
-            "/llms.txt" => seo.llms,
-            "/manifest.webmanifest" => source.is_some(),
-            _ => false,
-        };
-        if !enabled {
+        if !self.serves_seo(path) {
             return None;
         }
+        let source = self.seo_source(path);
         let output = match source {
             Some(route) => match self.metadata_route(route).await {
                 Ok(output) => Some(output),
@@ -1035,7 +1067,7 @@ impl Server {
             Ok(state) => state,
             Err(error) => match error.kind() {
                 ErrorKind::Redirect(location) => {
-                    return Resolved::Redirect(error.status(), self.config.i18n.localize_href(ctx.locale(), location));
+                    return Resolved::Redirect(error.status(), self.localize_location(ctx.locale(), location));
                 }
                 _ => self.failure_state(path, search, &error),
             },
@@ -1284,7 +1316,7 @@ impl Server {
     fn assemble(&self, build: &Build, state: &PageState, rendered: Rendered, output: Output) -> Result<Page> {
         if let Some(redirect) = rendered.redirect {
             let status = StatusCode::from_u16(redirect.status).unwrap_or(StatusCode::TEMPORARY_REDIRECT);
-            let location = self.config.i18n.localize_href(&state.locale, &redirect.location);
+            let location = self.localize_location(&state.locale, &redirect.location);
             return Ok(Response::redirect(status, &location).into());
         }
         let mut state = state.clone();

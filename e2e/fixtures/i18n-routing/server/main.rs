@@ -17,6 +17,21 @@ async fn old(_ctx: Ctx) -> Result<()> {
     Err(redirect("/about"))
 }
 
+#[loader("/to-file")]
+async fn to_file(_ctx: Ctx) -> Result<()> {
+    Err(redirect("/file.txt"))
+}
+
+#[loader("/to-api")]
+async fn to_api(_ctx: Ctx) -> Result<()> {
+    Err(redirect("/api/ping?x=1"))
+}
+
+#[get("/api/ping")]
+async fn ping(ctx: Ctx) -> String {
+    format!("pong:{}", ctx.locale())
+}
+
 #[model]
 struct Echo {
     text: String,

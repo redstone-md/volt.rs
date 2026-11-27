@@ -39,6 +39,11 @@ impl MetadataAssets {
         assets
     }
 
+    /// Whether a metadata file is served at `path`.
+    pub fn contains(&self, path: &str) -> bool {
+        self.routes.find(path).is_some()
+    }
+
     /// Answers a request for a metadata file. Head tags link `?<hash>` URLs, which never change; plain URLs
     /// (`/favicon.ico`, `/robots.txt`) revalidate with an ETag.
     pub fn serve(&self, path: &str, query: Option<&str>, headers: &HeaderMap) -> Option<Response> {

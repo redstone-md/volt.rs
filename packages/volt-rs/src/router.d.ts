@@ -47,7 +47,7 @@ export interface NextRouter {
   reload(): void;
   back(): void;
   forward(): void;
-  prefetch(url: Url, as?: Url): Promise<void>;
+  prefetch(url: Url, as?: Url, options?: { locale?: string | false }): Promise<void>;
   beforePopState(callback: (state: { url: string; as: string; options: TransitionOptions }) => boolean): void;
 }
 

@@ -5,3 +5,12 @@ url = "https://example.com"
 [i18n]
 locales = ["en", "de"]
 default_locale = "en"
+
+[[redirects]]
+source = "/legacy-old"
+destination = "/about"
+
+[[redirects]]
+source = "/de/full-path"
+destination = "/blog/hello"
+locale = false

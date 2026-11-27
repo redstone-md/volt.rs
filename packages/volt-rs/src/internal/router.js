@@ -407,6 +407,17 @@ export function localize(href, locale, current) {
 /** Route path of an app path, without its locale prefix. */
 const routePath = (path) => splitLocale(path).path;
 
+/**
+ * Whether a revalidation hint covers an app path. A prefixed hint (`/de/about`) covers only that
+ * locale; an unprefixed one covers every locale.
+ */
+function hints(hint, pathname) {
+  if (hint === "*") return true;
+  const want = splitLocale(hint);
+  const page = splitLocale(pathname);
+  return (!want.locale || want.locale === (page.locale ?? DEFAULT_LOCALE)) && matchPath(want.path, page.path);
+}
+
 /** Resolves an app href to a URL and its app path (`null` when it is not part of this app). */
 function locate(href) {
   const url = new URL(withBase(href), location.href);
@@ -624,7 +635,7 @@ export function App({ routes, shells = {}, initial }) {
 
   const revalidate = useCallback(
     async (paths, { refresh = true } = {}) => {
-      const hit = (pathname) => paths.some((path) => path === "*" || matchPath(path, routePath(pathname)));
+      const hit = (pathname) => paths.some((path) => hints(path, pathname));
       for (const key of [...cache.current.keys()]) if (hit(key.split(/[? ]/)[0])) cache.current.delete(key);
       const current = stripBase(location.pathname);
       if (!refresh || current === null || !hit(current)) return false;
