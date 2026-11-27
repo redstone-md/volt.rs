@@ -6,10 +6,11 @@ export const BASE_PATH = process.env.__VOLT_BASE_PATH__ ?? "";
 export const TRAILING_SLASH = process.env.__VOLT_TRAILING_SLASH__ === true;
 /** Whether `/_volt/image` is available (`[images] optimize`, and not a static export). */
 export const IMAGE_OPTIMIZATION = process.env.__VOLT_IMAGE_OPTIMIZATION__ !== false;
-/** `[images]` widths, remote patterns and SVG policy, so `<Image>` only requests what the optimizer accepts. */
+/** `[images]` widths, qualities, remote patterns and SVG policy, so `<Image>` only requests what the optimizer accepts. */
 export const IMAGES = process.env.__VOLT_IMAGES__ ?? {
   deviceSizes: [640, 750, 828, 1080, 1200, 1920, 2048, 3840],
   imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
+  qualities: [75],
   remotePatterns: [],
   dangerouslyAllowSVG: false,
 };

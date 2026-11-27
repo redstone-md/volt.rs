@@ -8,8 +8,15 @@ export const DEVICE_SIZES = IMAGES.deviceSizes;
 export const IMAGE_SIZES = IMAGES.imageSizes;
 const ALL_SIZES = [...new Set([...IMAGE_SIZES, ...DEVICE_SIZES])].sort((a, b) => a - b);
 
+/** `[images] qualities`. */
+export const IMAGE_QUALITIES = IMAGES.qualities;
+
+/** The configured quality closest to `quality`, the lower one on a tie, as the optimizer refuses any other. */
+const closestQuality = (quality) =>
+  IMAGE_QUALITIES.reduce((best, q) => (Math.abs(q - quality) < Math.abs(best - quality) ? q : best));
+
 export function defaultLoader({ src, width, quality }) {
-  return endpoint(`/_volt/image?url=${encodeURIComponent(src)}&w=${width}&q=${quality ?? 75}`);
+  return endpoint(`/_volt/image?url=${encodeURIComponent(src)}&w=${width}&q=${closestQuality(quality ?? 75)}`);
 }
 
 // Static imports already carry the base path; plain `public/` paths get it here.
@@ -29,15 +36,30 @@ function parseRemote(src) {
   if (!hostname || !/^[a-z0-9._-]+$/i.test(hostname)) return null;
   if (port !== null && !/^\d{1,5}$/.test(port)) return null;
   const pathname = match[3] || "/";
-  if (pathname.split("/").some((segment) => segment === "." || segment === "..")) return null;
+  // Encoded dot segments and slashes are normalized by many origins, which would step outside a pathname pattern.
+  const lower = pathname.toLowerCase();
+  if (lower.includes("%2f") || lower.includes("%5c")) return null;
+  if (lower.split("/").some((segment) => /^(\.|%2e){1,2}$/.test(segment))) return null;
   const search = match[4] && match[4] !== "?" ? match[4] : "";
   return { protocol: match[1].toLowerCase(), hostname: hostname.toLowerCase(), port: port === null ? null : Number(port), pathname, search };
 }
 
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
+const globs = new Map();
+
 /** `**` spans separators, `*` stays within one part (a label of a host name, a segment of a path). */
 function globMatch(pattern, text, separator) {
+  const key = `${separator}${pattern}`;
+  let regex = globs.get(key);
+  if (!regex) {
+    regex = globRegExp(pattern, separator);
+    globs.set(key, regex);
+  }
+  return regex.test(text);
+}
+
+function globRegExp(pattern, separator) {
   let source = "^";
   for (let i = 0; i < pattern.length; i++) {
     if (pattern[i] === "*" && pattern[i + 1] === "*") {
@@ -46,7 +68,7 @@ function globMatch(pattern, text, separator) {
     } else if (pattern[i] === "*") source += `[^${escapeRegExp(separator)}]*`;
     else source += escapeRegExp(pattern[i]);
   }
-  return new RegExp(`${source}$`).test(text);
+  return new RegExp(`${source}$`);
 }
 
 function matchesPattern(pattern, url) {

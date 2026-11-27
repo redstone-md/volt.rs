@@ -79,9 +79,8 @@ impl Limits {
         Ok(())
     }
 
-    /// Decodes with the EXIF orientation applied.
+    /// Decodes with the EXIF orientation applied. Callers run [`Limits::check`] first.
     fn decode(&self, bytes: &[u8]) -> Result<DynamicImage> {
-        self.check(bytes)?;
         let mut decoder = self.reader(bytes)?.into_decoder().map_err(|e| Error::bad_request(e.to_string()))?;
         let orientation = decoder.orientation().map_err(|e| Error::bad_request(e.to_string()))?;
         let mut image = DynamicImage::from_decoder(decoder).map_err(|e| Error::bad_request(e.to_string()))?;
@@ -233,6 +232,7 @@ pub fn blur_placeholder(bytes: &[u8]) -> Option<BlurPlaceholder> {
         return None;
     }
     let limits = Limits { max_pixels: 100_000_000, max_dimension: 20_000 };
+    limits.check(bytes).ok()?;
     let image = limits.decode(bytes).ok()?.thumbnail(BLUR_SIZE, BLUR_SIZE);
     let mut out = Cursor::new(Vec::new());
     image.write_to(&mut out, ImageFormat::Png).ok()?;

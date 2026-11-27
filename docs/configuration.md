@@ -44,6 +44,7 @@ concurrency = 0                   # parallel resize jobs, 0 = number of CPUs
 formats = ["image/webp"]          # by preference, negotiated with Accept; add "image/avif"
 device_sizes = [640, 750, 828, 1080, 1200, 1920, 2048, 3840]
 image_sizes = [16, 32, 48, 64, 96, 128, 256, 384]
+qualities = [75]                  # the only `q` values /_volt/image accepts
 minimum_cache_ttl = 14400         # seconds a remote original is reused
 dangerously_allow_svg = false     # serve SVG through /_volt/image
 dangerously_allow_local_ip = false  # let remote hosts resolve to private addresses
@@ -78,7 +79,7 @@ destination = "/docs/introduction"
 
 Unknown keys are rejected, so typos fail loudly.
 
-`[images]` is described in [Styling and assets](styling.md#images). `device_sizes` and `image_sizes` are inlined into the client bundle, so `<Image>` and `/_volt/image` always agree on the accepted widths; an unknown format, a width outside 1 to 10000 or a remote pattern with another protocol than `http` or `https` fails the build and the server start.
+`[images]` is described in [Styling and assets](styling.md#images). `device_sizes`, `image_sizes` and `qualities` are inlined into the client bundle, so `<Image>` and `/_volt/image` always agree on the accepted widths and qualities; an unknown format, a width outside 1 to 10000, a quality outside 1 to 100, an empty `qualities` list or a remote pattern with another protocol than `http` or `https` fails the build and the server start.
 
 `[server] streaming` and `bots` are described in [Loading UI and streaming](routing.md#loading-ui-and-streaming). The default `bots` pattern above covers the common search engine crawlers and link-preview fetchers (Googlebot, Bingbot, Slurp, facebookexternalhit, Twitterbot, Slackbot, WhatsApp, Lighthouse and others). Setting `bots` replaces it rather than adding to it, so extend the default when you only need one more agent; an empty string streams to every client. An invalid pattern fails `volt build` and the server start.
 

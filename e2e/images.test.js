@@ -11,9 +11,16 @@ const png = readFileSync(join(here, "fixtures", "images", "remote.png"));
 
 // Stand-in for an image CDN; `[images] remote_patterns` allows http://127.0.0.1/allowed/** only.
 const hits = [];
+const accepts = [];
+let avif = null;
 const cdn = createServer((request, response) => {
   hits.push(request.url);
-  if (request.url === "/allowed/redirect") {
+  accepts.push(request.headers.accept ?? "");
+  // Negotiates like Cloudinary f_auto or imgix auto=format: AVIF to anyone who lists it.
+  const negotiated = request.url === "/allowed/negotiate.png" && /image\/avif/.test(request.headers.accept ?? "");
+  if (negotiated || request.url === "/allowed/always.avif") {
+    response.writeHead(200, { "content-type": "image/avif" }).end(avif);
+  } else if (request.url === "/allowed/redirect") {
     response.writeHead(302, { location: "/blocked/pic.png" }).end();
   } else if (request.url === "/allowed/page.html") {
     response.writeHead(200, { "content-type": "text/html" }).end("<p>not an image</p>");
@@ -44,6 +51,7 @@ await check("local images get a srcset from the configured sizes", async () => {
   assert.ok(!responsive.includes("w=256"), "sizes=50vw drops widths below half the smallest device size");
   assert.equal(await attr("responsive", "sizes"), "50vw");
   assert.match(await attr("quality", "srcset"), /w=64&q=40 1x, .*w=128&q=40 2x/);
+  assert.match(await attr("rounded", "srcset"), /w=64&q=40 1x/, "quality is rounded to the closest of images.qualities");
 });
 
 await check("props: fill, overrideSrc, unoptimized, loader, svg", async () => {
@@ -89,8 +97,12 @@ await check("variants are cached per format and revalidate with ETag", async () 
   assert.match(again.headers.get("content-disposition"), /^inline; filename="graphic\.avif"$/);
 });
 
-await check("rejects unknown widths, SVG and decompression bombs", async () => {
+await check("rejects unknown widths and qualities, SVG and decompression bombs", async () => {
   assert.equal((await image("/graphic.png", 100)).status, 400);
+  const quality = await fetch(`${base}/_volt/image?url=%2Fgraphic.png&w=64&q=61`);
+  assert.equal(quality.status, 400);
+  assert.match(await quality.text(), /images\.qualities/);
+  assert.equal((await fetch(`${base}/_volt/image?url=%2Fgraphic.png&w=64&q=40`)).status, 200);
   const svg = await image("/logo.svg", 64);
   assert.equal(svg.status, 400);
   const huge = await image("/huge.png", 64);
@@ -122,6 +134,37 @@ await check("remote images: allowed patterns are fetched, others refused", async
   const notImage = await image(`${origin}/allowed/page.html`, 64);
   assert.equal(notImage.status, 400);
   assert.ok(!hits.includes("/blocked/pic.png"), "blocked URLs are never requested");
+
+  const dotted = await image(`${origin}/allowed/%2e%2e/blocked/pic.png`, 64);
+  assert.equal(dotted.status, 400, "encoded dot segments cannot leave the pathname pattern");
+  assert.equal((await image(`${origin}/allowed/.%2E/blocked/pic.png`, 64)).status, 400);
+  assert.equal((await image(`${origin}/allowed/..%2fblocked/pic.png`, 64)).status, 400);
+  assert.ok(!hits.some((hit) => hit.includes("blocked")), "blocked URLs are never requested");
+});
+
+await check("remote origins that negotiate formats are asked for decodable ones", async () => {
+  avif = Buffer.from(await (await image("/graphic.png", 64, "image/avif")).arrayBuffer());
+  const negotiated = await image(`${origin}/allowed/negotiate.png`, 64, "image/webp,*/*");
+  assert.equal(negotiated.status, 200);
+  // The PNG original was resized: WebP, or PNG when the lossless WebP comes out larger.
+  assert.match(negotiated.headers.get("content-type"), /^image\/(webp|png)$/);
+  assert.ok(accepts.every((accept) => !accept.includes("image/avif")), accepts.join(" | "));
+
+  const refused = await image(`${origin}/allowed/always.avif`, 64, "image/webp,*/*");
+  assert.equal(refused.status, 406, "AVIF originals are not sent to clients without AVIF support");
+  const served = await image(`${origin}/allowed/always.avif`, 64, "image/avif,image/webp");
+  assert.equal(served.status, 200);
+  assert.equal(served.headers.get("content-type"), "image/avif");
+});
+
+await check("concurrent requests for one remote image fetch and encode it once", async () => {
+  const responses = await Promise.all(
+    Array.from({ length: 10 }, () => image(`${origin}/allowed/concurrent.png`, 64, "image/webp")),
+  );
+  assert.deepEqual(new Set(responses.map((response) => response.status)), new Set([200]));
+  assert.equal(hits.filter((hit) => hit === "/allowed/concurrent.png").length, 1);
+  const misses = responses.filter((response) => response.headers.get("x-volt-cache") === "MISS");
+  assert.equal(misses.length, 1, "one request encodes, the others read its result");
 });
 
 await check("static imports carry a blur placeholder", async () => {

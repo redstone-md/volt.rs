@@ -3,13 +3,15 @@
 mod codec;
 mod remote;
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedMutexGuard, Semaphore};
 
 pub use codec::{BlurPlaceholder, blur_placeholder};
 use codec::{Limits, Target, Transform};
@@ -32,6 +34,9 @@ pub struct Images {
     static_dir: PathBuf,
     cache: PathBuf,
     permits: Semaphore,
+    /// AVIF encodes take seconds, so they get at most half of `permits` and cannot starve the other formats.
+    avif_permits: Semaphore,
+    flights: Flights,
     remote: Option<Remote>,
 }
 
@@ -59,6 +64,8 @@ impl Images {
             static_dir: out_dir.join("static"),
             cache: out_dir.join("cache").join("images"),
             permits: Semaphore::new(concurrency.max(1)),
+            avif_permits: Semaphore::new((concurrency / 2).max(1)),
+            flights: Flights::default(),
             remote,
         })
     }
@@ -68,13 +75,14 @@ impl Images {
         let get = |key: &str| pairs.iter().find(|(k, _)| k == key).and_then(|(_, v)| v.first()).map(String::as_str);
         let url = get("url").ok_or_else(|| Error::bad_request("missing `url`"))?;
         let width: u32 = get("w").and_then(|w| w.parse().ok()).ok_or_else(|| Error::bad_request("missing `w`"))?;
-        let quality: u8 =
-            get("q").map_or(Some(75), |q| q.parse().ok()).ok_or_else(|| Error::bad_request("invalid `q`"))?;
+        let quality: u8 = get("q")
+            .map_or(Some(self.config.closest_quality(75)), |q| q.parse().ok())
+            .ok_or_else(|| Error::bad_request("invalid `q`"))?;
         if !self.widths.contains(&width) {
             return Err(Error::bad_request(format!("`w` must be one of {:?}", self.widths)));
         }
-        if !(1..=100).contains(&quality) {
-            return Err(Error::bad_request("`q` must be between 1 and 100"));
+        if !self.config.qualities.contains(&quality) {
+            return Err(Error::bad_request(format!("`q` must be one of images.qualities {:?}", self.config.qualities)));
         }
         if url.starts_with("http://") || url.starts_with("https://") {
             let remote = RemoteUrl::parse(url).ok_or_else(|| Error::bad_request("invalid remote `url`"))?;
@@ -106,15 +114,21 @@ impl Images {
     /// The first configured format the client accepts. Only explicit types count, as browsers list the
     /// modern formats they decode and `*/*` says nothing about them.
     fn negotiate(&self, headers: &HeaderMap) -> Target {
-        let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).unwrap_or_default();
-        let accepted = |mime: &str| {
-            accept.split(',').any(|part| {
-                let mut pieces = part.split(';');
-                pieces.next().is_some_and(|t| t.trim().eq_ignore_ascii_case(mime))
-                    && !pieces.any(|p| p.trim().strip_prefix("q=").is_some_and(|q| q.trim().parse() == Ok(0.0)))
-            })
-        };
-        self.config.formats.iter().find(|f| accepted(f)).and_then(|f| Target::from_mime(f)).unwrap_or(Target::Source)
+        self.config
+            .formats
+            .iter()
+            .find(|f| accepts(headers, f))
+            .and_then(|f| Target::from_mime(f))
+            .unwrap_or(Target::Source)
+    }
+
+    /// Cache key of a variant. The policy settings are part of it, so tightening them in `volt.toml` does not
+    /// keep serving variants produced under the old rules.
+    fn variant_key(&self, path: &Path, modified: SystemTime, request: &Request, target: Target) -> String {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (path, modified, request.width, request.quality, target).hash(&mut hasher);
+        (self.config.dangerously_allow_svg, self.config.max_pixels, self.config.max_dimension).hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
     }
 
     async fn try_serve(&self, query: &str, headers: &HeaderMap) -> Result<Response> {
@@ -127,20 +141,36 @@ impl Images {
         };
         let modified = std::fs::metadata(&path)?.modified()?;
         let target = self.negotiate(headers);
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (&path, modified, request.width, request.quality, target).hash(&mut hasher);
-        let key = format!("{:016x}", hasher.finish());
+        let key = self.variant_key(&path, modified, &request, target);
         let cached = self.cache.join(&key);
         let etag = format!("\"{key}\"");
 
         let (body, hit) = match tokio::fs::read(&cached).await {
             Ok(body) => (body, true),
-            Err(_) => (self.optimize(&path, &request, target).await?, false),
+            Err(_) => {
+                // Concurrent requests for one variant wait for the first instead of encoding it again.
+                let _flight = self.flights.join(key.clone()).await;
+                match tokio::fs::read(&cached).await {
+                    Ok(body) => (body, true),
+                    Err(_) => {
+                        let body = self.optimize(&path, &request, target).await?;
+                        write_atomic(&cached, &body).await?;
+                        (body, false)
+                    }
+                }
+            }
         };
-        if !hit {
-            write_atomic(&cached, &body).await?;
-        }
         let content_type = codec::content_type(&body).unwrap_or("application/octet-stream");
+        if content_type == "image/svg+xml" && !self.config.dangerously_allow_svg {
+            return Err(svg_refused());
+        }
+        // AVIF sources pass through unresized; a client that did not ask for AVIF may not be able to show them.
+        if content_type == "image/avif" && !accepts(headers, "image/avif") {
+            return Err(Error::new(
+                StatusCode::NOT_ACCEPTABLE,
+                "the source is AVIF, which this build cannot convert, and the request does not accept image/avif",
+            ));
+        }
         let cache_control = if remote {
             format!("public, max-age={}, stale-while-revalidate=604800", self.config.minimum_cache_ttl)
         } else {
@@ -170,9 +200,7 @@ impl Images {
         let source = tokio::fs::read(path).await?;
         if codec::is_svg(&source) {
             if !self.config.dangerously_allow_svg {
-                return Err(Error::bad_request(
-                    "SVG images are not optimized; set images.dangerously_allow_svg or use `unoptimized`",
-                ));
+                return Err(svg_refused());
             }
             return Ok(source);
         }
@@ -182,7 +210,12 @@ impl Images {
             target,
             limits: Limits { max_pixels: self.config.max_pixels, max_dimension: self.config.max_dimension },
         };
-        let _permit = self.permits.acquire().await.map_err(|_| Error::internal("image pool closed"))?;
+        let closed = |_| Error::internal("image pool closed");
+        let _avif = match target {
+            Target::Avif => Some(self.avif_permits.acquire().await.map_err(closed)?),
+            _ => None,
+        };
+        let _permit = self.permits.acquire().await.map_err(closed)?;
         tokio::task::spawn_blocking(move || transform.apply(source))
             .await
             .map_err(|e| Error::internal(e.to_string()))?
@@ -194,12 +227,16 @@ impl Images {
         let remote = self.remote.as_ref().ok_or_else(|| Error::bad_request("no remote images are allowed"))?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         url.href().hash(&mut hasher);
-        let path = self.cache.join("remote").join(format!("{:016x}", hasher.finish()));
-        let age = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok()
-            .map(|modified| SystemTime::now().duration_since(modified).unwrap_or_default());
-        if age.is_some_and(|age| age < Duration::from_secs(self.config.minimum_cache_ttl)) {
+        let key = format!("remote/{:016x}", hasher.finish());
+        let path = self.cache.join(&key);
+        let ttl = Duration::from_secs(self.config.minimum_cache_ttl);
+        if age(&path).is_some_and(|age| age < ttl) {
+            return Ok(path);
+        }
+        // One download per original: requests that waited here find the copy the first one stored.
+        let _flight = self.flights.join(key).await;
+        let age = age(&path);
+        if age.is_some_and(|age| age < ttl) {
             return Ok(path);
         }
         let fetched = remote.fetch(url, &self.config).await.and_then(|bytes| match codec::content_type(&bytes) {
@@ -216,6 +253,55 @@ impl Images {
                 Ok(path)
             }
             Err(error) => Err(error),
+        }
+    }
+}
+
+/// Time since a cached file was written, `None` when it does not exist.
+fn age(path: &Path) -> Option<Duration> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    Some(SystemTime::now().duration_since(modified).unwrap_or_default())
+}
+
+/// Whether `Accept` lists `mime` explicitly with a non-zero quality. `*/*` and `image/*` do not count, as browsers
+/// list the modern formats they decode.
+fn accepts(headers: &HeaderMap, mime: &str) -> bool {
+    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    accept.split(',').any(|part| {
+        let mut pieces = part.split(';');
+        pieces.next().is_some_and(|t| t.trim().eq_ignore_ascii_case(mime))
+            && !pieces.any(|p| p.trim().strip_prefix("q=").is_some_and(|q| q.trim().parse() == Ok(0.0)))
+    })
+}
+
+fn svg_refused() -> Error {
+    Error::bad_request("SVG images are not optimized; set images.dangerously_allow_svg or use `unoptimized`")
+}
+
+/// Per-key locks that let one request produce a file while concurrent requests for it wait.
+#[derive(Default)]
+struct Flights(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+impl Flights {
+    async fn join(&self, key: String) -> Flight<'_> {
+        let lock = self.0.lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_default().clone();
+        Flight { flights: self, key, guard: Some(lock.lock_owned().await) }
+    }
+}
+
+struct Flight<'a> {
+    flights: &'a Flights,
+    key: String,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let mut map = self.flights.0.lock().unwrap_or_else(|e| e.into_inner());
+        drop(self.guard.take());
+        // Nobody else holds or waits for the lock once the map owns the only reference.
+        if map.get(&self.key).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+            map.remove(&self.key);
         }
     }
 }
@@ -271,12 +357,44 @@ mod tests {
     }
 
     #[test]
+    fn keys_variants_by_policy() {
+        let open = images(&["image/webp"]);
+        let request = Request { source: Source::Local("/a.svg".into()), width: 64, quality: 75 };
+        let key =
+            |images: &Images| images.variant_key(Path::new("/a.svg"), SystemTime::UNIX_EPOCH, &request, Target::WebP);
+        let mut config = Config::default();
+        config.images.dangerously_allow_svg = true;
+        let svg = Images::new(&config, Path::new("/nonexistent"), 1).unwrap();
+        assert_ne!(key(&open), key(&svg));
+        assert_eq!(key(&open), key(&images(&["image/webp"])));
+    }
+
+    #[test]
+    fn accepts_only_explicit_types() {
+        assert!(accepts(&accept("image/avif,image/webp"), "image/avif"));
+        assert!(!accepts(&accept("image/webp,image/*,*/*"), "image/avif"));
+        assert!(!accepts(&accept("image/avif;q=0"), "image/avif"));
+    }
+
+    #[tokio::test]
+    async fn flights_wait_for_each_other_and_clean_up() {
+        let flights = Flights::default();
+        let first = flights.join("a".into()).await;
+        drop(flights.join("b".into()).await);
+        assert!(tokio::time::timeout(Duration::from_millis(50), flights.join("a".into())).await.is_err());
+        drop(first);
+        drop(flights.join("a".into()).await);
+        assert!(flights.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn validates_requests() {
         let images = images(&["image/webp"]);
         assert!(images.parse("url=%2Fa.png&w=100").is_err());
         assert!(images.parse("url=%2F%2Fevil.dev%2Fa.png&w=64").is_err());
         assert!(images.parse("url=https%3A%2F%2Fcdn.example.com%2Fa.png&w=64").is_err());
         assert!(images.parse("url=%2Fa.png&w=64&q=0").is_err());
+        assert!(images.parse("url=%2Fa.png&w=64&q=61").is_err());
         assert_eq!(stem(Some("my photo\"; x")), "myphotox");
         assert_eq!(stem(None), "image");
     }

@@ -61,6 +61,8 @@ export type ImgProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "width" | "heig
 export const DEVICE_SIZES: number[];
 /** `[images] image_sizes`. */
 export const IMAGE_SIZES: number[];
+/** `[images] qualities`; the default loader rounds `quality` to the closest. */
+export const IMAGE_QUALITIES: number[];
 export const defaultLoader: ImageLoader;
 /** Whether a remote URL is allowed by `[images] remote_patterns`. */
 export function isAllowedRemote(src: string): boolean;

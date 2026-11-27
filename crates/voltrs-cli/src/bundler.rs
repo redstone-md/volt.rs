@@ -190,6 +190,7 @@ fn image_settings(images: &voltrs::config::ImageConfig) -> String {
     serde_json::json!({
         "deviceSizes": images.device_sizes,
         "imageSizes": images.image_sizes,
+        "qualities": images.qualities,
         "remotePatterns": images.remote_patterns,
         "dangerouslyAllowSVG": images.dangerously_allow_svg,
     })

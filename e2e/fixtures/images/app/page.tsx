@@ -20,6 +20,7 @@ export default function Home() {
         placeholder="data:image/gif;base64,R0lGODlhAQABAAAAACw="
       />
       <Image id="quality" src="/photo.jpg" alt="Quality" width={64} height={48} quality={40} />
+      <Image id="rounded" src="/photo.jpg" alt="Rounded" width={64} height={48} quality={55} />
       <Image id="override" src="/photo.jpg" alt="Override" width={64} height={48} overrideSrc="/photo.jpg" />
       <Image id="unoptimized" src="/photo.jpg" alt="Unoptimized" width={64} height={48} unoptimized />
       <Image id="custom" src="/photo.jpg" alt="Custom" width={64} height={48} loader={cdn} />

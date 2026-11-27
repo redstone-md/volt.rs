@@ -15,6 +15,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::connect::dns::Name;
 use hyper_util::rt::TokioExecutor;
+use tokio::sync::Semaphore;
 
 use crate::config::{ImageConfig, RemoteUrl};
 use crate::error::{Error, Result};
@@ -22,14 +23,20 @@ use crate::error::{Error, Result};
 /// Largest remote original accepted.
 pub(super) const MAX_BYTES: usize = 20 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Budget for one request, from connecting until the whole body has arrived.
+/// Budget for a whole download, redirects included, from the first connection until the last body has arrived.
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 3;
+/// Downloads in flight at once, so distinct URLs cannot each buffer `MAX_BYTES` at the same time.
+const MAX_DOWNLOADS: usize = 8;
+/// Only formats the optimizer decodes: origins that negotiate (`f_auto`, `auto=format`) would otherwise answer
+/// AVIF, which is served unresized and only to clients that accept it.
+const ACCEPT: &str = "image/webp,image/png,image/jpeg,image/gif,image/*;q=0.5";
 
 /// HTTP(S) client that only reaches hosts allowed by `[images] remote_patterns`.
 pub(super) struct Remote {
     client: Client<HttpsConnector<HttpConnector<Resolver>>, Empty<Bytes>>,
     allow_local_ip: bool,
+    downloads: Semaphore,
 }
 
 impl Remote {
@@ -45,17 +52,23 @@ impl Remote {
             .enable_http2()
             .wrap_connector(http);
         let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).build(https);
-        Ok(Self { client, allow_local_ip })
+        Ok(Self { client, allow_local_ip, downloads: Semaphore::new(MAX_DOWNLOADS) })
     }
 
     /// Downloads an image, following redirects only to URLs that are allowed as well.
     pub(super) async fn fetch(&self, url: &RemoteUrl, config: &ImageConfig) -> Result<Vec<u8>> {
+        let _permit = self.downloads.acquire().await.map_err(|_| Error::internal("download pool closed"))?;
+        tokio::time::timeout(TIMEOUT, self.follow(url, config))
+            .await
+            .unwrap_or_else(|_| Err(gateway(format!("timed out fetching {}", url.href()))))
+    }
+
+    async fn follow(&self, url: &RemoteUrl, config: &ImageConfig) -> Result<Vec<u8>> {
         let mut current = url.clone();
         for _ in 0..=MAX_REDIRECTS {
-            match tokio::time::timeout(TIMEOUT, self.get(&current)).await {
-                Err(_) => return Err(gateway(format!("timed out fetching {}", current.href()))),
-                Ok(Ok(Fetched::Body(body))) => return Ok(body),
-                Ok(Ok(Fetched::Redirect(location))) => {
+            match self.get(&current).await {
+                Ok(Fetched::Body(body)) => return Ok(body),
+                Ok(Fetched::Redirect(location)) => {
                     let next = resolve(&current, &location)
                         .ok_or_else(|| gateway(format!("invalid redirect from {}", current.href())))?;
                     if !config.allows_remote(&next) {
@@ -67,7 +80,7 @@ impl Remote {
                     }
                     current = next;
                 }
-                Ok(Err(error)) => return Err(error),
+                Err(error) => return Err(error),
             }
         }
         Err(gateway(format!("too many redirects fetching {}", url.href())))
@@ -80,7 +93,7 @@ impl Remote {
         let uri: http::Uri = url.href().parse().map_err(|_| Error::bad_request("invalid remote URL"))?;
         let request = http::Request::get(uri)
             .header(header::USER_AGENT, HeaderValue::from_static("volt-image-optimizer"))
-            .header(header::ACCEPT, HeaderValue::from_static("image/avif,image/webp,image/*;q=0.8"))
+            .header(header::ACCEPT, HeaderValue::from_static(ACCEPT))
             .body(Empty::new())
             .map_err(|e| Error::internal(e.to_string()))?;
         let response = self.client.request(request).await.map_err(|e| gateway(format!("{}: {e}", url.href())))?;

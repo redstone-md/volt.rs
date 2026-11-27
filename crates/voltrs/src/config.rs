@@ -179,6 +179,9 @@ pub struct ImageConfig {
     pub device_sizes: Vec<u32>,
     /// Widths of `srcset` candidates for fixed-size images; joined with `device_sizes`.
     pub image_sizes: Vec<u32>,
+    /// Qualities `/_volt/image` accepts; `<Image quality>` is rounded to the closest. Every other value is
+    /// refused, so a client cannot fill the cache or the encoders by varying `q`.
+    pub qualities: Vec<u8>,
     /// Remote URLs the optimizer may fetch; anything else is refused.
     pub remote_patterns: Vec<RemotePattern>,
     /// Seconds a fetched remote original is reused before it is downloaded again, and the `max-age` of
@@ -209,6 +212,7 @@ impl Default for ImageConfig {
             formats: vec!["image/webp".into()],
             device_sizes: vec![640, 750, 828, 1080, 1200, 1920, 2048, 3840],
             image_sizes: vec![16, 32, 48, 64, 96, 128, 256, 384],
+            qualities: vec![75],
             remote_patterns: Vec::new(),
             minimum_cache_ttl: 14_400,
             dangerously_allow_svg: false,
@@ -230,6 +234,11 @@ impl ImageConfig {
         widths
     }
 
+    /// The accepted quality closest to `requested`, preferring the lower one on a tie as Next.js does.
+    pub fn closest_quality(&self, requested: u8) -> u8 {
+        self.qualities.iter().copied().min_by_key(|q| q.abs_diff(requested)).unwrap_or(75)
+    }
+
     /// Whether a remote URL matches one of `remote_patterns`.
     pub fn allows_remote(&self, url: &RemoteUrl) -> bool {
         self.remote_patterns.iter().any(|pattern| pattern.matches(url))
@@ -248,6 +257,14 @@ impl ImageConfig {
         }
         if self.device_sizes.is_empty() {
             return Err("images.device_sizes must list at least one width".into());
+        }
+        if let Some(bad) = self.qualities.iter().find(|q| !(1..=100).contains(*q)) {
+            return Err(format!("images.qualities: {bad} is not a quality between 1 and 100"));
+        }
+        self.qualities.sort_unstable();
+        self.qualities.dedup();
+        if self.qualities.is_empty() {
+            return Err("images.qualities must list at least one quality".into());
         }
         if !matches!(self.content_disposition_type.as_str(), "inline" | "attachment") {
             return Err("images.content_disposition_type must be `inline` or `attachment`".into());
@@ -301,8 +318,8 @@ impl RemotePattern {
     pub fn matches(&self, url: &RemoteUrl) -> bool {
         self.protocol.as_deref().is_none_or(|p| p == url.protocol)
             && self.port.is_none_or(|p| Some(p) == url.port)
-            && glob_match(&self.hostname, &url.hostname, '.')
-            && glob_match(self.pathname.as_deref().unwrap_or("**"), &url.pathname, '/')
+            && glob_match(&self.hostname, &url.hostname, b'.')
+            && glob_match(self.pathname.as_deref().unwrap_or("**"), &url.pathname, b'/')
             && self.search.as_deref().is_none_or(|s| s == url.search)
     }
 }
@@ -319,8 +336,9 @@ pub struct RemoteUrl {
 }
 
 impl RemoteUrl {
-    /// Parses `http(s)://host[:port]/path?query`. Credentials, IPv6 literals, backslashes and dot segments are
-    /// rejected, so the URL that was matched is exactly the one fetched.
+    /// Parses `http(s)://host[:port]/path?query`. Credentials, IPv6 literals, backslashes, dot segments (also
+    /// percent-encoded, which WHATWG parsers and many servers normalize) and encoded slashes are rejected, so the
+    /// path that was matched is the one the origin serves.
     pub fn parse(url: &str) -> Option<Self> {
         let (protocol, rest) = url.split_once("://")?;
         let protocol = protocol.to_ascii_lowercase();
@@ -340,7 +358,11 @@ impl RemoteUrl {
             return None;
         }
         let (pathname, search) = tail.split_at(tail.find('?').unwrap_or(tail.len()));
-        if pathname.split('/').any(|segment| matches!(segment, "." | "..")) {
+        let lower = pathname.to_ascii_lowercase();
+        if lower.contains("%2f") || lower.contains("%5c") {
+            return None;
+        }
+        if lower.split('/').any(|segment| matches!(segment.replace("%2e", ".").as_str(), "." | "..")) {
             return None;
         }
         Some(Self {
@@ -359,24 +381,35 @@ impl RemoteUrl {
     }
 }
 
-/// Glob match where `**` spans separators and `*` stays within one part.
-fn glob_match(pattern: &str, text: &str, separator: char) -> bool {
-    let mut expression = String::from("^");
-    let mut rest = pattern;
-    while let Some(c) = rest.chars().next() {
-        if let Some(tail) = rest.strip_prefix("**") {
-            expression.push_str(".*");
-            rest = tail;
-        } else if let Some(tail) = rest.strip_prefix('*') {
-            expression.push_str(&format!("[^{}]*", regex::escape(&separator.to_string())));
-            rest = tail;
+/// Glob match where `**` spans separators and `*` stays within one part. Runs in O(pattern x text) without
+/// compiling anything, as it is evaluated for every remote image request.
+fn glob_match(pattern: &str, text: &str, separator: u8) -> bool {
+    let text = text.as_bytes();
+    // `matched[j]`: the pattern consumed so far matches `text[..j]`.
+    let mut matched = vec![false; text.len() + 1];
+    matched[0] = true;
+    let mut rest = pattern.as_bytes();
+    while let Some(&first) = rest.first() {
+        let mut next = vec![false; text.len() + 1];
+        if rest.starts_with(b"**") {
+            for j in 0..=text.len() {
+                next[j] = matched[j] || (j > 0 && next[j - 1]);
+            }
+            rest = &rest[2..];
+        } else if first == b'*' {
+            for j in 0..=text.len() {
+                next[j] = matched[j] || (j > 0 && next[j - 1] && text[j - 1] != separator);
+            }
+            rest = &rest[1..];
         } else {
-            expression.push_str(&regex::escape(&c.to_string()));
-            rest = &rest[c.len_utf8()..];
+            for j in 0..text.len() {
+                next[j + 1] = matched[j] && text[j] == first;
+            }
+            rest = &rest[1..];
         }
+        matched = next;
     }
-    expression.push('$');
-    regex::Regex::new(&expression).is_ok_and(|re| re.is_match(text))
+    matched[text.len()]
 }
 
 /// `[i18n]`: locale-prefixed routing. The default locale is served without a prefix.
@@ -822,6 +855,11 @@ mod tests {
         assert!(!one.matches(&url("https://a.b.example.com/x.png")));
         assert!(!one.matches(&url("https://a.example.com/dir/x.png")));
         assert!(!one.matches(&url("https://example.com/x.png")));
+        let nested = pattern("cdn.example.com", Some("/a/**/b/*.png"));
+        assert!(nested.matches(&url("https://cdn.example.com/a/x/y/b/c.png")));
+        assert!(nested.matches(&url("https://cdn.example.com/a//b/c.png")));
+        assert!(!nested.matches(&url("https://cdn.example.com/a/x/b/c/d.png")));
+        assert!(!nested.matches(&url("https://cdn.example.com/a/x/b/c.jpg")));
         let any = pattern("**.example.com", None);
         assert!(any.matches(&url("https://a.b.example.com/deep/x.png")));
         let mut port = pattern("localhost", None);
@@ -840,12 +878,22 @@ mod tests {
             "https:///a.png",
             "https://cdn.example.com:99999/a.png",
             "https://cdn.example.com/a/../b.png",
+            "https://cdn.example.com/a/%2e%2e/b.png",
+            "https://cdn.example.com/a/%2E./b.png",
+            "https://cdn.example.com/a/.%2e/b.png",
+            "https://cdn.example.com/a/%2e/b.png",
+            "https://cdn.example.com/a/..%2fb.png",
+            "https://cdn.example.com/a/%5C..%5Cb.png",
             "https://cdn.example.com\\@evil.dev/",
             "//cdn.example.com/a.png",
         ] {
             assert!(RemoteUrl::parse(bad).is_none(), "{bad}");
         }
         assert_eq!(url("https://cdn.example.com").pathname, "/");
+        assert_eq!(url("https://cdn.example.com/a%2e.png").pathname, "/a%2e.png");
+        let allowed = pattern("cdn.example.com", Some("/allowed/**"));
+        assert!(RemoteUrl::parse("https://cdn.example.com/allowed/%2e%2e/secret/x.png").is_none());
+        assert!(allowed.matches(&url("https://cdn.example.com/allowed/%2e%2ex/y.png")));
     }
 
     #[test]
@@ -856,6 +904,14 @@ mod tests {
         images.validate().unwrap();
         assert_eq!(images.device_sizes, [640, 1200]);
         assert_eq!(images.widths().first(), Some(&16));
+        let mut images = ImageConfig { qualities: vec![90, 40, 75], ..ImageConfig::default() };
+        images.validate().unwrap();
+        assert_eq!(images.qualities, [40, 75, 90]);
+        assert_eq!(images.closest_quality(50), 40);
+        assert_eq!(images.closest_quality(100), 90);
+        assert_eq!(ImageConfig::default().closest_quality(30), 75);
+        assert!(ImageConfig { qualities: vec![0], ..ImageConfig::default() }.validate().is_err());
+        assert!(ImageConfig { qualities: Vec::new(), ..ImageConfig::default() }.validate().is_err());
         let mut images = ImageConfig::default();
         images.remote_patterns.push(RemotePattern {
             protocol: Some("ftp".into()),
