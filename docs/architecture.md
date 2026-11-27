@@ -30,6 +30,8 @@
 
 The server bundle is evaluated once per worker in an isolated QuickJS runtime with a memory limit and a 10-second watchdog. A render call passes the page state as JSON; JavaScript resolves metadata, renders the layout tree with `renderToString` and returns HTML. Rust then inserts the stylesheet, `modulepreload` hints, the serialized state and the client entry. React 19 hoists `<title>`, `<meta>` and `<link>` into `<head>`.
 
+Pages Router routes run `getServerSideProps` / `getStaticProps` in the same render call, merge their props over the loader data and render the `_document` around the page tree, which goes into `<div id="__next">`; the props are returned to Rust so the serialized state matches. Client navigations call `__VOLT__.props` from `/_volt/data` for those routes.
+
 Workers are plain OS threads pulling jobs from a shared queue, so a slow render never blocks the async HTTP runtime. In development the pool reloads the bundle when the manifest changes.
 
 ## Client
@@ -42,4 +44,4 @@ The client entry hydrates the document, then owns navigation: links fetch `/_vol
 
 ## Builds
 
-rolldown bundles twice from the same virtual modules: one ESM build for browsers with a lazy chunk per route, and one single-file IIFE build for QuickJS (`react-dom/server.browser`). Imported CSS is collected in execution order and handed to Tailwind. Static routes without loaders are rendered in-process and written to `.volt/prerender`. Static assets are precompressed with Brotli (quality 11) and gzip.
+rolldown bundles twice from the same virtual modules: one ESM build for browsers with a lazy chunk per route, and one single-file IIFE build for QuickJS (`react-dom/server.browser`). Imported CSS is collected in execution order and handed to Tailwind. Static routes without loaders, `getStaticProps` pages and the paths listed by `getStaticPaths` are rendered in-process and written to `.volt/prerender`. Static assets are precompressed with Brotli (quality 11) and gzip.

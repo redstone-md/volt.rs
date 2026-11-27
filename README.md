@@ -9,7 +9,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
 </p>
 
-**volt.rs** is a React framework with a Rust server. You write pages exactly like in the Next.js App Router: `app/` directory, layouts, `Link`, `useRouter`, the metadata API, Tailwind CSS and shadcn/ui. The server, the loaders and the server actions are Rust. React is rendered on the server inside an embedded JavaScript engine, so production needs a single native binary and no Node.js.
+**volt.rs** is a React framework with a Rust server. You write pages exactly like in the Next.js App Router: `app/` directory, layouts, `Link`, `useRouter`, the metadata API, Tailwind CSS and shadcn/ui, or with the Pages Router (`pages/`, `getServerSideProps`, `next/router`). The server, the loaders and the server actions are Rust. React is rendered on the server inside an embedded JavaScript engine, so production needs a single native binary and no Node.js.
 
 ```bash
 npm create volt-rs@latest my-app
@@ -87,11 +87,12 @@ export default function Home({ data }: PageProps<"/">) {
 ## Features
 
 - **App Router conventions**: `page`, `layout`, `loading`, `error`, `not-found`, `template`; `[slug]`, `[...slug]`, `[[...slug]]`, `(groups)`, `_private` folders.
+- **Pages Router** next to it: `pages/`, `_app`, `_document`, `404`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` and `next/router` with router events.
 - **Server-side rendering** of React 19 with hydration, then client-side navigation with prefetching, scroll restoration and per-route code splitting.
 - **Rust loaders, server actions and API routes** with a generated, fully typed TypeScript client.
 - **Forms that work without JavaScript**: `<Form action={...}>` posts natively and upgrades to in-place submission with pending state.
 - **Metadata API** (`metadata`, `generateMetadata`, `viewport`, Open Graph, Twitter, robots, alternates, verification), JSON-LD, automatic `sitemap.xml`, `robots.txt` and `llms.txt`.
-- **Next.js imports work**: `next/link`, `next/navigation`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`.
+- **Next.js imports work**: `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`.
 - **Tailwind CSS v4 and shadcn/ui** out of the box; `npx shadcn add` works.
 - **Images**: `<Image>` with `srcset`, lazy loading, priority preloading and on-demand resizing.
 - **Static prerendering**, `revalidate` caching, Brotli and gzip precompression, immutable asset caching, security headers, redirects and rewrites.
@@ -106,6 +107,7 @@ export default function Home({ data }: PageProps<"/">) {
 
 - [Getting started](./docs/getting-started.md)
 - [Routing](./docs/routing.md)
+- [Pages Router](./docs/pages-router.md)
 - [Data: loaders, actions, API routes](./docs/data.md)
 - [Metadata and SEO](./docs/metadata-seo.md)
 - [Styling and assets](./docs/styling.md)

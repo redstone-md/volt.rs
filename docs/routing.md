@@ -1,6 +1,6 @@
 # Routing
 
-volt uses the Next.js App Router file conventions. Every folder in `app/` is a URL segment and a `page.tsx` makes it routable.
+volt uses the Next.js App Router file conventions. Every folder in `app/` is a URL segment and a `page.tsx` makes it routable. The Pages Router (`pages/`) is supported too, alone or next to `app/`: see [Pages Router](./pages-router.md).
 
 | Path | URL |
 | --- | --- |

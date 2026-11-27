@@ -1,6 +1,6 @@
 # Coming from Next.js
 
-volt keeps the App Router file layout, the component APIs and the metadata API. What changes is where server code lives: instead of server components and `"use server"` functions in TypeScript, the server is Rust.
+volt keeps the App Router and Pages Router file layouts, the component APIs and the metadata API. What changes is where server code lives: instead of server components and `"use server"` functions in TypeScript, the server is Rust.
 
 ## What carries over unchanged
 
@@ -8,7 +8,8 @@ volt keeps the App Router file layout, the component APIs and the metadata API. 
 | --- | --- |
 | `app/**/page.tsx`, `layout.tsx`, `loading.tsx`, `error.tsx`, `not-found.tsx`, `template.tsx` | same |
 | `[slug]`, `[...slug]`, `[[...slug]]`, `(group)`, `_private` | same |
-| `next/link`, `next/navigation`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic` | aliased to `volt-rs/*` |
+| `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic` | aliased to `volt-rs/*` |
+| `pages/**`, `_app`, `_document`, `404`, `500`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` | same, see [Pages Router](./pages-router.md) |
 | `export const metadata`, `generateMetadata`, `export const viewport` | same |
 | `params` / `searchParams` props (sync or awaited) | same |
 | `export const revalidate`, `export const dynamic = "force-dynamic"` | same |
@@ -23,7 +24,7 @@ volt keeps the App Router file layout, the component APIs and the metadata API. 
 | --- | --- |
 | async server component that queries data | Rust `#[loader("/route")]`, page receives `data` |
 | `"use server"` action | Rust `#[action]`, imported from `@volt/api` |
-| `app/api/**/route.ts` | Rust `#[get]`, `#[post]`, ... |
+| `app/api/**/route.ts`, `pages/api/**` | Rust `#[get]`, `#[post]`, ... |
 | `middleware.ts` | `App::new().middleware(...)` |
 | `app/sitemap.ts` | automatic, plus Rust `#[sitemap]` providers |
 | `revalidatePath()` after an action | `<Form>` refreshes automatically, or `router.refresh()` |
@@ -68,5 +69,6 @@ export default function Post({ data }: PageProps<"/posts/[id]">) {
 
 - React Server Components and streaming. Every component renders on the server and hydrates in the browser.
 - Parallel (`@slot`) and intercepting (`(.)`) routes.
-- `next/font`, `next/og`, edge runtime, Pages Router.
+- `next/font`, `next/og`, edge runtime.
+- Pages Router `getInitialProps`, i18n routing and `req`/`res` in `getServerSideProps` (see [Pages Router](./pages-router.md#not-supported)).
 - File uploads in actions (multipart bodies).

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.2
+
+- Pages Router next to the App Router: `pages/` routes, `_app`, `_document` (`next/document`), `404`, `500` / `_error`, `getServerSideProps`, `getStaticProps` with `revalidate`, `getStaticPaths` prerendering, Rust loader props merged into page props, and `next/router` (`volt-rs/router`) with `useRouter`, `withRouter`, the `Router` singleton and router events.
+
 ## 0.0.1
 
 First release.

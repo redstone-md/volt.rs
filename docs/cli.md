@@ -13,7 +13,7 @@ cargo install voltrs-cli
 | `volt build` | Production build: release server binary, minified bundles, CSS, prerendered pages, Brotli/gzip. |
 | `volt start [--port 3000]` | Run the production build. |
 | `volt sdk` | Regenerate `@volt/api` from the Rust server. |
-| `volt routes` | Print the route table with route kinds and API endpoints. |
+| `volt routes` | Print the route table with route kinds, the router (`app` or `pages`) and API endpoints. |
 
 `volt dev` watches the project. TypeScript, CSS and assets trigger a frontend rebuild and a browser reload (CSS-only changes swap stylesheets without reloading). Rust changes trigger `cargo build`, SDK regeneration and a server restart. Build errors are shown in the browser and cleared on the next successful build.
 
