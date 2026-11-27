@@ -39,8 +39,14 @@ export interface PageProps<Data = undefined, P extends Params = Params> {
   searchParams: Awaitable<SearchParams>;
 }
 
-export interface LayoutProps<P extends Params = Params> {
+/** Props of a layout. `Slots` names its parallel route slots (`@team` folders), passed next to `children`. */
+export type LayoutProps<P extends Params = Params, Slots extends string = never> = {
   children: ReactNode;
+  params: Awaitable<P>;
+} & { [K in Slots]: ReactNode };
+
+/** Props of a `default.tsx` page, rendered by a slot that has no page for the current URL. */
+export interface DefaultProps<P extends Params = Params> {
   params: Awaitable<P>;
 }
 

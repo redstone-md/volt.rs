@@ -254,36 +254,91 @@ function AppTree({ view }) {
   const GlobalError = route.globalError && component(route.globalError);
   const props = useMemo(() => pageProps(state), [state]);
   if (state.globalError && GlobalError) return h(GlobalError, { error: state.error, reset: () => location.reload() });
-  let node = state.route === ERROR_ROUTE ? h(Page, { error: state.error, reset: () => location.reload() }) : h(Page, props);
-  const resetKey = state.pathname;
+  const node = state.route === ERROR_ROUTE ? h(Page, { error: state.error, reset: () => location.reload() }) : h(Page, props);
+  const tree = wrap(route.segments, node, {
+    state,
+    params: props.params,
+    values: state.params,
+    path: route.path,
+    resetKey: view.key ?? state.pathname,
+    notFound: state.notFound,
+    metadata,
+  });
+  return GlobalError ? h(GlobalErrorBoundary, { resetKey: view, fallback: GlobalError }, tree) : tree;
+}
+
+/**
+ * Wraps a page in the boundaries and layouts of its segments, innermost first. Layouts receive their parallel
+ * route slots as props next to `children`. Boundaries reset when `resetKey` changes; `path` and `values` (the
+ * page's directories and raw params) key templates and the subtrees below layouts.
+ */
+function wrap(segments, node, { state, params, values, path, resetKey, notFound, metadata }) {
   // Depth of the next layout down (or of the page), whose subtree is keyed by the segments in between.
-  let inner = route.path?.length ?? 0;
-  for (let i = route.segments.length - 1; i >= 0; i--) {
-    const segment = route.segments[i];
+  let inner = path?.length ?? 0;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const segment = segments[i];
     const depth = segment.path?.length ?? 0;
-    const below = segmentsBelow(route, depth, state.params);
+    const below = segmentsBelow({ path }, depth, values);
     if (segment.notFound) {
       const fallback = component(segment.notFound);
-      node = h(NotFoundBoundary, { resetKey, fallback, forced: state.notFound === i }, node);
+      node = h(NotFoundBoundary, { resetKey, fallback, forced: notFound === i }, node);
     }
     if (segment.loading) node = h(Suspense, { fallback: h(component(segment.loading)) }, node);
     if (segment.error) node = h(ErrorBoundary, { resetKey, fallback: component(segment.error) }, node);
     // As in Next.js, a template remounts when the segment right below it changes.
     if (segment.template) node = h(component(segment.template), { key: below[0] ?? "" }, node);
-    if (i === 0) node = h(Fragment, null, h(Metadata, { metadata }), node);
+    if (i === 0 && metadata !== undefined) node = h(Fragment, null, h(Metadata, { metadata }), node);
     if (segment.layout) {
       // As in Next.js, the subtree below a layout remounts when one of its segments changes (`/items/1` to
       // `/items/2`), while the layout itself stays mounted.
-      const key = segmentsBelow({ path: (route.path ?? []).slice(0, inner) }, depth, state.params).join("/");
+      const key = segmentsBelow({ path: (path ?? []).slice(0, inner) }, depth, values).join("/");
       node = h(Fragment, { key }, node);
-      node = h(LayoutSegmentContext.Provider, { value: below }, h(component(segment.layout), { params: props.params }, node));
+      const layout = h(component(segment.layout), { params, ...slotProps(segment, state, params) }, node);
+      node = h(LayoutSegmentContext.Provider, { value: below }, layout);
       inner = depth;
     }
   }
-  return GlobalError ? h(GlobalErrorBoundary, { resetKey: view, fallback: GlobalError }, node) : node;
+  return node;
+}
+
+function slotProps(segment, state, params) {
+  if (!segment.slots) return null;
+  const props = {};
+  for (const [name, slot] of Object.entries(segment.slots)) props[name] = slotNode(slot, state, params);
+  return props;
+}
+
+/** The matched page of a slot, else its `default` page, else nothing. */
+function slotNode(slot, state, params) {
+  const own = state.slots?.[slot.key];
+  const route = own?.route ? slot.routes[own.route] : null;
+  if (!route) return slot.default ? h(component(slot.default), { params }) : null;
+  const props = { data: own.data, params: thenable(own.params ?? {}), searchParams: thenable(state.searchParams ?? {}) };
+  const key = `${own.route}:${JSON.stringify(own.params ?? {})}`;
+  const page = h(component(route.page), props);
+  return wrap(route.segments, page, { state, params: props.params, values: own.params, resetKey: key });
+}
+
+/**
+ * Applies a client navigation result on top of the view it starts from: slots without a match keep what they
+ * showed, and a `retain` result (an interception or a URL that only exists in slots) keeps the page as well.
+ */
+function settle(next, base) {
+  const slots = { ...next.state.slots };
+  for (const [key, own] of Object.entries(slots)) {
+    const before = base.state.slots?.[key];
+    if (own.route === null && before?.route) slots[key] = before;
+  }
+  if (!next.state.retain) return { ...next, state: { ...next.state, slots } };
+  const { pathname, search, searchParams } = next.state;
+  const state = { ...base.state, pathname, search, searchParams, slots: { ...base.state.slots, ...slots } };
+  return { ...base, state, key: base.key ?? base.state.pathname };
 }
 
 const historyKey = () => Math.random().toString(36).slice(2, 10);
+
+/** Header naming the route a client navigation starts from, so the server can resolve intercepting routes. */
+const FROM_HEADER = "x-volt-from";
 
 /** Where route data comes from: the server, or JSON files written by `volt export`. */
 function dataUrl(path, search, exported) {
@@ -335,21 +390,29 @@ export function App({ routes, shells = {}, initial }) {
   const ticket = useRef(0);
   const inflight = useRef(null);
   const beforePop = useRef(null);
+  // Per history entry: the route its navigation started from and the view it showed, so back and forward
+  // resolve intercepting routes and unmatched slots as they were.
+  const entries = useRef(new Map());
   const buildId = initial.state.buildId;
   current.current = view;
   const exported = initial.state.export === true;
 
   const load = useCallback(
-    (path, search, fresh) => {
-      const key = path + search;
+    (path, search, fresh, from) => {
+      const key = `${path}${search} ${from ?? ""}`;
       const cached = cache.current.get(key);
       if (!fresh && cached && Date.now() - cached.at < PREFETCH_TTL) return cached.promise;
-      const promise = fetch(dataUrl(path, search, exported), { headers: { accept: "application/json" } })
+      const headers = { accept: "application/json" };
+      if (from) headers[FROM_HEADER] = from;
+      const promise = fetch(dataUrl(path, search, exported), { headers })
         .then((response) => {
           if (!response.ok && exported) throw new Error(`no exported data for ${path}`);
           return response.json();
         })
-        .then((state) => (state.redirect ? { redirect: state.redirect } : createView(routes, state)));
+        .then((state) => {
+          if (state.redirect) return { redirect: state.redirect };
+          return state.retain ? { state } : createView(routes, state);
+        });
       cache.current.set(key, { promise, at: Date.now() });
       promise.catch(() => cache.current.delete(key));
       return promise;
@@ -439,6 +502,8 @@ export function App({ routes, shells = {}, initial }) {
         commit({ ...current.current, state }, url.hash ? { hash: url.hash.slice(1) } : target, event);
         return;
       }
+      const base = current.current;
+      const from = base.state.route;
       let entered = false;
       const enter = () => {
         if (entered) return;
@@ -446,7 +511,7 @@ export function App({ routes, shells = {}, initial }) {
         routerEvents.emit("beforeHistoryChange", as, { shallow });
         history[replace ? "replaceState" : "pushState"]({ __volt: key }, "", url.href);
       };
-      const request = load(path, url.search, fresh);
+      const request = load(path, url.search, fresh, from);
       let settled = false;
       let previewed = false;
       request.then(
@@ -454,7 +519,7 @@ export function App({ routes, shells = {}, initial }) {
         () => (settled = true),
       );
       // An urgent update, not a transition, so the target's `loading` boundary shows instead of the old page.
-      if (!isPagesView(current.current)) {
+      if (!isPagesView(base)) {
         preview(path, url.search).then(
           (view) => {
             if (!view || settled || own !== ticket.current) return;
@@ -480,12 +545,14 @@ export function App({ routes, shells = {}, initial }) {
       if (own !== ticket.current) return;
       inflight.current = null;
       if (next.redirect) return navigate(next.redirect, { replace: true, scroll: toTop });
-      if (next.state.buildId !== buildId || kindOf(next.route) !== kindOf(current.current.route)) {
+      const view = settle(next, base);
+      if (next.state.buildId !== buildId || kindOf(view.route) !== kindOf(base.route)) {
         location.href = url.href;
         return;
       }
       enter();
-      commit(next, url.hash ? { hash: url.hash.slice(1) } : previewed ? null : target, event);
+      entries.current.set(key, { from, view });
+      commit(view, url.hash ? { hash: url.hash.slice(1) } : previewed ? null : target, event);
     },
     [load, commit, preview, begin, buildId],
   );
@@ -493,7 +560,7 @@ export function App({ routes, shells = {}, initial }) {
   const revalidate = useCallback(
     async (paths, { refresh = true } = {}) => {
       const hit = (pathname) => paths.some((path) => path === "*" || matchPath(path, pathname));
-      for (const key of [...cache.current.keys()]) if (hit(key.split("?")[0])) cache.current.delete(key);
+      for (const key of [...cache.current.keys()]) if (hit(key.split(/[? ]/)[0])) cache.current.delete(key);
       const current = stripBase(location.pathname);
       if (!refresh || current === null || !hit(current)) return false;
       await navigate(`${current}${location.search}${location.hash}`, { replace: true, scroll: false, fresh: true });
@@ -517,7 +584,7 @@ export function App({ routes, shells = {}, initial }) {
       prefetch: (href) => {
         const { url, path } = locate(href);
         if (path === null) return;
-        load(path, url.search, false).catch(() => {});
+        load(path, url.search, false, current.current.state.route).catch(() => {});
         const match = findRoute(Object.keys(routes), path);
         if (match && shells[match.id]) shells[match.id]().catch(() => {});
       },
@@ -535,6 +602,9 @@ export function App({ routes, shells = {}, initial }) {
     controller.revalidate = revalidate;
     history.scrollRestoration = "manual";
     if (!history.state?.__volt) history.replaceState({ __volt: historyKey() }, "", location.href);
+    if (!entries.current.has(history.state.__volt)) {
+      entries.current.set(history.state.__volt, { from: null, view: current.current });
+    }
     const onPopState = async (event) => {
       const key = event.state?.__volt;
       if (!key) return;
@@ -548,13 +618,15 @@ export function App({ routes, shells = {}, initial }) {
       try {
         const path = stripBase(location.pathname);
         if (path === null) return location.reload();
-        const next = await load(path, location.search, false);
+        const entry = entries.current.get(key);
+        const next = await load(path, location.search, false, entry?.from);
         if (own !== ticket.current) return;
         inflight.current = null;
-        if (next.redirect || next.state.buildId !== buildId || kindOf(next.route) !== kindOf(current.current.route)) {
-          return location.reload();
-        }
-        commit(next, { top: readScroll(key) }, change);
+        if (next.redirect || next.state.buildId !== buildId) return location.reload();
+        const view = settle(next, entry?.view ?? current.current);
+        if (kindOf(view.route) !== kindOf(current.current.route)) return location.reload();
+        entries.current.set(key, { from: entry?.from ?? null, view });
+        commit(view, { top: readScroll(key) }, change);
       } catch (error) {
         if (own !== ticket.current) return;
         inflight.current = null;
