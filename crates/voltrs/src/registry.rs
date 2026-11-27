@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::context::Ctx;
 use crate::error::{Error, Result};
+use crate::form::FormData;
 use crate::response::Response;
 use crate::seo::SitemapEntry;
 use crate::types::TypeScript;
@@ -20,7 +21,8 @@ pub type Describe = fn(&mut TypeScript) -> String;
 /// Request body of an action call.
 pub enum Payload {
     Json(Bytes),
-    Form(Bytes),
+    /// Urlencoded or multipart form fields.
+    Form(FormData),
 }
 
 impl Payload {
@@ -32,7 +34,7 @@ impl Payload {
             Self::Json(body) => {
                 serde_json::from_slice(body).map_err(|e| Error::bad_request(format!("invalid input: {e}")))
             }
-            Self::Form(body) => crate::form::from_bytes(body).map_err(|e| Error::bad_request(e.to_string())),
+            Self::Form(form) => form.decode().map_err(|e| Error::bad_request(e.to_string())),
         }
     }
 }

@@ -23,6 +23,7 @@ serde.workspace = true
 [dependencies]
 voltrs-macros.workspace = true
 bytes.workspace = true
+memchr.workspace = true
 flume.workspace = true
 http.workspace = true
 http-body-util.workspace = true

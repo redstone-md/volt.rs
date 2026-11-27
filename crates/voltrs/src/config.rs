@@ -64,11 +64,27 @@ pub struct ServerConfig {
     pub compress: bool,
     /// Memory budget in megabytes for pages cached on demand; build-time pages are not counted.
     pub page_cache_mb: usize,
+    /// Largest accepted request body (actions, API routes, uploads) in megabytes.
+    pub body_limit_mb: usize,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { host: "0.0.0.0".into(), port: 3000, workers: 0, memory_limit_mb: 256, compress: true, page_cache_mb: 50 }
+        Self {
+            host: "0.0.0.0".into(),
+            port: 3000,
+            workers: 0,
+            memory_limit_mb: 256,
+            compress: true,
+            page_cache_mb: 50,
+            body_limit_mb: 8,
+        }
+    }
+}
+
+impl ServerConfig {
+    pub fn body_limit(&self) -> usize {
+        self.body_limit_mb.saturating_mul(1024 * 1024)
     }
 }
 

@@ -4318,6 +4318,7 @@ dependencies = [
  "hyper-util",
  "image",
  "inventory",
+ "memchr",
  "percent-encoding",
  "rquickjs",
  "serde",

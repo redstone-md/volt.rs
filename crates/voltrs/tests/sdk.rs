@@ -17,6 +17,13 @@ struct NewTodo {
 }
 
 #[model]
+struct Upload {
+    file: File,
+    cover: Option<File>,
+    extras: Vec<File>,
+}
+
+#[model]
 enum Status {
     Active,
     Archived,
@@ -51,6 +58,11 @@ fn last_event(_ctx: &Ctx) -> Result<Option<Event>> {
     Ok(None)
 }
 
+#[action]
+async fn upload(input: Upload) -> Result<u64> {
+    Ok(input.file.len() as u64 + input.extras.len() as u64 + u64::from(input.cover.is_some()))
+}
+
 #[loader("/todos/[status]")]
 async fn todos(ctx: Ctx) -> Result<Page<Todo>> {
     let _ = ctx.param("status");
@@ -83,5 +95,9 @@ fn generates_typed_sdk() {
     assert!(source.contains("export const clearAll = createAction<void, null>(\"clear_all\");"), "{source}");
     assert!(source.contains("export const lastEvent = createAction<void, Event | null>(\"last_event\");"), "{source}");
     assert!(source.contains("  \"/todos/[status]\": { items: Todo[]; total: number; };"), "{source}");
+    assert!(
+        source.contains("export interface Upload {\n  file: File | Blob;\n  cover?: File | Blob | null;\n  extras: (File | Blob)[];\n}"),
+        "{source}"
+    );
     assert_eq!(sdk.info().api, vec!["GET /api/health"]);
 }

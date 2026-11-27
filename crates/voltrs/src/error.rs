@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use http::StatusCode;
@@ -18,12 +19,29 @@ pub struct Error {
     kind: ErrorKind,
     message: String,
     public: bool,
+    field_errors: Option<FieldErrors>,
 }
+
+/// Validation messages keyed by input field, sent to clients as `fieldErrors`.
+pub type FieldErrors = BTreeMap<String, Vec<String>>;
 
 impl Error {
     pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
         let public = status.is_client_error();
-        Self { status, kind: ErrorKind::Status, message: message.into(), public }
+        Self { status, kind: ErrorKind::Status, message: message.into(), public, field_errors: None }
+    }
+
+    /// 422 with per-field messages, surfaced as `ActionError.fieldErrors`. Repeated fields collect messages.
+    pub fn validation<K: Into<String>, V: Into<String>>(errors: impl IntoIterator<Item = (K, V)>) -> Self {
+        let mut fields = FieldErrors::new();
+        for (field, message) in errors {
+            fields.entry(field.into()).or_default().push(message.into());
+        }
+        Self { field_errors: Some(fields), ..Self::new(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed") }
+    }
+
+    pub fn field_errors(&self) -> Option<&FieldErrors> {
+        self.field_errors.as_ref()
     }
 
     pub fn bad_request(message: impl Into<String>) -> Self {
@@ -91,6 +109,9 @@ impl Error {
             ErrorKind::NotFound => value["notFound"] = true.into(),
             ErrorKind::Status => {}
         }
+        if let Some(fields) = &self.field_errors {
+            value["fieldErrors"] = serde_json::json!(fields);
+        }
         value
     }
 }
@@ -113,4 +134,19 @@ pub fn redirect(location: impl Into<String>) -> Error {
 
 pub fn not_found() -> Error {
     Error::not_found()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_field_errors() {
+        let error = Error::validation([("name", "required"), ("name", "too short"), ("age", "too young")]);
+        assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let json = error.to_json(false);
+        assert_eq!(json["message"], "Validation failed");
+        assert_eq!(json["fieldErrors"], serde_json::json!({ "age": ["too young"], "name": ["required", "too short"] }));
+        assert!(Error::bad_request("x").to_json(false).get("fieldErrors").is_none());
+    }
 }

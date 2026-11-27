@@ -23,6 +23,7 @@ use crate::context::{Ctx, RequestParts, State};
 use crate::dev::{EventStream, Hub};
 use crate::document::{Document, ERROR_ROUTE, NOT_FOUND_ROUTE, PageState, Site, error_overlay};
 use crate::error::{Error, ErrorKind, Result};
+use crate::form::FormData;
 use crate::log;
 use crate::manifest::{Manifest, RouteEntry, STATIC_PREFIX};
 use crate::registry::{self, ActionDef, ApiDef, BoxFuture, LoaderDef, Payload};
@@ -30,8 +31,6 @@ use crate::response::{IntoResponse, Response};
 use crate::router::{Params, RoutePattern, Router};
 use crate::seo::{self, SitemapEntry};
 use crate::ssr::{Engine, EngineOptions};
-
-const BODY_LIMIT: usize = 8 * 1024 * 1024;
 
 pub type Middleware = Arc<dyn Fn(Ctx) -> BoxFuture<Option<Response>> + Send + Sync>;
 type HyperResponse = hyper::Response<Either<Full<Bytes>, EventStream>>;
@@ -244,7 +243,7 @@ impl Server {
             return sse(hub.subscribe());
         }
 
-        let body = match Limited::new(body, BODY_LIMIT).collect().await {
+        let body = match Limited::new(body, self.config.server.body_limit()).collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(_) => {
                 return finish(Response::text("Payload Too Large").status(StatusCode::PAYLOAD_TOO_LARGE));
@@ -388,15 +387,23 @@ impl Server {
             return Error::new(StatusCode::NOT_FOUND, format!("unknown action `{name}`")).into_response();
         };
         let content_type = ctx.header("content-type").unwrap_or_default();
-        let form = content_type.starts_with("application/x-www-form-urlencoded");
-        if !form && content_type.starts_with("multipart/") {
-            return Error::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "multipart bodies are not supported yet")
-                .into_response();
-        }
-        let payload = if form { Payload::Form(ctx.body().clone()) } else { Payload::Json(ctx.body().clone()) };
+        let form = match FormData::from_request(content_type, ctx.body()) {
+            Ok(form) => form,
+            Err(error) => return Error::bad_request(error.to_string()).into_response(),
+        };
+        let native = form.is_some() && ctx.header("x-volt-action").is_none();
+        let back = form.as_ref().and_then(|f| f.text("redirect")).map(str::to_owned);
+        let payload = match form {
+            Some(form) => Payload::Form(form),
+            None => Payload::Json(ctx.body().clone()),
+        };
         let result = (action.handler)(ctx.clone(), payload).await;
-        if form && ctx.header("x-volt-action").is_none() {
-            return self.form_result(ctx, result);
+        // Cookies usually change what loaders return (sessions), so cached route data is stale.
+        if ctx.sets_cookies() {
+            ctx.revalidate();
+        }
+        if native {
+            return self.form_result(ctx, back, result);
         }
         match result {
             Ok(data) => Response::json(&json!({ "data": data })),
@@ -413,22 +420,26 @@ impl Server {
     }
 
     /// Answers a no-JavaScript form submission with a redirect back to the page.
-    fn form_result(&self, ctx: &Ctx, result: Result<Value>) -> Response {
-        let back = crate::form::parse_pairs(ctx.body())
-            .into_iter()
-            .find(|(k, _)| k == "redirect")
-            .and_then(|(_, v)| v.into_iter().next())
-            .or_else(|| ctx.header("referer").map(str::to_owned))
-            .unwrap_or_else(|| "/".into());
+    fn form_result(&self, ctx: &Ctx, back: Option<String>, result: Result<Value>) -> Response {
+        let back = back.or_else(|| ctx.header("referer").map(str::to_owned)).unwrap_or_else(|| "/".into());
         match result {
             Ok(_) => Response::redirect(StatusCode::SEE_OTHER, &back),
             Err(error) => match error.kind() {
                 ErrorKind::Redirect(location) => Response::redirect(StatusCode::SEE_OTHER, location),
                 _ => {
-                    let message = crate::document::escape_html(error.client_message(self.dev));
+                    use crate::document::escape_html;
+                    let message = escape_html(error.client_message(self.dev));
+                    let fields: String = error
+                        .field_errors()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|(field, messages)| messages.iter().map(move |m| (field, m)))
+                        .map(|(field, m)| format!("<li><b>{}</b>: {}</li>", escape_html(field), escape_html(m)))
+                        .collect();
+                    let fields = if fields.is_empty() { fields } else { format!("<ul>{fields}</ul>") };
                     Response::html(format!(
-                        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Error</title><p>{message}</p><p><a href=\"{}\">Back</a></p>",
-                        crate::document::escape_html(&back)
+                        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Error</title><p>{message}</p>{fields}<p><a href=\"{}\">Back</a></p>",
+                        escape_html(&back)
                     ))
                     .status(error.status())
                 }

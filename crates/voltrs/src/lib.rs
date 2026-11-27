@@ -25,8 +25,10 @@ mod context;
 mod dev;
 mod document;
 mod error;
+mod file;
 #[cfg(feature = "images")]
 mod images;
+mod multipart;
 mod response;
 mod server;
 
@@ -44,7 +46,9 @@ pub mod types;
 pub use app::{App, Prerendered, StaticRenderer};
 pub use cache::{revalidate_path, revalidate_prefix};
 pub use context::Ctx;
-pub use error::{Error, ErrorKind, Result, not_found, redirect};
+pub use error::{Error, ErrorKind, FieldErrors, Result, not_found, redirect};
+pub use file::File;
+pub use form::{FormData, FormValue};
 pub use response::{Cookie, Html, IntoResponse, Json, Response, SameSite};
 pub use seo::{ChangeFrequency, SitemapEntry};
 pub use types::Type;
@@ -56,9 +60,9 @@ pub use serde_json;
 
 pub mod prelude {
     pub use crate::{
-        App, ChangeFrequency, Cookie, Ctx, Error, Html, IntoResponse, Json, Response, Result, SameSite, SitemapEntry,
-        StatusCode, Type, action, delete, get, loader, model, not_found, patch, post, put, redirect, revalidate_path,
-        revalidate_prefix, sitemap,
+        App, ChangeFrequency, Cookie, Ctx, Error, File, FormData, Html, IntoResponse, Json, Response, Result, SameSite,
+        SitemapEntry, StatusCode, Type, action, delete, get, loader, model, not_found, patch, post, put, redirect,
+        revalidate_path, revalidate_prefix, sitemap,
     };
     pub use serde_json::{Value, json};
 }
