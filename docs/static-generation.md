@@ -113,10 +113,12 @@ The export fails with a list of everything that needs the server:
 
 - routes with a Rust `#[loader]`,
 - server actions and API routes,
+- route handlers (`route.ts`) unless they export `dynamic = "force-static"` with a `GET` handler and no params,
+- `middleware.ts` / `proxy.ts`,
 - dynamic routes without `generateStaticParams` or `getStaticPaths`, and pages with `dynamic = "force-dynamic"` or `revalidate = 0`,
 - paths that could not be prerendered.
 
-`export_dir` is emptied before writing, so it must be a relative path inside the project without `..`. It cannot be or contain `app/`, `public/`, `.volt/`, `node_modules/`, `server/`, `src/` or `target/`, and an existing non-empty directory is only replaced when a previous export wrote it.
+`export_dir` is emptied before writing, so it must be a relative path inside the project without `..`. It cannot be or contain `app/`, `pages/`, `public/`, `.volt/`, `node_modules/`, `server/`, `src/` or `target/`, and an existing non-empty directory is only replaced when a previous export wrote it.
 
 `[[redirects]]`, `[[rewrites]]`, `[headers]` and `revalidate` are reported as ignored. Configure redirects and headers on the host, and point its 404 page to `404.html`.
 

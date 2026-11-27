@@ -129,7 +129,7 @@ volt serves these automatically unless a file with the same name exists in `app/
   }
   ```
 
-- `/robots.txt` allows everything, disallows the internal `/_volt/` endpoints and links the sitemap. Add paths with `seo.disallow`.
+- `/robots.txt` allows everything, disallows the action and data endpoints (`/_volt/action/`, `/_volt/data`) and links the sitemap. Add paths with `seo.disallow`.
 - `/llms.txt` gives language models an index of the site's pages.
 
 Turn any of them off in `volt.toml`:

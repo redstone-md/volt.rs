@@ -196,7 +196,7 @@ router.prefetch("/settings");
 
 With [`[i18n]`](i18n.md), hrefs are written without the locale prefix: `<Link>` and `router.push` keep the current locale, `locale="de"` switches it, `locale={false}` uses the href as given, and `useLocale()` returns the active locale.
 
-`next/link`, `next/navigation`, `next/image`, `next/script`, `next/head`, `next/form` and `next/dynamic` resolve to their volt equivalents, so existing components and shadcn blocks work unchanged.
+`next/link`, `next/navigation`, `next/router`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/cache`, `next/server`, `next/document`, `next/app`, `next/font/google`, `next/font/local` and `next` resolve to their volt equivalents (`volt-rs/...`), so existing components and shadcn blocks work unchanged.
 
 ## Loading UI and streaming
 

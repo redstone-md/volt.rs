@@ -20,7 +20,7 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 | `params` / `searchParams` props (sync or awaited) | same |
 | `export const revalidate`, `export const dynamic` (`force-dynamic`, `force-static`, `error`) | same, with stale-while-revalidate |
 | `<Suspense>`, `use(promise)`, `loading.tsx`, `next/dynamic` | streamed from the server; `loading.tsx` shows at once on navigation, but on a first request to a page with a Rust loader only after the loader returns |
-| `generateStaticParams`, `dynamicParams`, `getStaticPaths` | same, evaluated at build time for routes without a Rust loader |
+| `generateStaticParams`, `dynamicParams`, `getStaticPaths` | same, evaluated at build time; the paths are prerendered for routes without a Rust loader |
 | `output: "export"`, `basePath`, `trailingSlash` | `volt export`, `[build] base_path`, `[build] trailing_slash` |
 | Tailwind CSS, shadcn/ui, CSS imports, `@/*` alias | same |
 | `NEXT_PUBLIC_*`, `.env*` files | same (`VOLT_PUBLIC_*` also works) |

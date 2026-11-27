@@ -7,16 +7,17 @@
 ├── manifest.json        routes, chunks, build id
 ├── server/server-*.js   React render bundle for QuickJS
 ├── static/              hashed JS, CSS and media (+ .br and .gz)
-├── prerender/           pages rendered at build time (.html) and their route data (.json)
+├── metadata/            app/ metadata files (icons, Open Graph images, ...)
+├── prerender/           pages rendered at build time (.html), their route data (.json) and force-static route handler responses (.body)
 └── types/               generated TypeScript client
 target/release/<app>     the Rust server binary (default template)
 ```
 
-The server is a single native binary. It needs the `.volt/` directory and `public/`, nothing else: no Node.js at runtime.
+The server is a single native binary. It needs the `.volt/` directory, `public/` and `volt.toml` (if the project has one), nothing else: no Node.js at runtime.
 
 ## Static hosting
 
-Apps without Rust loaders, actions or API routes can run without any server: `volt export` writes plain files to `out/` (see [static generation](static-generation.md#static-export)). Upload the folder to any static host (S3, GitHub Pages, Netlify, nginx), serve `404.html` for missing files and, with the default `trailing_slash = false`, map `/about` to `about.html` (most hosts do this as "clean URLs"). With `[build] base_path = "/docs"`, upload the contents of `out/` to `/docs`.
+Apps without Rust loaders, actions, API routes, `middleware.ts` or route handlers other than `dynamic = "force-static"` ones can run without any server: `volt export` writes plain files to `out/` (see [static generation](static-generation.md#static-export)). Upload the folder to any static host (S3, GitHub Pages, Netlify, nginx), serve `404.html` for missing files and, with the default `trailing_slash = false`, map `/about` to `about.html` (most hosts do this as "clean URLs"). With `[build] base_path = "/docs"`, upload the contents of `out/` to `/docs`.
 
 ## Docker
 

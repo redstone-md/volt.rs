@@ -45,7 +45,7 @@ export default function Document() {
 }
 ```
 
-The document is never hydrated, so event handlers and state do not belong in it. `<Main />` renders `<div id="__next">`, which the page tree renders and hydrates into. `<Head>` always emits `<meta charset="utf-8">` and a `width=device-width, initial-scale=1` viewport. `NextScript` is a placeholder: the server injects the stylesheet, `modulepreload` hints, the page state and the client entry itself. Class documents (`class MyDocument extends Document`) and `static getInitialProps` work; `ctx.renderPage()` returns an empty result because the page is rendered in the same pass. Without `_document`, a default document with `lang="en"` is used.
+The document is never hydrated, so event handlers and state do not belong in it. `<Main />` renders `<div id="__next">`, which the page tree renders and hydrates into. `<Head>` always emits `<meta charset="utf-8">` and a `width=device-width, initial-scale=1` viewport. `NextScript` is a placeholder: the server injects the stylesheet, `modulepreload` hints, the page state and the client entry itself. Class documents (`class MyDocument extends Document`) and `static getInitialProps` work; `ctx.renderPage()` returns an empty result because the page is rendered in the same pass. Without `_document`, a default document is used; its `<html lang>` is the active locale (the URL's `[i18n]` locale, else the default locale, else `[site] language`, which defaults to `en`).
 
 Per-page head tags go through `next/head` (`volt-rs/head`). React 19 hoists `<title>`, `<meta>` and `<link>` into `<head>`; the `key` deduplication of Next.js is not implemented, so render each tag once.
 

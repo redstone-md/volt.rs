@@ -12,9 +12,9 @@ cargo install voltrs-cli
 | `volt dev [--port 3000] [--host 0.0.0.0]` | Dev server: rebuilds on save, React Fast Refresh, recompiles Rust, error overlay. |
 | `volt build` | Production build: release server binary, minified bundles, CSS, prerendered pages, Brotli/gzip. |
 | `volt export` | Production build written as a static site to `out/` (`[build] export_dir`); fails with a list of routes that need the server. See [static generation](static-generation.md#static-export). |
-| `volt start [--port 3000]` | Run the production build. |
+| `volt start [--port 3000] [--host 0.0.0.0]` | Run the production build. |
 | `volt sdk` | Regenerate `@volt/api` from the Rust server. |
-| `volt routes` | Print the route table with route kinds, the router (`app` or `pages`) and API endpoints. |
+| `volt routes` | Print the route table: pages with their kind and router (`app` or `pages`), `route.ts` handlers, Rust API endpoints and `middleware.ts` with its matcher. |
 
 `volt dev` watches the project. TypeScript, CSS and assets trigger a frontend rebuild; Rust changes trigger `cargo build`, SDK regeneration and a server restart, and the page reloads.
 
