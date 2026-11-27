@@ -45,7 +45,7 @@ This is a [volt.rs](https://github.com/redstone-md/volt.rs) app: React 19 pages,
    import Form from "volt-rs/form";
    <Form action={addTodo}><input name="title" /></Form>
    ```
-   `<Form>` works without JavaScript and refreshes the route data after success. Outside forms call `await addTodo({ title })` and then `useRouter().refresh()`, or call `ctx.revalidate_path("/todos")` in the action so the client refreshes matching routes itself. `useFormStatus` (react-dom) and `useActionState` (`volt-rs/actions`, returns `[state, formAction, pending, error]`) work with actions.
+   `<Form>` works without JavaScript and refreshes the route data after success. Outside forms call `await addTodo({ title })` and then `useRouter().refresh()`, or call `ctx.revalidate_path("/todos")` in the action so the client refreshes matching routes itself. `useFormStatus` (react-dom) and `useActionState` (`volt-rs/actions`, returns `[state, formAction, pending, error]`, and gets the state back after a no-JavaScript post too) work with actions.
    File uploads: add a `file: File` (or `Option<File>`, `Vec<File>`) field to the input model and an `<input type="file" name="file" />` to the form. API routes read uploads with `ctx.multipart()`. Bodies are limited by `[server] body_limit_mb` (default 8).
 3. Types shared with TypeScript are `#[model]` structs or enums. Fields become camelCase. `Option<T>` becomes an optional field.
 4. JSON APIs: `#[get("/api/x")]`, `#[post(...)]`, `#[put(...)]`, `#[patch(...)]`, `#[delete(...)]` returning `Json<T>`, `String` or `Response`.

@@ -21,6 +21,9 @@ pub struct PageState {
     pub status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
+    /// Result of a no-JavaScript action submission, for `useActionState` (`{ action, data | error }`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<Value>,
     pub build_id: String,
     pub site: Site,
     /// Set by `volt export`: the client reads route data from `/_volt/data/<path>.json` files.
@@ -185,6 +188,7 @@ mod tests {
             data: Value::Null,
             status: 200,
             error: None,
+            action: None,
             build_id: String::new(),
             site: Site { name: String::new(), url: String::new() },
             export: false,

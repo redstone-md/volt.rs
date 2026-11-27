@@ -128,7 +128,9 @@ async fn add_photo(ctx: Ctx, input: NewPhoto) -> Result<Photo> {
 </Form>
 ```
 
-`File` has `name` (the field), `filename` (without directory), `content_type` and `bytes` (`bytes::Bytes`, no copy of the request body), plus `len()`. In TypeScript the field is `File | Blob`, so `addPhoto({ caption, photo: blob })` works from code as well: inputs that contain files, and `FormData` with files, are sent as `multipart/form-data`; everything else stays urlencoded or JSON. Multipart inputs must be flat (strings, numbers, booleans, files and arrays of those). Serializing a `File` (for example when it is echoed back) produces its metadata and `size`, never the contents.
+`File` has `name` (the field), `filename` (without directory), `content_type` and `bytes` (`bytes::Bytes`, no copy of the request body), plus `len()`. In TypeScript the field is `File | Blob`, so `addPhoto({ caption, photo: blob })` works from code as well: inputs that contain files, and `FormData` with files, are sent as `multipart/form-data`; everything else stays urlencoded or JSON. In a multipart input, nested objects (and arrays of objects) are sent as JSON text fields and decoded on the server, so `upload({ file, meta: { tags } })` works; files must be top-level fields (or arrays of files). Serializing a `File` (for example when it is echoed back) produces its metadata and `size`, never the contents, typed as `UploadedFile` (`{ name, filename, contentType, size }`) in `@volt/api`.
+
+`filename` is what the browser sent, reduced to its last path segment without control characters (`.` and `..` become empty). It is still user input: do not use it as a path on disk without your own naming scheme.
 
 Request bodies, uploads included, are limited by `[server] body_limit_mb` (default 8); larger requests get `413 Payload Too Large`.
 
@@ -180,7 +182,7 @@ const [comment, formAction, pending, error] = useActionState(addComment, null);
 </form>;
 ```
 
-`<form action={addComment}>` and forms using a `useActionState` dispatcher are server-rendered with the action's URL, so they post (multipart) without JavaScript as well; the action runs and the user is redirected back. The returned state is only available with JavaScript, and the previous state is not sent to the Rust action.
+`<form action={addComment}>` and forms using a `useActionState` dispatcher are server-rendered with the action's URL, so they post (multipart) without JavaScript as well; the action runs and the user is redirected back (303). With `useActionState` from `volt-rs/actions` the result comes back too: the redirected page renders with the returned state, or with the `error` (field errors included) and the initial state. The result travels in a one-time `__volt_action` cookie (up to about 3 KB of JSON; larger results only redirect), every form on the page that uses the same action receives it, and that page render skips the server page cache. A `permalink` (`useActionState(action, null, "/signup")`) makes the form post to that page URL instead; volt runs the action there and redirects back to it. The previous state is not sent to the Rust action. React's own `useActionState` posts without JavaScript too, but does not get the result back.
 
 ### Validation errors
 
@@ -201,7 +203,7 @@ async fn sign_up(input: SignUp) -> Result<User> {
 }
 ```
 
-`Error::validation` answers `422` with `{ "error": { "status": 422, "message": "Validation failed", "fieldErrors": { "name": ["Name is required"] } } }`. Repeated fields collect several messages. In React it is `ActionError.fieldErrors`, `useAction().fieldErrors` and the `error` of `useActionState`. A no-JavaScript post shows the messages on a plain error page with a link back.
+`Error::validation` answers `422` with `{ "error": { "status": 422, "message": "Validation failed", "fieldErrors": { "name": ["Name is required"] } } }`. Repeated fields collect several messages. In React it is `ActionError.fieldErrors`, `useAction().fieldErrors` and the `error` of `useActionState`. A no-JavaScript post from a `useActionState` form shows them in the form (see above); other forms show them on a plain error page with a link back. The `redirect` field and the referer are only followed to local paths on the same origin, anything else returns to `/`.
 
 ### Revalidation
 
@@ -221,7 +223,7 @@ async fn add_comment(ctx: Ctx, input: NewComment) -> Result<Comment> {
 | `ctx.revalidate_path("/blog/[slug]")` | drops server-cached pages (prerendered or `revalidate`) whose path matches, and sends an `x-volt-revalidate` hint |
 | `ctx.revalidate_prefix("/blog")` | the same for a path and everything below it |
 | `ctx.revalidate()` | the same for every path |
-| `ctx.set_cookie(...)` in an action | revalidates everything, so the next navigation sees the new cookie |
+| `ctx.set_cookie(...)` in an action | tells the client to drop all prefetched route data and refresh the current route, so the next navigation sees the new cookie; the server cache is shared between users and is not purged |
 
 The client runtime reads the hint after every action call: it drops prefetched route data for matching paths and, if the current page matches, re-runs its loader before the action's promise resolves. `<Form>` and `useAction({ refresh: true })` then skip their own refresh, so the loader runs once.
 
@@ -262,14 +264,13 @@ Every loader, action and handler can take `ctx: Ctx` as its first argument.
 | `ctx.query::<T>()` / `ctx.query_param("q")` | query string |
 | `ctx.header("user-agent")` / `ctx.headers()` | request headers |
 | `ctx.cookie("session")` | cookie value |
-| `ctx.json::<T>()` / `ctx.form::<T>()` / `ctx.body()` | request body (`form` reads urlencoded and multipart, files included) |
+| `ctx.json::<T>()` / `ctx.form::<T>()` / `ctx.body()` | request body (`form` reads multipart, files included, and any other content type as urlencoded) |
 | `ctx.multipart()` | `FormData`: `text("note")`, `file("photo")`, `files("attachments")`, `iter()`, `decode::<T>()` |
-| `ctx.revalidate()` / `ctx.revalidate_path("/x")` / `ctx.revalidate_prefix("/x")` | purge cached pages and client route data |
 | `ctx.state::<T>()` | shared state |
 | `ctx.set_cookie(Cookie::new("session", id))` | adds `Set-Cookie` |
 | `ctx.set_header(name, value)` / `ctx.set_status(code)` | response headers and status |
 | `ctx.method()`, `ctx.path()`, `ctx.remote_addr()`, `ctx.elapsed()` | request info |
-| `ctx.revalidate_path("/blog/x")` / `ctx.revalidate_prefix("/blog")` | purges cached pages, see [static generation](static-generation.md#on-demand-revalidation) |
+| `ctx.revalidate()` / `ctx.revalidate_path("/blog/x")` / `ctx.revalidate_prefix("/blog")` | purges cached pages and client route data, see [revalidation](#revalidation) |
 
 ## State and middleware
 

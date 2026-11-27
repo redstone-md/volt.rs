@@ -169,8 +169,11 @@ fn decode_extended(value: &str) -> Option<String> {
         .then(|| percent_encoding::percent_decode_str(encoded).decode_utf8_lossy().into_owned())
 }
 
+/// Keeps the last path segment without control characters; `.` and `..` become empty so the
+/// name can never point at a directory when joined onto one.
 fn basename(path: &str) -> String {
-    path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned()
+    let name: String = path.rsplit(['/', '\\']).next().unwrap_or(path).chars().filter(|c| !c.is_control()).collect();
+    if matches!(name.trim(), "." | "..") { String::new() } else { name }
 }
 
 fn boundary(content_type: &str) -> Option<String> {
@@ -227,6 +230,17 @@ mod tests {
     fn decodes_extended_filenames() {
         let body = body(&["Content-Disposition: form-data; name=f; filename*=UTF-8''%C3%A9t%C3%A9.png\r\n\r\nx"]);
         assert_eq!(parse(TYPE, &body).unwrap()[0].filename.as_deref(), Some("été.png"));
+    }
+
+    #[test]
+    fn sanitizes_filenames() {
+        let body = body(&[
+            "Content-Disposition: form-data; name=a; filename=\"x/..\"\r\n\r\n1",
+            "Content-Disposition: form-data; name=b; filename=\"a\0b\tc.txt\"\r\n\r\n2",
+            "Content-Disposition: form-data; name=c; filename*=UTF-8''..%2F..%00\r\n\r\n3",
+        ]);
+        let names: Vec<_> = parse(TYPE, &body).unwrap().into_iter().map(|p| p.filename.unwrap()).collect();
+        assert_eq!(names, ["", "abc.txt", ""]);
     }
 
     #[test]

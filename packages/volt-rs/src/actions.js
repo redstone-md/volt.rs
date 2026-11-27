@@ -1,7 +1,7 @@
-import { useActionState as useReactActionState, useCallback, useMemo, useState, useTransition } from "react";
+import { useActionState as useReactActionState, useCallback, useContext, useMemo, useState, useTransition } from "react";
 import { endpoint, withBase } from "./internal/config.js";
 import { ActionError } from "./internal/errors.js";
-import { getRouter, revalidatePaths } from "./internal/router.js";
+import { RouterContext, getRouter, revalidatePaths } from "./internal/router.js";
 
 export { ActionError };
 
@@ -67,15 +67,36 @@ async function call(name, input) {
   return { data: payload.data, revalidated };
 }
 
-/** Progressive enhancement for `<form action={fn}>`: React renders this URL so the form posts without JavaScript. */
-function decorate(fn, name) {
+/** Hidden form fields in the shape React reads from `$$FORM_ACTION` (`FormData` is missing during SSR). */
+class HiddenFields {
+  constructor(entries) {
+    this.entries = entries;
+  }
+  append(key, value) {
+    this.entries.push([key, value]);
+  }
+  forEach(callback, self) {
+    for (const [key, value] of this.entries) callback.call(self, value, key, this);
+  }
+}
+
+/**
+ * Progressive enhancement for `<form action={fn}>`: React renders this URL and these hidden fields so the
+ * form posts without JavaScript. `$ACTION_ID_<name>` lets the server run the action when a `permalink`
+ * sends the form to a page URL; `$volt_state` marks forms whose result goes back to `useActionState`.
+ */
+function decorate(fn, name, stateful = false) {
   return Object.defineProperties(fn, {
     $$volt: { value: name },
     $$FORM_ACTION: {
-      value: () => ({ action: endpoint(`/_volt/action/${name}`), method: "POST", encType: "multipart/form-data", data: null }),
+      value: () => {
+        const fields = [[`$ACTION_ID_${name}`, ""]];
+        if (stateful) fields.push(["$volt_state", "1"]);
+        return { action: endpoint(`/_volt/action/${name}`), method: "POST", encType: "multipart/form-data", data: new HiddenFields(fields) };
+      },
     },
     // React binds the previous state onto actions (useActionState); keep the markers on bound copies.
-    bind: { value: (self, ...args) => decorate(Function.prototype.bind.call(fn, self, ...args), name) },
+    bind: { value: (self, ...args) => decorate(Function.prototype.bind.call(fn, self, ...args), name, stateful) },
   });
 }
 
@@ -119,6 +140,13 @@ export function useAction(action, { refresh = false } = {}) {
  * instead of reaching the error boundary.
  */
 export function useActionState(action, initialState, permalink) {
+  // A submission without JavaScript comes back as a redirect whose page carries the action result.
+  const submitted = useContext(RouterContext)?.state.action;
+  const [initial] = useState(() => {
+    if (!action.$$volt || submitted?.action !== action.$$volt) return { value: initialState, error: undefined };
+    if (submitted.error) return { value: initialState, error: new ActionError(submitted.error) };
+    return { value: submitted.data, error: undefined };
+  });
   const run = useMemo(() => {
     const wrapped = async (previous, payload) => {
       try {
@@ -128,8 +156,8 @@ export function useActionState(action, initialState, permalink) {
         throw error;
       }
     };
-    return action.$$volt ? decorate(wrapped, action.$$volt) : wrapped;
+    return action.$$volt ? decorate(wrapped, action.$$volt, true) : wrapped;
   }, [action]);
-  const [state, dispatch, pending] = useReactActionState(run, { value: initialState, error: undefined }, permalink);
+  const [state, dispatch, pending] = useReactActionState(run, initial, permalink);
   return [state.value, dispatch, pending, state.error];
 }

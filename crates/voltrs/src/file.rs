@@ -126,8 +126,14 @@ impl<'de> Visitor<'de> for ByteBufVisitor {
     }
 }
 
+/// Inputs take a browser `File` or `Blob`; outputs carry the serialized metadata (`UploadedFile`).
 impl Type for File {
-    fn ts(_: &mut TypeScript) -> String {
-        "File | Blob".into()
+    fn ts(ts: &mut TypeScript) -> String {
+        let uploaded = ts.named("UploadedFile", |_| {
+            "/** Metadata of an uploaded file returned by the server; the contents are never sent back. */\n\
+             export interface UploadedFile {\n  name: string;\n  filename: string;\n  contentType: string;\n  size: number;\n}"
+                .into()
+        });
+        format!("File | Blob | {uploaded}")
     }
 }

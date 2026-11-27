@@ -31,7 +31,8 @@ export function useAction<Input, Output>(
 
 /**
  * React's `useActionState` with volt actions: `[state, formAction, isPending, error]`.
- * An `ActionError` keeps the previous state and is returned as `error`.
+ * An `ActionError` keeps the previous state and is returned as `error`. After a submission without
+ * JavaScript the page renders with the returned state (or error); `permalink` posts the form to that page.
  */
 export function useActionState<Input, Output, Initial = Output>(
   action: Action<Input, Output>,

@@ -55,6 +55,8 @@ pub(crate) struct ResponseParts {
     pub headers: Vec<(HeaderName, HeaderValue)>,
     pub status: Option<StatusCode>,
     pub revalidate: Vec<String>,
+    /// Tells only the client to drop its route data; the shared server cache is left alone.
+    pub refresh_client: bool,
 }
 
 impl ResponseParts {
@@ -65,14 +67,15 @@ impl ResponseParts {
         for (name, value) in self.headers {
             response.headers.append(name, value);
         }
-        if self.revalidate.is_empty() {
-            return;
-        }
-        let list: Vec<String> = self
-            .revalidate
-            .iter()
+        let client_all = self.refresh_client.then_some(REVALIDATE_ALL);
+        let list: Vec<String> = client_all
+            .into_iter()
+            .chain(self.revalidate.iter().map(String::as_str).filter(|path| client_all != Some(*path)))
             .map(|path| percent_encoding::utf8_percent_encode(path, HEADER_UNSAFE).to_string())
             .collect();
+        if list.is_empty() {
+            return;
+        }
         if let Ok(value) = HeaderValue::from_str(&list.join(",")) {
             response.headers.insert(HeaderName::from_static(REVALIDATE_HEADER), value);
         }
@@ -176,9 +179,16 @@ impl Ctx {
         serde_json::from_slice(&self.request.body).map_err(|e| Error::bad_request(format!("invalid JSON body: {e}")))
     }
 
-    /// Deserializes an urlencoded or multipart body (files included) with the lenient form rules.
+    /// Deserializes a multipart body (files included) or, for any other content type, an urlencoded
+    /// body with the lenient form rules.
     pub fn form<T: DeserializeOwned>(&self) -> Result<T> {
-        self.multipart()?.decode().map_err(|e| Error::bad_request(e.to_string()))
+        let content_type = self.header("content-type").unwrap_or_default();
+        let form = match FormData::from_request(content_type, &self.request.body) {
+            Ok(Some(form)) => form,
+            Ok(None) => FormData::urlencoded(&self.request.body),
+            Err(error) => return Err(Error::bad_request(error.to_string())),
+        };
+        form.decode().map_err(|e| Error::bad_request(e.to_string()))
     }
 
     /// Parses a `multipart/form-data` (or urlencoded) body into text fields and files.
@@ -258,6 +268,11 @@ impl Ctx {
         if !response.revalidate.contains(&path) {
             response.revalidate.push(path);
         }
+    }
+
+    /// Asks the client to refetch every route's data without touching the server cache.
+    pub(crate) fn refresh_client(&self) {
+        self.lock_response().refresh_client = true;
     }
 
     pub(crate) fn sets_cookies(&self) -> bool {

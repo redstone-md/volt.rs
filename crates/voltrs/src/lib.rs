@@ -26,6 +26,7 @@ mod dev;
 mod document;
 mod error;
 mod file;
+mod flash;
 #[cfg(feature = "images")]
 mod images;
 mod multipart;

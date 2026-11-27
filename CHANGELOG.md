@@ -27,7 +27,11 @@
 - `createAction` sends files as multipart, `<Form>` posts `multipart/form-data` without JavaScript, and `<form action={action}>` works without JavaScript too.
 - React 19 action hooks: actions work with React's `useActionState` and `useFormStatus`; `volt-rs/actions` adds a `useActionState` that returns action errors.
 - `Error::validation` answers 422 with `fieldErrors`, exposed as `ActionError.fieldErrors`, `useAction().fieldErrors` and the `useActionState` error.
-- `ctx.revalidate()`, `ctx.revalidate_path()` and `ctx.revalidate_prefix()` also drop matching route data on the client, refreshing the current route when it matches. Actions that set cookies revalidate automatically.
+- `ctx.revalidate()`, `ctx.revalidate_path()` and `ctx.revalidate_prefix()` also drop matching route data on the client, refreshing the current route when it matches. Actions that set cookies refresh the client's route data automatically (the shared server cache is left alone).
+- Without JavaScript, `useActionState` forms from `volt-rs/actions` get their returned state or field errors back on the redirected page, and a `permalink` posts the form to that page.
+- Nested objects next to files in a multipart action input are decoded from JSON fields.
+- Uploaded file names drop control characters, and `.`/`..` become empty. No-JavaScript submissions return only to local paths.
+- Form field grouping is linear in the number of fields.
 
 ## 0.0.1
 

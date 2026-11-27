@@ -96,8 +96,11 @@ fn generates_typed_sdk() {
     assert!(source.contains("export const lastEvent = createAction<void, Event | null>(\"last_event\");"), "{source}");
     assert!(source.contains("  \"/todos/[status]\": { items: Todo[]; total: number; };"), "{source}");
     assert!(
-        source.contains("export interface Upload {\n  file: File | Blob;\n  cover?: File | Blob | null;\n  extras: (File | Blob)[];\n}"),
+        source.contains(
+            "export interface Upload {\n  file: File | Blob | UploadedFile;\n  cover?: File | Blob | UploadedFile | null;\n  extras: (File | Blob | UploadedFile)[];\n}"
+        ),
         "{source}"
     );
+    assert!(source.contains("export interface UploadedFile {\n  name: string;\n  filename: string;\n"), "{source}");
     assert_eq!(sdk.info().api, vec!["GET /api/health"]);
 }

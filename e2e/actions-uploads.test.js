@@ -61,19 +61,79 @@ await check("actions work with React's own useActionState", async () => {
   await page.locator("#react-greeting", { hasText: "Hello, React!" }).waitFor();
 });
 
-await check("useActionState forms post without JavaScript and show field errors", async () => {
+await check("useActionState forms post without JavaScript and get their state and field errors back", async () => {
   const context = await browser.newContext({ javaScriptEnabled: false });
   const nojs = await context.newPage();
   await nojs.goto(`${base}/state`);
   assert.equal(await nojs.getAttribute("#volt-form", "action"), "/_volt/action/greet");
-  const response = await Promise.all([nojs.waitForNavigation(), nojs.click("#volt-form button")]).then(([r]) => r);
-  assert.equal(response.status(), 422);
-  assert.match(await nojs.content(), /Name is required/);
-  await nojs.goto(`${base}/state`);
+  await Promise.all([nojs.waitForNavigation(), nojs.click("#volt-form button")]);
+  assert.equal(new URL(nojs.url()).pathname, "/state");
+  assert.equal(await nojs.locator("#name-error").textContent(), "Name is required");
+  assert.equal(await nojs.locator("#status").textContent(), "422");
   await nojs.fill("#volt-form input[name=name]", "Grace");
   await Promise.all([nojs.waitForNavigation(), nojs.click("#volt-form button")]);
   assert.equal(new URL(nojs.url()).pathname, "/state");
+  assert.match(await nojs.locator("#greeting").textContent(), /^Hello, Grace! #\d+$/);
+  assert.equal(await nojs.locator("#name-error").count(), 0);
+  await nojs.reload();
+  assert.equal(await nojs.locator("#greeting").textContent(), "none");
   await context.close();
+});
+
+await check("a useActionState permalink posts to its page without JavaScript", async () => {
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  const nojs = await context.newPage();
+  await nojs.goto(`${base}/state`);
+  assert.equal(await nojs.getAttribute("#permalink-form", "action"), "/state?via=permalink");
+  await Promise.all([nojs.waitForNavigation(), nojs.click("#permalink-form button")]);
+  const url = new URL(nojs.url());
+  assert.equal(url.pathname + url.search, "/state?via=permalink");
+  assert.equal(await nojs.locator("#permalink-greeting").textContent(), "Hello, Permalink!");
+  await context.close();
+});
+
+await check("no-JavaScript submissions only return to local paths", async () => {
+  const isolated = await browser.newContext();
+  const post = (form) => isolated.request.post(`${base}/_volt/action/greet`, { form, maxRedirects: 0 });
+  for (const redirect of ["https://evil.example", "//evil.example", "javascript:alert(1)"]) {
+    const ok = await post({ name: "a", redirect });
+    assert.equal(ok.status(), 303);
+    assert.equal(ok.headers().location, "/");
+    const failed = await post({ name: "", redirect });
+    assert.equal(failed.status(), 422);
+    assert.doesNotMatch(await failed.text(), /evil|javascript:/);
+  }
+  const local = await post({ name: "a", redirect: "/items?x=1" });
+  assert.equal(local.headers().location, "/items?x=1");
+  await isolated.close();
+});
+
+await check("action inputs with files and nested objects decode on the server", async () => {
+  await page.goto(base, { waitUntil: "networkidle" });
+  await page.click("#tag");
+  await page.locator("#tagged", { hasText: "tags.txt|3|x,y|4" }).waitFor();
+});
+
+await check("ctx.form reads urlencoded bodies sent without a form content type", async () => {
+  const result = await page.evaluate(() => fetch("/api/form", { method: "POST", body: "name=zed" }).then((r) => r.json()));
+  assert.deepEqual(result, { name: "zed" });
+});
+
+await check("a cookie-setting action refreshes the client without purging the server cache", async () => {
+  const isolated = await browser.newContext();
+  const renders = async () => {
+    const html = await isolated.request.get(`${base}/cached`).then((r) => r.text());
+    return html.match(/id="renders">(\d+)</)[1];
+  };
+  const before = await renders();
+  assert.equal(await renders(), before);
+  const response = await isolated.request.post(`${base}/_volt/action/login`, {
+    data: { name: "cache" },
+    headers: { "x-volt-action": "1" },
+  });
+  assert.equal(response.headers()["x-volt-revalidate"], "*");
+  assert.equal(await renders(), before);
+  await isolated.close();
 });
 
 await check("revalidate_path refreshes the list without an explicit refresh", async () => {

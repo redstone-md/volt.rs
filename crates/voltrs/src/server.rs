@@ -23,6 +23,7 @@ use crate::context::{Ctx, RequestParts, State};
 use crate::dev::{EventStream, Hub};
 use crate::document::{Document, ERROR_ROUTE, NOT_FOUND_ROUTE, PageState, Site, error_overlay};
 use crate::error::{Error, ErrorKind, Result};
+use crate::flash::ActionFlash;
 use crate::form::FormData;
 use crate::log;
 use crate::manifest::{Manifest, RouteEntry, STATIC_PREFIX};
@@ -380,30 +381,38 @@ impl Server {
         if *ctx.method() != Method::POST {
             return Response::text("Method Not Allowed").status(StatusCode::METHOD_NOT_ALLOWED);
         }
+        let content_type = ctx.header("content-type").unwrap_or_default();
+        match FormData::from_request(content_type, ctx.body()) {
+            Ok(form) => self.run_action(ctx, name, form, None).await,
+            Err(error) => Error::bad_request(error.to_string()).into_response(),
+        }
+    }
+
+    /// Runs an action for a JavaScript call, a form posted to its action URL, or a form posted to the
+    /// page URL given as `useActionState` permalink (`page`).
+    async fn run_action(&self, ctx: &Ctx, name: &str, form: Option<FormData>, page: Option<&str>) -> Response {
         if !same_origin(ctx) {
             return Error::forbidden("cross-origin action call rejected").into_response();
         }
         let Some(action) = self.actions.get(name) else {
             return Error::new(StatusCode::NOT_FOUND, format!("unknown action `{name}`")).into_response();
         };
-        let content_type = ctx.header("content-type").unwrap_or_default();
-        let form = match FormData::from_request(content_type, ctx.body()) {
-            Ok(form) => form,
-            Err(error) => return Error::bad_request(error.to_string()).into_response(),
-        };
-        let native = form.is_some() && ctx.header("x-volt-action").is_none();
-        let back = form.as_ref().and_then(|f| f.text("redirect")).map(str::to_owned);
+        let native = form.as_ref().filter(|_| ctx.header("x-volt-action").is_none()).map(|form| NativeForm {
+            back: return_path(ctx, page.or_else(|| form.text("redirect"))),
+            stateful: form.marker().stateful,
+        });
         let payload = match form {
             Some(form) => Payload::Form(form),
             None => Payload::Json(ctx.body().clone()),
         };
         let result = (action.handler)(ctx.clone(), payload).await;
-        // Cookies usually change what loaders return (sessions), so cached route data is stale.
+        // Cookies usually change what loaders return (sessions), so the client's route data is stale.
+        // The server cache is shared between users and stays: one user's cookie cannot stale it.
         if ctx.sets_cookies() {
-            ctx.revalidate();
+            ctx.refresh_client();
         }
-        if native {
-            return self.form_result(ctx, back, result);
+        if let Some(native) = native {
+            return self.form_result(ctx, name, native, result);
         }
         match result {
             Ok(data) => Response::json(&json!({ "data": data })),
@@ -419,32 +428,40 @@ impl Server {
         }
     }
 
-    /// Answers a no-JavaScript form submission with a redirect back to the page.
-    fn form_result(&self, ctx: &Ctx, back: Option<String>, result: Result<Value>) -> Response {
-        let back = back.or_else(|| ctx.header("referer").map(str::to_owned)).unwrap_or_else(|| "/".into());
-        match result {
-            Ok(_) => Response::redirect(StatusCode::SEE_OTHER, &back),
-            Err(error) => match error.kind() {
-                ErrorKind::Redirect(location) => Response::redirect(StatusCode::SEE_OTHER, location),
-                _ => {
-                    use crate::document::escape_html;
-                    let message = escape_html(error.client_message(self.dev));
-                    let fields: String = error
-                        .field_errors()
-                        .into_iter()
-                        .flatten()
-                        .flat_map(|(field, messages)| messages.iter().map(move |m| (field, m)))
-                        .map(|(field, m)| format!("<li><b>{}</b>: {}</li>", escape_html(field), escape_html(m)))
-                        .collect();
-                    let fields = if fields.is_empty() { fields } else { format!("<ul>{fields}</ul>") };
-                    Response::html(format!(
-                        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Error</title><p>{message}</p>{fields}<p><a href=\"{}\">Back</a></p>",
-                        escape_html(&back)
-                    ))
-                    .status(error.status())
-                }
-            },
+    /// Answers a no-JavaScript form submission with a redirect back to the page, carrying the result
+    /// for `useActionState`. Errors of forms without it render a plain error page.
+    fn form_result(&self, ctx: &Ctx, name: &str, form: NativeForm, result: Result<Value>) -> Response {
+        let error = match result {
+            Ok(data) => {
+                ActionFlash::data(ctx, name, &data);
+                return Response::redirect(StatusCode::SEE_OTHER, &form.back);
+            }
+            Err(error) => error,
+        };
+        if let ErrorKind::Redirect(location) = error.kind() {
+            return Response::redirect(StatusCode::SEE_OTHER, location);
         }
+        if error.status().is_server_error() {
+            log::error(&format!("action `{name}` failed: {}", error.message()));
+        }
+        if form.stateful && ActionFlash::error(ctx, name, &error.to_json(self.dev)) {
+            return Response::redirect(StatusCode::SEE_OTHER, &form.back);
+        }
+        use crate::document::escape_html;
+        let message = escape_html(error.client_message(self.dev));
+        let fields: String = error
+            .field_errors()
+            .into_iter()
+            .flatten()
+            .flat_map(|(field, messages)| messages.iter().map(move |m| (field, m)))
+            .map(|(field, m)| format!("<li><b>{}</b>: {}</li>", escape_html(field), escape_html(m)))
+            .collect();
+        let fields = if fields.is_empty() { fields } else { format!("<ul>{fields}</ul>") };
+        Response::html(format!(
+            "<!DOCTYPE html><meta charset=\"utf-8\"><title>Error</title><p>{message}</p>{fields}<p><a href=\"{}\">Back</a></p>",
+            escape_html(&form.back)
+        ))
+        .status(error.status())
     }
 
     async fn data(self: &Arc<Self>, ctx: &Ctx, target: &str) -> Response {
@@ -534,7 +551,38 @@ impl Server {
     }
 
     async fn page(self: &Arc<Self>, ctx: &Ctx, path: &str) -> Response {
+        if *ctx.method() == Method::POST
+            && let Some(form) = permalink_form(ctx)
+            && let Some(name) = form.marker().action.clone()
+        {
+            let page = ctx.config().app_path(ctx.uri().path()).unwrap_or(path);
+            let page = match ctx.uri().query() {
+                Some(query) => format!("{page}?{query}"),
+                None => page.to_owned(),
+            };
+            return self.run_action(ctx, &name, Some(form), Some(&page)).await;
+        }
+        if matches!(*ctx.method(), Method::GET | Method::HEAD)
+            && let Some(flash) = ActionFlash::take(ctx)
+        {
+            return self.flash_page(ctx, path, flash).await;
+        }
         self.serve_page(ctx, path).await.response
+    }
+
+    /// Renders a page for one visitor with the result of their no-JavaScript action submission, bypassing the cache.
+    async fn flash_page(&self, ctx: &Ctx, path: &str, flash: Value) -> Response {
+        let build = self.current();
+        let search = ctx.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+        let mut response = match self.resolve_page(ctx, path, &search).await {
+            Resolved::Page(mut state) => {
+                state.action = Some(flash);
+                self.render(&build, *state).await.response
+            }
+            Resolved::Redirect(status, location) => return Response::redirect(status, &location),
+        };
+        response.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(PRIVATE_CACHE));
+        response
     }
 
     async fn serve_page(self: &Arc<Self>, ctx: &Ctx, path: &str) -> Page {
@@ -733,6 +781,7 @@ impl Server {
             data,
             status,
             error,
+            action: None,
             build_id: self.current().manifest.build_id.clone(),
             site: Site { name: self.config.site.name.clone(), url: self.config.site_url().to_owned() },
             export: crate::config::is_export(),
@@ -800,7 +849,7 @@ impl Server {
         let shared = route.filter(|r| !self.dev && !r.id.starts_with("/_") && (r.is_cached() || hints.is_static));
         let cache = match shared {
             Some(route) => cache::cache_control(hints.revalidate.or(route.revalidate)),
-            None => HeaderValue::from_static("private, no-cache, no-store, max-age=0, must-revalidate"),
+            None => HeaderValue::from_static(PRIVATE_CACHE),
         };
         let response = Response::html(html).status(status).header(header::CACHE_CONTROL, cache);
         Ok(Page { response, hints, data: rendered.data })
@@ -867,6 +916,48 @@ fn fill(destination: &str, params: &Params) -> String {
         return destination.to_owned();
     }
     RoutePattern::parse(destination).fill(params)
+}
+
+const PRIVATE_CACHE: &str = "private, no-cache, no-store, max-age=0, must-revalidate";
+
+/// How a no-JavaScript form submission is answered.
+struct NativeForm {
+    back: String,
+    stateful: bool,
+}
+
+/// A form posted to a page URL by a `useActionState` permalink, recognized by React's action fields.
+fn permalink_form(ctx: &Ctx) -> Option<FormData> {
+    let content_type = ctx.header("content-type").unwrap_or_default();
+    FormData::from_request(content_type, ctx.body()).ok().flatten().filter(|form| form.marker().action.is_some())
+}
+
+/// Where a no-JavaScript submission returns: a local `redirect` field, else a same-origin referer, else `/`.
+/// Anything that could leave the site (`//host`, `javascript:`, another origin) is ignored.
+fn return_path(ctx: &Ctx, requested: Option<&str>) -> String {
+    // The referer is a public URL; the result is an app path, which redirects prefix with the base path.
+    let referer = || {
+        let uri: http::Uri = ctx.header("referer")?.parse().ok()?;
+        let host = ctx.header("x-forwarded-host").or_else(|| ctx.header("host"))?;
+        if uri.authority()?.as_str() != host {
+            return None;
+        }
+        let path = ctx.config().app_path(uri.path())?;
+        Some(match uri.query() {
+            Some(query) => format!("{path}?{query}"),
+            None => path.to_owned(),
+        })
+    };
+    requested
+        .filter(|path| is_local_path(path))
+        .map(str::to_owned)
+        .or_else(referer)
+        .filter(|path| is_local_path(path))
+        .unwrap_or_else(|| "/".into())
+}
+
+fn is_local_path(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") && !path.contains(char::is_control)
 }
 
 /// Rejects actions posted from another origin (CSRF).

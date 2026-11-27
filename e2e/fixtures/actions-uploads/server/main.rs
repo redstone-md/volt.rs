@@ -21,6 +21,29 @@ struct Upload {
 }
 
 #[model]
+struct Meta {
+    tags: Vec<String>,
+    rating: u8,
+}
+
+#[model]
+struct Tagged {
+    file: File,
+    meta: Meta,
+}
+
+#[model]
+struct TaggedFile {
+    file: File,
+    meta: Meta,
+}
+
+#[model]
+struct Cached {
+    renders: u32,
+}
+
+#[model]
 struct Home {
     last: Option<Uploaded>,
 }
@@ -62,6 +85,7 @@ struct Store {
     last: Mutex<Option<Uploaded>>,
     greetings: Mutex<u32>,
     items: Mutex<Vec<String>>,
+    renders: Mutex<u32>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
@@ -105,6 +129,18 @@ async fn greet(ctx: Ctx, input: Signup) -> Result<Greeting> {
     Ok(Greeting { message: format!("Hello, {}!", input.name.trim()), count: *count })
 }
 
+#[action]
+async fn tag(_ctx: Ctx, input: Tagged) -> Result<TaggedFile> {
+    Ok(TaggedFile { file: input.file, meta: input.meta })
+}
+
+#[loader("/cached")]
+async fn cached(ctx: Ctx) -> Result<Cached> {
+    let mut renders = lock(&ctx.state::<Store>().renders)?;
+    *renders += 1;
+    Ok(Cached { renders: *renders })
+}
+
 #[loader("/items")]
 async fn items(ctx: Ctx) -> Result<Items> {
     Ok(Items { items: lock(&ctx.state::<Store>().items)?.clone() })
@@ -133,6 +169,12 @@ async fn api_upload(ctx: Ctx) -> Result<Json<Value>> {
     let form = ctx.multipart()?;
     let file = form.file("file").ok_or_else(|| Error::bad_request("missing file"))?;
     Ok(Json(json!({ "note": form.text("note"), "filename": file.filename, "size": file.len() })))
+}
+
+#[post("/api/form")]
+async fn api_form(ctx: Ctx) -> Result<Json<Value>> {
+    let input: Login = ctx.form()?;
+    Ok(Json(json!({ "name": input.name })))
 }
 
 fn main() {

@@ -15,6 +15,17 @@ function ReactForm() {
   );
 }
 
+function PermalinkForm() {
+  const [state, formAction] = useActionState(greet, null, "/state?via=permalink");
+  return (
+    <form action={formAction} id="permalink-form">
+      <input name="name" defaultValue="Permalink" />
+      <button type="submit">Greet via permalink</button>
+      <p id="permalink-greeting">{state ? state.message : "none"}</p>
+    </form>
+  );
+}
+
 export default function State() {
   const [state, formAction, pending, error] = useActionState(greet, null);
   const fields = error?.fieldErrors;
@@ -31,6 +42,7 @@ export default function State() {
       <p id="greeting">{state ? `${state.message} #${state.count}` : "none"}</p>
       <p id="status">{error ? `${error.status}` : "ok"}</p>
       <ReactForm />
+      <PermalinkForm />
     </main>
   );
 }

@@ -2,6 +2,8 @@
 //! and `multipart/form-data` bodies. String values are parsed into the field's type; missing booleans
 //! become `false`; file parts deserialize into [`File`].
 
+use std::collections::HashMap;
+
 use bytes::Bytes;
 use serde::de::{self, DeserializeOwned, DeserializeSeed, IntoDeserializer, MapAccess, SeqAccess, Visitor};
 use serde::forward_to_deserialize_any;
@@ -33,6 +35,10 @@ impl de::Error for FormError {
 
 /// Parses urlencoded pairs, grouping repeated keys and stripping a trailing `[]`.
 pub fn parse_pairs(body: &[u8]) -> Vec<(String, Vec<String>)> {
+    pairs(body).entries
+}
+
+fn pairs(body: &[u8]) -> Fields<String> {
     let mut fields = Fields::default();
     for pair in body.split(|b| *b == b'&').filter(|p| !p.is_empty()) {
         let mut parts = pair.splitn(2, |b| *b == b'=');
@@ -40,7 +46,7 @@ pub fn parse_pairs(body: &[u8]) -> Vec<(String, Vec<String>)> {
         let value = decode(parts.next().unwrap_or_default());
         fields.push(key, value);
     }
-    fields.0
+    fields
 }
 
 fn decode(raw: &[u8]) -> String {
@@ -48,25 +54,55 @@ fn decode(raw: &[u8]) -> String {
     percent_encoding::percent_decode(&spaced).decode_utf8_lossy().into_owned()
 }
 
-/// Ordered fields with repeated keys grouped, skipping framework-internal keys.
-struct Fields<T>(Vec<(String, Vec<T>)>);
+/// Hidden fields React renders into a form whose action is a volt action (`$$FORM_ACTION`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ActionMarker {
+    /// `$ACTION_ID_<name>`: the action a form posted to a page URL (`permalink`) belongs to.
+    pub action: Option<String>,
+    /// `$volt_state`: the form is driven by volt's `useActionState`, which reads the result back.
+    pub stateful: bool,
+}
+
+/// Ordered fields with repeated keys grouped, skipping framework-internal keys. The index keeps
+/// grouping linear so a body with many distinct keys cannot burn quadratic CPU.
+struct Fields<T> {
+    entries: Vec<(String, Vec<T>)>,
+    index: HashMap<String, usize>,
+    marker: ActionMarker,
+}
 
 impl<T> Default for Fields<T> {
     fn default() -> Self {
-        Self(Vec::new())
+        Self { entries: Vec::new(), index: HashMap::new(), marker: ActionMarker::default() }
     }
 }
 
 impl<T> Fields<T> {
     fn push(&mut self, key: String, value: T) {
         let key = key.strip_suffix("[]").map(str::to_owned).unwrap_or(key);
+        if let Some(action) = key.strip_prefix("$ACTION_ID_") {
+            self.marker.action = Some(action.to_owned());
+            return;
+        }
+        if key == "$volt_state" {
+            self.marker.stateful = true;
+        }
         if key.starts_with("$volt") || key.starts_with("$ACTION") {
             return;
         }
-        match self.0.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, values)) => values.push(value),
-            None => self.0.push((key, vec![value])),
+        match self.index.get(&key) {
+            Some(&at) => self.entries[at].1.push(value),
+            None => {
+                self.index.insert(key.clone(), self.entries.len());
+                self.entries.push((key, vec![value]));
+            }
         }
+    }
+
+    fn map<U>(self, f: impl Fn(T) -> U) -> Fields<U> {
+        let entries =
+            self.entries.into_iter().map(|(key, values)| (key, values.into_iter().map(&f).collect())).collect();
+        Fields { entries, index: self.index, marker: self.marker }
     }
 }
 
@@ -85,15 +121,20 @@ pub enum FormValue {
 #[derive(Debug, Clone, Default)]
 pub struct FormData {
     fields: Vec<(String, Vec<FormValue>)>,
+    marker: ActionMarker,
 }
 
 impl FormData {
     pub fn urlencoded(body: &[u8]) -> Self {
-        let fields = parse_pairs(body)
-            .into_iter()
-            .map(|(key, values)| (key, values.into_iter().map(FormValue::Text).collect()))
-            .collect();
-        Self { fields }
+        Self::from_fields(pairs(body).map(FormValue::Text))
+    }
+
+    fn from_fields(fields: Fields<FormValue>) -> Self {
+        Self { fields: fields.entries, marker: fields.marker }
+    }
+
+    pub(crate) fn marker(&self) -> &ActionMarker {
+        &self.marker
     }
 
     pub fn multipart(content_type: &str, body: &Bytes) -> Result<Self, FormError> {
@@ -110,7 +151,7 @@ impl FormData {
             };
             fields.push(part.name, value);
         }
-        Ok(Self { fields: fields.0 })
+        Ok(Self::from_fields(fields))
     }
 
     /// Parses a form body by content type; `None` when the body is not a form.
@@ -234,6 +275,16 @@ impl Values {
         raw.parse().map_err(|_| FormError(format!("invalid value for `{}`: {raw:?}", self.key)))
     }
 
+    /// A single JSON object text value: how the client sends nested objects next to files.
+    fn json(&self) -> Result<Option<serde_json::Value>, FormError> {
+        match self.values.as_slice() {
+            [FormValue::Text(text)] if text.trim_start().starts_with('{') => serde_json::from_str(text)
+                .map(Some)
+                .map_err(|e| FormError(format!("invalid JSON for `{}`: {e}", self.key))),
+            _ => Ok(None),
+        }
+    }
+
     /// Takes the single file value, or gives the values back untouched.
     fn into_file(mut self) -> Result<File, Self> {
         match self.values.as_slice() {
@@ -313,7 +364,7 @@ impl<'de> de::Deserializer<'de> for Values {
     fn deserialize_struct<V: Visitor<'de>>(
         self,
         name: &'static str,
-        _: &'static [&'static str],
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, FormError> {
         let key = self.key.clone();
@@ -321,7 +372,17 @@ impl<'de> de::Deserializer<'de> for Values {
             Ok(file) => visitor.visit_map(FileAccess { file, field: 0 }),
             Err(values) if values.values.is_empty() => Err(FormError(format!("missing field `{key}`"))),
             Err(_) if name == "File" => Err(FormError(format!("expected a file for `{key}`"))),
-            Err(values) => values.deserialize_any(visitor),
+            Err(values) => match values.json()? {
+                Some(json) => json.deserialize_struct(name, fields, visitor).map_err(de::Error::custom),
+                None => values.deserialize_any(visitor),
+            },
+        }
+    }
+
+    fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, FormError> {
+        match self.json()? {
+            Some(json) => json.deserialize_map(visitor).map_err(de::Error::custom),
+            None => self.deserialize_any(visitor),
         }
     }
 
@@ -335,16 +396,19 @@ impl<'de> de::Deserializer<'de> for Values {
 
     fn deserialize_enum<V: Visitor<'de>>(
         self,
-        _: &'static str,
-        _: &'static [&'static str],
+        name: &'static str,
+        variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, FormError> {
+        if let Some(json) = self.json()? {
+            return json.deserialize_enum(name, variants, visitor).map_err(de::Error::custom);
+        }
         let value: de::value::StringDeserializer<FormError> = self.first()?.to_owned().into_deserializer();
         visitor.visit_enum(value)
     }
 
     forward_to_deserialize_any! {
-        bytes byte_buf unit_struct tuple tuple_struct map identifier ignored_any
+        bytes byte_buf unit_struct tuple tuple_struct identifier ignored_any
     }
 }
 
@@ -478,6 +542,55 @@ mod tests {
         assert!(upload.done);
         assert_eq!(form.text("title"), Some("Hi"));
         assert_eq!(form.files("files").count(), 2);
+    }
+
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct Meta {
+        tags: Vec<String>,
+        rating: u8,
+    }
+
+    #[derive(Deserialize, Debug)]
+    struct Nested {
+        file: File,
+        meta: Meta,
+        extra: Option<Meta>,
+        items: Vec<Meta>,
+        labels: std::collections::BTreeMap<String, u8>,
+    }
+
+    #[test]
+    fn decodes_json_objects_next_to_files() {
+        let form = multipart(&[
+            ("file", Some("a.png"), "PNG"),
+            ("meta", None, r#"{"tags":["a"],"rating":5}"#),
+            ("items", None, r#"{"tags":[],"rating":1}"#),
+            ("items", None, r#"{"tags":["b"],"rating":2}"#),
+            ("labels", None, r#"{"x":1}"#),
+        ]);
+        let nested: Nested = form.decode().unwrap();
+        assert_eq!(nested.meta, Meta { tags: vec!["a".into()], rating: 5 });
+        assert!(nested.extra.is_none());
+        assert_eq!(nested.items.iter().map(|m| m.rating).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(nested.labels.get("x"), Some(&1));
+        assert_eq!(nested.file.filename, "a.png");
+    }
+
+    #[test]
+    fn reads_action_markers() {
+        let form = FormData::urlencoded(b"%24ACTION_ID_greet=&%24volt_state=1&%24ACTION_KEY=k1&name=a");
+        assert_eq!(form.marker().action.as_deref(), Some("greet"));
+        assert!(form.marker().stateful);
+        assert_eq!(form.iter().map(|(key, _)| key).collect::<Vec<_>>(), ["name"]);
+        assert!(!FormData::urlencoded(b"name=a").marker().stateful);
+    }
+
+    #[test]
+    fn groups_many_distinct_keys_quickly() {
+        let body: String = (0..50_000).map(|i| format!("k{i}=v&")).collect();
+        let started = std::time::Instant::now();
+        assert_eq!(super::parse_pairs(body.as_bytes()).len(), 50_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
