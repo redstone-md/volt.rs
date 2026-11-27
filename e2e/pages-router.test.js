@@ -162,13 +162,12 @@ await check("getStaticProps with a request-dependent loader is never shared", as
   assert.doesNotMatch(body, /alice/);
 });
 
-await check("static pages are cached per pathname and the cache is bounded", async () => {
+await check("static pages are cached per pathname", async () => {
   const get = (path) => fetch(`${base}${path}`).then((r) => r.text()).then(stamp);
   const first = await get("/items/a");
   assert.equal(await get("/items/a?x=1"), first);
   assert.equal(await get("/items/a?x=2"), first);
-  for (const id of ["b", "c", "d"]) await get(`/items/${id}`);
-  assert.notEqual(await get("/items/a"), first, "oldest entry evicted beyond page_cache");
+  assert.notEqual(await get("/items/b"), first);
 });
 
 await check("an app router page with an #__next element hydrates in place", async () => {

@@ -47,7 +47,6 @@ pub use context::Ctx;
 pub use error::{Error, ErrorKind, Result, not_found, redirect};
 pub use response::{Cookie, Html, IntoResponse, Json, Response, SameSite};
 pub use seo::{ChangeFrequency, SitemapEntry};
-pub use server::Prerendered;
 pub use types::Type;
 pub use voltrs_macros::{Type, action, delete, get, loader, model, patch, post, put, sitemap};
 

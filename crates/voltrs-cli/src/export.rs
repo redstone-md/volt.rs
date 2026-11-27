@@ -1,6 +1,6 @@
 //! `volt export`: writes the prerendered build as a static site.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use voltrs::manifest::{Manifest, file_stem, prerender_file};
@@ -104,15 +104,15 @@ impl<'a> Export<'a> {
 
     /// `export_dir` is emptied before writing, so refuse anything that holds project files.
     pub fn check_output(project: &Project, out: &Path) -> Result<()> {
-        let reserved = [
-            project.app_dir.clone(),
+        let mut reserved: Vec<PathBuf> = project.app_dir.iter().chain(&project.pages_dir).cloned().collect();
+        reserved.extend([
             project.config.public_dir(),
             project.out_dir.clone(),
             project.node_modules(),
             project.root.join("server"),
             project.root.join("src"),
             project.root.join("target"),
-        ];
+        ]);
         if let Some(dir) = reserved.iter().find(|dir| dir.starts_with(out) || out.starts_with(dir)) {
             bail!("[build] export_dir cannot overlap {}", project.relative(dir));
         }
@@ -171,7 +171,8 @@ mod tests {
     fn project(root: &Path) -> Project {
         Project {
             config: voltrs::config::Config { root: root.to_path_buf(), ..Default::default() },
-            app_dir: root.join("app"),
+            app_dir: Some(root.join("app")),
+            pages_dir: Some(root.join("pages")),
             out_dir: root.join(".volt"),
             rust: true,
             root: root.to_path_buf(),
@@ -187,7 +188,7 @@ mod tests {
         std::fs::write(root.join("docs").join("notes.md"), "keep").unwrap();
         std::fs::create_dir_all(root.join("out").join("_volt")).unwrap();
         let project = project(&root);
-        for dir in ["app", "app/blog", "public", ".volt", "node_modules", "server", "target"] {
+        for dir in ["app", "app/blog", "pages", "public", ".volt", "node_modules", "server", "target"] {
             assert!(Export::check_output(&project, &root.join(dir)).is_err(), "{dir}");
         }
         assert!(Export::check_output(&project, &root.join("docs")).is_err());
