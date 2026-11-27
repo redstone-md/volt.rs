@@ -249,12 +249,20 @@ export function createServer(routes, options = {}) {
      * Pages Router pages and redirects resolve to a complete result instead.
      */
     stream: (payload, sink) => respond(routes, options, payload, "stream", sink),
-    /** Default export of `app/sitemap.ts`, `app/robots.ts` or `app/manifest.ts`, as JSON. */
+    /**
+     * Default export of `app/sitemap.ts`, `app/robots.ts` or `app/manifest.ts`, as JSON, with the module's
+     * `revalidate` and whether it renders on every request (`dynamic = "force-dynamic"` or `revalidate = 0`).
+     */
     async metadataRoute(name) {
       const module = options.metadata?.[name];
       if (!module) throw new Error(`no metadata route \`${name}\``);
       const value = typeof module.default === "function" ? await module.default() : module.default;
-      return JSON.stringify(name === "sitemap" ? sitemapEntries(value) : (value ?? {}));
+      const revalidate = typeof module.revalidate === "number" && module.revalidate > 0 ? module.revalidate : null;
+      return JSON.stringify({
+        value: name === "sitemap" ? sitemapEntries(value) : (value ?? {}),
+        revalidate,
+        dynamic: module.dynamic === "force-dynamic" || module.revalidate === 0,
+      });
     },
     /** Pages Router props for a client navigation (`/_volt/data`). */
     async props(payload) {

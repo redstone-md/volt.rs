@@ -132,6 +132,16 @@ struct PropsResult {
     redirect: Option<RenderedRedirect>,
 }
 
+/// Answer of `__VOLT__.metadataRoute`: the default export and the module's segment config.
+#[derive(Deserialize)]
+struct MetadataOutput {
+    value: Value,
+    #[serde(default)]
+    revalidate: Option<u64>,
+    #[serde(default)]
+    dynamic: bool,
+}
+
 /// A rendered page with the caching hints and props its data functions returned.
 struct Page {
     response: Response,
@@ -597,46 +607,113 @@ impl Server {
         Ok(state)
     }
 
+    /// `robots.txt`, `sitemap.xml`, `llms.txt` and `manifest.webmanifest`. Output built from a code metadata
+    /// route is rendered once and shared, as in Next.js, until its `revalidate` time or a revalidation.
     async fn seo(&self, ctx: &Ctx, path: &str) -> Option<Response> {
+        let key = cache::key(path, "");
+        let shared = !self.dev && self.seo_source(path).is_some();
+        if shared {
+            match self.cache.get(&key) {
+                Lookup::Fresh(page) | Lookup::Stale { page, refresh: false } => return Some(page.response),
+                Lookup::Stale { .. } | Lookup::Miss => {}
+            }
+        }
+        let ticket = self.cache.ticket();
+        let (mut response, policy) = match self.render_seo(ctx, path).await? {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                log::error(&format!("{path}: {}", error.message()));
+                (Response::text("Internal Server Error").status(StatusCode::INTERNAL_SERVER_ERROR), None)
+            }
+        };
+        match policy {
+            Some(revalidate) if response.status == StatusCode::OK => {
+                response.headers.insert(header::CACHE_CONTROL, cache::cache_control(revalidate));
+                let page = CachedPage { response: response.clone(), data: None };
+                self.cache.put(key, &page, revalidate.map(Duration::from_secs), ticket);
+            }
+            _ if shared => self.cache.release(&key),
+            _ => {}
+        }
+        Some(response)
+    }
+
+    /// The code metadata route an SEO file is built from: `sitemap.ts` also feeds `llms.txt`.
+    fn seo_source(&self, path: &str) -> Option<MetadataRoute> {
+        let route = match path {
+            "/llms.txt" if self.config.seo.llms => MetadataRoute::Sitemap,
+            _ => MetadataRoute::from_path(path)?,
+        };
+        self.current().has_route(route).then_some(route)
+    }
+
+    /// Renders an SEO file, with `Some(revalidate)` when the output may be shared with every visitor.
+    async fn render_seo(&self, ctx: &Ctx, path: &str) -> Option<Result<(Response, Option<Option<u64>>)>> {
         let seo = &self.config.seo;
-        let build = self.current();
-        let code = MetadataRoute::from_path(path).filter(|route| build.has_route(*route));
-        let response = match (path, code) {
-            ("/robots.txt", Some(route)) => self.metadata_route(route).await.and_then(|value| {
-                let robots: Robots = serde_json::from_value(value)?;
-                Ok(Response::text(robots.render()))
-            }),
-            ("/manifest.webmanifest", Some(route)) => self
-                .metadata_route(route)
-                .await
-                .map(|value| Response::with_type(StatusCode::OK, "application/manifest+json", value.to_string())),
-            ("/robots.txt", None) if seo.robots => Ok(Response::text(seo::robots(&self.config))),
-            ("/sitemap.xml", _) if seo.sitemap || code.is_some() => self.sitemap_entries(ctx).await.map(|entries| {
+        let source = self.seo_source(path);
+        let enabled = match path {
+            "/robots.txt" => seo.robots || source.is_some(),
+            "/sitemap.xml" => seo.sitemap || source.is_some(),
+            "/llms.txt" => seo.llms,
+            "/manifest.webmanifest" => source.is_some(),
+            _ => false,
+        };
+        if !enabled {
+            return None;
+        }
+        let output = match source {
+            Some(route) => match self.metadata_route(route).await {
+                Ok(output) => Some(output),
+                Err(error) => return Some(Err(error)),
+            },
+            None => None,
+        };
+        let policy = output.as_ref().filter(|o| !o.dynamic && !self.dev).map(|o| o.revalidate);
+        // A shared file must not depend on the visitor, so `#[sitemap]` providers then see a bare request.
+        let synthetic;
+        let ctx = match policy {
+            Some(_) => {
+                synthetic = self.synthetic(path);
+                &synthetic
+            }
+            None => ctx,
+        };
+        let value = output.map(|o| o.value);
+        let response = match path {
+            "/robots.txt" => match value {
+                Some(value) => serde_json::from_value::<Robots>(value)
+                    .map(|robots| Response::text(robots.render()))
+                    .map_err(Error::from),
+                None => Ok(Response::text(seo::robots(&self.config))),
+            },
+            "/manifest.webmanifest" => Ok(Response::with_type(
+                StatusCode::OK,
+                "application/manifest+json",
+                value.unwrap_or_default().to_string(),
+            )),
+            "/sitemap.xml" => self.sitemap_entries(ctx, value).await.map(|entries| {
                 Response::with_type(StatusCode::OK, "application/xml", seo::sitemap(&self.config, &entries))
             }),
-            ("/llms.txt", _) if seo.llms => {
-                self.sitemap_entries(ctx).await.map(|entries| Response::text(seo::llms(&self.config, &entries)))
+            _ => {
+                self.sitemap_entries(ctx, value).await.map(|entries| Response::text(seo::llms(&self.config, &entries)))
             }
-            _ => return None,
         };
-        Some(response.unwrap_or_else(|error| {
-            log::error(&format!("{path}: {}", error.message()));
-            Response::text("Internal Server Error").status(StatusCode::INTERNAL_SERVER_ERROR)
-        }))
+        Some(response.map(|response| (response, policy)))
     }
 
     /// Evaluates the default export of `app/sitemap.ts`, `app/robots.ts` or `app/manifest.ts`.
-    async fn metadata_route(&self, route: MetadataRoute) -> Result<Value> {
+    async fn metadata_route(&self, route: MetadataRoute) -> Result<MetadataOutput> {
         let output = self.engine.call("metadataRoute", route.name().to_owned()).await?;
         Ok(serde_json::from_str(&output)?)
     }
 
-    /// Sitemap URLs: `app/sitemap.ts` when present, else every known path, followed by the `#[sitemap]` providers.
-    async fn sitemap_entries(&self, ctx: &Ctx) -> Result<Vec<SitemapEntry>> {
+    /// Sitemap URLs: the output of `app/sitemap.ts` when present, else every known path, followed by the
+    /// `#[sitemap]` providers.
+    async fn sitemap_entries(&self, ctx: &Ctx, code: Option<Value>) -> Result<Vec<SitemapEntry>> {
         let build = self.current();
         let mut entries: Vec<SitemapEntry> = Vec::new();
-        if build.has_route(MetadataRoute::Sitemap) {
-            entries = serde_json::from_value(self.metadata_route(MetadataRoute::Sitemap).await?)?;
+        if let Some(code) = code {
+            entries = serde_json::from_value(code)?;
         } else {
             for route in build.manifest.routes.iter().filter(|r| !r.id.starts_with("/_")) {
                 if !route.paths.is_empty() {
@@ -869,9 +946,14 @@ impl Server {
             return Err(Error::not_found());
         }
         let route = pattern.as_str().to_owned();
-        // `force-static` pages render once per pathname, so they cannot see the query.
-        let search = if build.manifest.routes[*index].force_static { "" } else { search };
-        let ctx = ctx.with_params(params.clone());
+        // `force-static` pages render once per pathname and are shared with every visitor, so their loader
+        // sees a request without query, cookies or headers, as in Next.js.
+        let force_static = build.manifest.routes[*index].force_static;
+        let search = if force_static { "" } else { search };
+        let ctx = match force_static {
+            true => self.synthetic(pathname).with_params(params.clone()),
+            false => ctx.with_params(params.clone()),
+        };
         let data = match self.loaders.get(&route) {
             Some(loader) => (loader.handler)(ctx).await?,
             None => Value::Null,
