@@ -1,7 +1,21 @@
 //! File-system style route patterns: `/blog/[slug]`, `/docs/[...path]`, `/shop/[[...rest]]`.
 
-use percent_encoding::percent_decode_str;
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use serde_json::{Map, Value};
+
+/// Characters escaped inside one path segment.
+const SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Segment {
@@ -69,6 +83,29 @@ impl Params {
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &ParamValue)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Reads `{ "slug": "a", "path": ["x", "y"] }` as returned by `generateStaticParams`.
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let scalar = |value: &Value| match value {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        };
+        let params = value
+            .as_object()?
+            .iter()
+            .filter(|(_, value)| !value.is_null())
+            .map(|(key, value)| {
+                let value = match value {
+                    Value::Array(items) => ParamValue::Many(items.iter().map(scalar).collect::<Option<_>>()?),
+                    other => ParamValue::One(scalar(other)?),
+                };
+                Some((key.clone(), value))
+            })
+            .collect::<Option<_>>()?;
+        Some(Self(params))
     }
 
     pub fn to_json(&self) -> Value {
@@ -180,6 +217,27 @@ impl RoutePattern {
     }
 }
 
+impl RoutePattern {
+    /// Builds a concrete, percent-encoded URL path; `None` when a required param is missing.
+    pub fn href(&self, params: &Params) -> Option<String> {
+        let mut parts = Vec::new();
+        for segment in &self.segments {
+            match segment {
+                Segment::Static(s) => parts.push(s.clone()),
+                Segment::Dynamic(n) => parts.push(utf8_percent_encode(params.get(n)?, SEGMENT).to_string()),
+                Segment::CatchAll(n) | Segment::OptionalCatchAll(n) => {
+                    let all = params.get_all(n);
+                    if all.is_empty() && matches!(segment, Segment::CatchAll(_)) {
+                        return None;
+                    }
+                    parts.extend(all.into_iter().map(|v| utf8_percent_encode(v, SEGMENT).to_string()));
+                }
+            }
+        }
+        Some(format!("/{}", parts.join("/")))
+    }
+}
+
 /// Ordered collection of patterns resolving a path to the most specific match.
 #[derive(Debug, Clone)]
 pub struct Router<T> {
@@ -258,6 +316,15 @@ mod tests {
         assert_eq!(*router.find("/blog/new").unwrap().1, 2);
         assert_eq!(*router.find("/blog/x").unwrap().1, 1);
         assert_eq!(*router.find("/a/b").unwrap().1, 0);
+    }
+
+    #[test]
+    fn builds_hrefs_from_static_params() {
+        let params = Params::from_json(&serde_json::json!({ "slug": "a b", "rest": ["x", 1] })).unwrap();
+        assert_eq!(RoutePattern::parse("/blog/[slug]").href(&params).as_deref(), Some("/blog/a%20b"));
+        assert_eq!(RoutePattern::parse("/[...rest]").href(&params).as_deref(), Some("/x/1"));
+        assert!(RoutePattern::parse("/[id]").href(&params).is_none());
+        assert_eq!(RoutePattern::parse("/shop/[[...all]]").href(&params).as_deref(), Some("/shop"));
     }
 
     #[test]

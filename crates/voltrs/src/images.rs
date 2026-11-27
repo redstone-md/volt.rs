@@ -18,6 +18,7 @@ pub const WIDTHS: [u32; 16] = [16, 32, 48, 64, 96, 128, 256, 384, 640, 750, 828,
 
 pub struct Images {
     public: PathBuf,
+    base_path: String,
     static_dir: PathBuf,
     cache: PathBuf,
     permits: Semaphore,
@@ -30,9 +31,10 @@ struct Request {
 }
 
 impl Images {
-    pub fn new(public: PathBuf, out_dir: &Path, concurrency: usize) -> Self {
+    pub fn new(public: PathBuf, base_path: &str, out_dir: &Path, concurrency: usize) -> Self {
         Self {
             public,
+            base_path: base_path.to_owned(),
             static_dir: out_dir.join("static"),
             cache: out_dir.join("cache").join("images"),
             permits: Semaphore::new(concurrency.max(1)),
@@ -55,6 +57,7 @@ impl Images {
         if !url.starts_with('/') || url.starts_with("//") {
             return Err(Error::bad_request("only local images can be optimized"));
         }
+        let url = url.strip_prefix(self.base_path.as_str()).filter(|rest| rest.starts_with('/')).unwrap_or(url);
         let source = match url.strip_prefix(STATIC_PREFIX) {
             Some(rest) => safe_join(&self.static_dir, rest),
             None => safe_join(&self.public, url),

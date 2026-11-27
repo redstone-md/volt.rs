@@ -49,6 +49,35 @@ async function notFound(routes, options, state) {
   return { ...rendered, status: 404, route: NOT_FOUND_ROUTE, static: false, revalidate: null };
 }
 
+/** The page module followed by its layouts, innermost first. */
+const modules = (route) => [route.page, ...route.segments.map((segment) => segment.layout).reverse()].filter(Boolean);
+
+/** First `dynamicParams` export, the page taking precedence over its layouts. */
+function dynamicParams(route) {
+  const found = modules(route).find((module) => typeof module.dynamicParams === "boolean");
+  return found ? found.dynamicParams : true;
+}
+
+/**
+ * Params of every path to prerender. Layout generators run first (outermost first); each later
+ * generator is called once per parent result with `{ params }`, as in the Next.js App Router.
+ */
+async function generateParams(route) {
+  const generators = [...route.segments.map((segment) => segment.layout), route.page]
+    .map((module) => module?.generateStaticParams)
+    .filter((fn) => typeof fn === "function");
+  if (!generators.length) return null;
+  let sets = [{}];
+  for (const generate of generators) {
+    const next = [];
+    for (const params of sets) {
+      for (const child of (await generate({ params })) ?? []) next.push({ ...params, ...child });
+    }
+    sets = next;
+  }
+  return sets;
+}
+
 /** Installs the render protocol used by the Rust SSR engine. */
 export function createServer(routes, options = {}) {
   globalThis.__VOLT__ = {
@@ -83,19 +112,34 @@ export function createServer(routes, options = {}) {
             id,
             revalidate: typeof page.revalidate === "number" ? page.revalidate : null,
             dynamic: page.dynamic ?? "auto",
+            dynamicParams: dynamicParams(route),
+            staticParams:
+              typeof page.getStaticPaths === "function" ||
+              modules(route).some((module) => typeof module.generateStaticParams === "function"),
           });
           continue;
         }
-        const prerenderable = typeof page.getStaticProps === "function" && typeof page.getStaticPaths === "function";
         configs.push({
           id,
           revalidate: null,
           dynamic: typeof page.getServerSideProps === "function" ? "force-dynamic" : "auto",
           static: typeof page.getStaticProps === "function" && typeof page.getServerSideProps !== "function",
-          paths: prerenderable ? (await staticPaths(page, id)).paths : [],
+          staticParams: typeof page.getStaticProps === "function" && typeof page.getStaticPaths === "function",
         });
       }
       return JSON.stringify(configs);
+    },
+    /** Build-time paths of a dynamic route (`getStaticPaths` or `generateStaticParams`), evaluated by `volt build`. */
+    async staticParams(id) {
+      const route = await loadRoute(routes, id);
+      const page = route.page;
+      if (!page) return "null";
+      if (typeof page.getStaticPaths === "function") {
+        const { paths, fallback } = await staticPaths(page, id);
+        return JSON.stringify({ params: [], paths, dynamicParams: fallback !== false });
+      }
+      const params = await generateParams(route);
+      return JSON.stringify(params ? { params, paths: [], dynamicParams: dynamicParams(route) } : null);
     },
   };
 }

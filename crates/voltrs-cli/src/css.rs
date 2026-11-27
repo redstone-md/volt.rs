@@ -38,7 +38,7 @@ impl<'a> Css<'a> {
         crate::util::reset_dir(&dir)?;
         let name = format!("app-{}.css", hash(css.as_bytes()));
         std::fs::write(dir.join(&name), css)?;
-        Ok(Some(format!("{}css/{name}", voltrs::manifest::STATIC_PREFIX)))
+        Ok(Some(format!("{}css/{name}", self.project.config.static_prefix())))
     }
 
     fn tailwind(&self, files: &[PathBuf]) -> Result<String> {

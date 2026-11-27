@@ -1,4 +1,5 @@
 import { createElement as h, forwardRef, useCallback, useContext, useEffect, useRef } from "react";
+import { withBase } from "./internal/config.js";
 import { RouterContext } from "./internal/router.js";
 
 const toHref = (href) => (typeof href === "string" ? href : formatUrl(href));
@@ -55,7 +56,7 @@ const Link = forwardRef(function Link(
     {
       ...rest,
       ref,
-      href: target,
+      href: withBase(target),
       onMouseEnter(event) {
         onMouseEnter?.(event);
         warm();

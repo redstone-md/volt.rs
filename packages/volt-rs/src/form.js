@@ -1,4 +1,5 @@
 import { createContext, createElement as h, forwardRef, useContext, useTransition } from "react";
+import { endpoint } from "./internal/config.js";
 import { getRouter } from "./internal/router.js";
 
 const FormStatus = createContext({ pending: false });
@@ -39,7 +40,7 @@ const Form = forwardRef(function Form({ action, refresh = true, onSuccess, onErr
   return h(
     FormStatus.Provider,
     { value: { pending } },
-    h("form", { ...rest, ref, method: "post", action: `/_volt/action/${name}`, onSubmit: handleSubmit, "aria-busy": pending || undefined }, children),
+    h("form", { ...rest, ref, method: "post", action: endpoint(`/_volt/action/${name}`), onSubmit: handleSubmit, "aria-busy": pending || undefined }, children),
   );
 });
 

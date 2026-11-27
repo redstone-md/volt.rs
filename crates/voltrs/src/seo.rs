@@ -92,7 +92,7 @@ fn absolute(config: &Config, url: &str) -> String {
     if url.starts_with("http://") || url.starts_with("https://") {
         url.to_owned()
     } else {
-        format!("{}/{}", config.site_url(), url.trim_start_matches('/'))
+        format!("{}{}", config.site_url(), config.public_path(&format!("/{}", url.trim_start_matches('/'))))
     }
 }
 
@@ -122,10 +122,10 @@ pub fn robots(config: &Config) -> String {
     let mut text = String::from("User-agent: *\nAllow: /\n");
     for path in ["/_volt/action/", "/_volt/data"].iter().copied().chain(config.seo.disallow.iter().map(String::as_str))
     {
-        text.push_str(&format!("Disallow: {path}\n"));
+        text.push_str(&format!("Disallow: {}{path}\n", config.base_path()));
     }
     if config.seo.sitemap {
-        text.push_str(&format!("\nSitemap: {}/sitemap.xml\n", config.site_url()));
+        text.push_str(&format!("\nSitemap: {}{}/sitemap.xml\n", config.site_url(), config.base_path()));
     }
     text
 }

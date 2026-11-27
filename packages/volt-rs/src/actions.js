@@ -1,4 +1,5 @@
 import { useCallback, useState, useTransition } from "react";
+import { endpoint, withBase } from "./internal/config.js";
 import { ActionError } from "./internal/errors.js";
 import { getRouter } from "./internal/router.js";
 
@@ -17,7 +18,7 @@ function encode(input) {
 export function createAction(name) {
   const action = async (input) => {
     const { body, type } = encode(input);
-    const response = await fetch(`/_volt/action/${name}`, {
+    const response = await fetch(endpoint(`/_volt/action/${name}`), {
       method: "POST",
       headers: { "content-type": type, accept: "application/json", "x-volt-action": "1" },
       body,
@@ -25,7 +26,7 @@ export function createAction(name) {
     });
     const payload = await response.json().catch(() => ({ error: { status: response.status, message: response.statusText } }));
     if (payload.error?.redirect) {
-      getRouter()?.push(payload.error.redirect) ?? (location.href = payload.error.redirect);
+      getRouter()?.push(payload.error.redirect) ?? (location.href = withBase(payload.error.redirect));
       return undefined;
     }
     if (payload.error) throw new ActionError(payload.error);

@@ -1,4 +1,5 @@
 // Pages Router: data functions (`getServerSideProps`, `getStaticProps`, `getStaticPaths`) and the `next/router` object.
+import { BASE_PATH } from "./config.js";
 import { routerEvents } from "./events.js";
 
 export const NOT_FOUND_ROUTE = "/_not-found";
@@ -137,7 +138,7 @@ export function pagesRouter(router, state) {
     route: publicPath(state.route),
     query: { ...(state.searchParams ?? {}), ...(state.params ?? {}) },
     asPath: `${state.pathname}${state.search ?? ""}`,
-    basePath: "",
+    basePath: BASE_PATH,
     isReady: true,
     isFallback: false,
     isPreview: false,

@@ -9,6 +9,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use serde::de::DeserializeOwned;
 
+use crate::cache::{PageCache, Target};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::response::{Cookie, Response};
@@ -63,12 +64,13 @@ pub struct Ctx {
     params: Arc<Params>,
     state: Arc<State>,
     config: Arc<Config>,
+    cache: Arc<PageCache>,
     response: Arc<Mutex<ResponseParts>>,
 }
 
 impl Ctx {
-    pub(crate) fn new(request: RequestParts, state: Arc<State>, config: Arc<Config>) -> Self {
-        Self { request: Arc::new(request), params: Arc::default(), state, config, response: Arc::default() }
+    pub(crate) fn new(request: RequestParts, state: Arc<State>, config: Arc<Config>, cache: Arc<PageCache>) -> Self {
+        Self { request: Arc::new(request), params: Arc::default(), state, config, cache, response: Arc::default() }
     }
 
     pub(crate) fn with_params(&self, params: Params) -> Self {
@@ -196,5 +198,16 @@ impl Ctx {
 
     pub fn set_status(&self, status: StatusCode) {
         self.lock_response().status = Some(status);
+    }
+
+    /// Purges this server's cached page at `path` (or every page of a pattern like `/blog/[slug]`).
+    /// See [`crate::revalidate_path`].
+    pub fn revalidate_path(&self, path: &str) -> usize {
+        Target::Path(path.to_owned()).apply(&self.cache)
+    }
+
+    /// Purges this server's cached pages at or below `prefix`. See [`crate::revalidate_prefix`].
+    pub fn revalidate_prefix(&self, prefix: &str) -> usize {
+        Target::Prefix(prefix.to_owned()).apply(&self.cache)
     }
 }

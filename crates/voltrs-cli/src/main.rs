@@ -6,6 +6,7 @@ mod compress;
 mod css;
 mod dev;
 mod env;
+mod export;
 mod new;
 mod pipeline;
 mod project;
@@ -18,6 +19,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use voltrs::log;
 
+use crate::export::Export;
 use crate::pipeline::Pipeline;
 use crate::project::Project;
 
@@ -49,6 +51,8 @@ enum Command {
     },
     /// Build for production
     Build,
+    /// Build a static site into `[build] export_dir` (default `out/`)
+    Export,
     /// Run the production server
     Start {
         #[arg(long, short)]
@@ -81,7 +85,12 @@ fn main() {
             set_env("PORT", port.map(|p| p.to_string()));
             set_env("HOST", host.clone());
         }
+        Command::Export => set_env("VOLT_EXPORT", Some("1".into())),
         _ => {}
+    }
+    if !matches!(cli.command, Command::Export) {
+        // SAFETY: single-threaded at this point.
+        unsafe { std::env::remove_var("VOLT_EXPORT") };
     }
     if !matches!(cli.command, Command::Dev { .. }) {
         // SAFETY: single-threaded at this point.
@@ -116,7 +125,11 @@ async fn run(command: Command) -> Result<()> {
         }
         Command::Build => {
             banner("build");
-            build(&Project::discover(&cwd)?).await
+            build(&Project::discover(&cwd)?).await.map(|_| ())
+        }
+        Command::Export => {
+            banner("export");
+            export(&Project::discover(&cwd)?).await
         }
         Command::Start { .. } => start(&Project::discover(&cwd)?).await,
         Command::Sdk => {
@@ -134,7 +147,7 @@ fn banner(mode: &str) {
     eprintln!("\n  {} {}  {}\n", log::paint("1;33", "⚡ volt"), env!("CARGO_PKG_VERSION"), log::paint("2", mode));
 }
 
-async fn build(project: &Project) -> Result<()> {
+async fn build(project: &Project) -> Result<(voltrs::sdk::ServerInfo, voltrs::manifest::Manifest)> {
     let binary = if project.rust {
         log::info("compiling server (release)…");
         Some(cargo::build(&project.root, true)?)
@@ -143,10 +156,27 @@ async fn build(project: &Project) -> Result<()> {
     };
     let pipeline = Pipeline::new(project, false);
     let info = pipeline.sdk(binary.as_deref())?;
-    pipeline.frontend(&info).await?;
+    let manifest = pipeline.frontend(&info).await?;
     if let Some(binary) = binary {
         log::ready(&format!("server binary: {}", project.relative(&binary)));
     }
+    Ok((info, manifest))
+}
+
+async fn export(project: &Project) -> Result<()> {
+    Export::check_output(project, &project.config.export_dir())?;
+    let (info, manifest) = build(project).await?;
+    let export = Export::new(project, &manifest, &info);
+    let blockers = export.blockers();
+    if !blockers.is_empty() {
+        anyhow::bail!("cannot export a static site, these need the server:\n  - {}", blockers.join("\n  - "));
+    }
+    for warning in export.ignored() {
+        log::warn(&warning);
+    }
+    let pages = export.write().await?;
+    let out = project.config.export_dir();
+    log::ready(&format!("exported {pages} pages to {}", project.relative(&out)));
     Ok(())
 }
 

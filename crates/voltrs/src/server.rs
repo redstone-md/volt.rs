@@ -15,8 +15,9 @@ use hyper::body::Incoming;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::app::Prerendered;
 use crate::assets::{StaticAssets, compressible, serve_public};
-use crate::cache::{CachedPage, PUBLIC_PAGE, PageCache};
+use crate::cache::{self, CachedPage, Lookup, PageCache};
 use crate::config::Config;
 use crate::context::{Ctx, RequestParts, State};
 use crate::dev::{EventStream, Hub};
@@ -43,6 +44,10 @@ struct Build {
 }
 
 impl Build {
+    fn entry(&self, path: &str) -> Option<&RouteEntry> {
+        self.pages.find(path).map(|(_, index, _)| &self.manifest.routes[*index])
+    }
+
     fn load(out_dir: &std::path::Path) -> Result<Self> {
         let manifest = Manifest::load(out_dir)
             .map_err(|e| Error::internal(format!("no build found in {} ({e}); run `volt build`", out_dir.display())))?;
@@ -107,13 +112,11 @@ struct Page {
     data: Option<Value>,
 }
 
-/// HTML produced by [`Server::prerender`].
-pub struct Prerendered {
-    pub html: String,
-    /// `revalidate` seconds returned by `getStaticProps`.
-    pub revalidate: Option<u64>,
-    /// Pages Router props, served to client navigations instead of rerunning `getStaticProps`.
-    pub data: Option<Value>,
+/// Outcome of matching a path and running its loader.
+enum Resolved {
+    Page(Box<PageState>),
+    /// Status and app path of a redirect raised by a loader.
+    Redirect(StatusCode, String),
 }
 
 pub(crate) struct Server {
@@ -125,7 +128,7 @@ pub(crate) struct Server {
     actions: HashMap<&'static str, &'static ActionDef>,
     loaders: HashMap<String, &'static LoaderDef>,
     apis: HashMap<Method, Router<&'static ApiDef>>,
-    cache: PageCache,
+    cache: Arc<PageCache>,
     hub: Option<Hub>,
     #[cfg(feature = "images")]
     images: crate::images::Images,
@@ -160,6 +163,7 @@ impl Server {
         #[cfg(feature = "images")]
         let images = crate::images::Images::new(
             config.public_dir(),
+            config.base_path(),
             &out_dir,
             match config.images.concurrency {
                 0 => config.workers(),
@@ -169,7 +173,7 @@ impl Server {
         let server = Arc::new(Self {
             #[cfg(feature = "images")]
             images,
-            cache: PageCache::new(config.server.page_cache),
+            cache: PageCache::shared(config.server.page_cache_mb * 1024 * 1024),
             hub: dev.then(Hub::default),
             config: Arc::new(config),
             state: Arc::new(state),
@@ -234,7 +238,7 @@ impl Server {
         let path = parts.uri.path().to_owned();
 
         if self.dev
-            && path == "/_volt/hmr"
+            && self.config.app_path(&path) == Some("/_volt/hmr")
             && let Some(hub) = &self.hub
         {
             return sse(hub.subscribe());
@@ -255,19 +259,25 @@ impl Server {
             remote: Some(remote),
             started,
         };
-        let ctx = Ctx::new(request, self.state.clone(), self.config.clone());
+        let ctx = Ctx::new(request, self.state.clone(), self.config.clone(), self.cache.clone());
 
         let mut response = self.dispatch(&ctx).await;
         ctx.take_response().apply(&mut response);
+        self.localize_redirect(&mut response);
         self.decorate(&mut response, &accept);
-        if self.dev && !path.starts_with(STATIC_PREFIX) {
+        if self.dev && !path.starts_with(&self.config.static_prefix()) {
             log::request(method.as_str(), &path, response.status.as_u16(), started.elapsed());
         }
         finish(response)
     }
 
-    async fn dispatch(&self, ctx: &Ctx) -> Response {
-        let path = ctx.path().to_owned();
+    async fn dispatch(self: &Arc<Self>, ctx: &Ctx) -> Response {
+        let Some(path) = self.config.app_path(ctx.path()).map(str::to_owned) else {
+            return not_found_text();
+        };
+        if let Some(response) = self.normalize_slash(ctx, &path) {
+            return response;
+        }
         if let Some(response) = self.redirect(&path) {
             return response;
         }
@@ -283,14 +293,23 @@ impl Server {
             return self.action(ctx, name).await;
         }
         if path == "/_volt/data" {
-            return self.data(ctx).await;
+            return self.data(ctx, &ctx.query_param("path").unwrap_or_else(|| "/".into())).await;
+        }
+        if let Some(stem) = path.strip_prefix("/_volt/data/").and_then(|p| p.strip_suffix(".json")) {
+            let pathname = if stem == "index" { "/".to_owned() } else { format!("/{stem}") };
+            let target = match ctx.uri().query() {
+                Some(query) => format!("{pathname}?{query}"),
+                None => pathname,
+            };
+            return self.data(ctx, &target).await;
         }
         #[cfg(feature = "images")]
         if path == "/_volt/image" && self.config.images.optimize {
             return self.images.serve(ctx.query_string()).await;
         }
         if let Some(error) = self.current().manifest.error.as_deref().filter(|_| self.dev) {
-            return Response::html(error_overlay("Build failed", error)).status(StatusCode::INTERNAL_SERVER_ERROR);
+            return Response::html(error_overlay("Build failed", error, self.config.base_path()))
+                .status(StatusCode::INTERNAL_SERVER_ERROR);
         }
         let path = self.rewrite(&path);
         if let Some(response) = self.api(ctx, &path).await {
@@ -305,6 +324,32 @@ impl Server {
             }
         }
         self.page(ctx, &path).await
+    }
+
+    /// Redirects with 308 to the canonical form of the URL under `trailing_slash`.
+    fn normalize_slash(&self, ctx: &Ctx, path: &str) -> Option<Response> {
+        if !matches!(*ctx.method(), Method::GET | Method::HEAD) || path.starts_with("/_volt/") {
+            return None;
+        }
+        let canonical = self.config.canonical_path(ctx.path())?;
+        let location = match ctx.uri().query() {
+            Some(query) => format!("{canonical}?{query}"),
+            None => canonical,
+        };
+        Some(Response::redirect(StatusCode::PERMANENT_REDIRECT, &location))
+    }
+
+    /// Redirects are produced with app paths; this resolves them against the base path once.
+    fn localize_redirect(&self, response: &mut Response) {
+        let Some(location) = response.headers.get(header::LOCATION).and_then(|v| v.to_str().ok()) else {
+            return;
+        };
+        let public = self.config.public_path(location);
+        if public != location
+            && let Ok(value) = HeaderValue::from_str(&public)
+        {
+            response.headers.insert(header::LOCATION, value);
+        }
     }
 
     fn redirect(&self, path: &str) -> Option<Response> {
@@ -391,11 +436,10 @@ impl Server {
         }
     }
 
-    async fn data(&self, ctx: &Ctx) -> Response {
-        let target = ctx.query_param("path").unwrap_or_else(|| "/".into());
+    async fn data(self: &Arc<Self>, ctx: &Ctx, target: &str) -> Response {
         let (pathname, search) = match target.split_once('?') {
             Some((p, s)) => (p.to_owned(), format!("?{s}")),
-            None => (target.clone(), String::new()),
+            None => (target.to_owned(), String::new()),
         };
         let pathname = self.rewrite(&pathname);
         let resolved = match self.resolve(ctx, &pathname, &search).await {
@@ -405,21 +449,17 @@ impl Server {
             },
             Err(error) => Err(error),
         };
-        let state = match resolved {
-            Ok(state) => state,
-            Err(error) => match error.kind() {
-                ErrorKind::Redirect(location) => {
-                    return Response::json(&json!({ "redirect": location }));
-                }
-                _ => self.failure_state(&pathname, &search, &error),
-            },
-        };
-        Response::json(&state).header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))
+        match self.settle(resolved, &pathname, &search) {
+            Resolved::Page(state) => {
+                Response::json(&state).header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))
+            }
+            Resolved::Redirect(_, location) => Response::json(&json!({ "redirect": location })),
+        }
     }
 
     /// Props of a `getStaticProps` page from the page cache, rendering the page first on a miss, so that
     /// navigations show the same data as the cached HTML.
-    async fn static_props(&self, ctx: &Ctx, state: &PageState) -> Option<Value> {
+    async fn static_props(self: &Arc<Self>, ctx: &Ctx, state: &PageState) -> Option<Value> {
         let build = self.current();
         if self.dev || !build.manifest.route(&state.route).is_some_and(|r| self.is_static_route(r)) {
             return None;
@@ -465,13 +505,14 @@ impl Server {
 
     async fn sitemap_entries(&self, ctx: &Ctx) -> Vec<SitemapEntry> {
         let build = self.current();
-        let mut entries: Vec<SitemapEntry> = build
-            .manifest
-            .routes
-            .iter()
-            .filter(|r| !r.id.starts_with("/_") && !RoutePattern::parse(&r.id).is_dynamic())
-            .map(|r| SitemapEntry::new(r.id.clone()))
-            .collect();
+        let mut entries: Vec<SitemapEntry> = Vec::new();
+        for route in build.manifest.routes.iter().filter(|r| !r.id.starts_with("/_")) {
+            if !route.paths.is_empty() {
+                entries.extend(route.paths.iter().map(|p| SitemapEntry::new(p.clone())));
+            } else if !RoutePattern::parse(&route.id).is_dynamic() {
+                entries.push(SitemapEntry::new(route.id.clone()));
+            }
+        }
         for provider in registry::sitemaps() {
             match (provider.handler)(ctx.clone()).await {
                 Ok(more) => entries.extend(more),
@@ -481,81 +522,166 @@ impl Server {
         entries
     }
 
-    async fn page(&self, ctx: &Ctx, path: &str) -> Response {
+    async fn page(self: &Arc<Self>, ctx: &Ctx, path: &str) -> Response {
         self.serve_page(ctx, path).await.response
     }
 
-    async fn serve_page(&self, ctx: &Ctx, path: &str) -> Page {
+    async fn serve_page(self: &Arc<Self>, ctx: &Ctx, path: &str) -> Page {
         if !matches!(*ctx.method(), Method::GET | Method::HEAD) {
             return Response::text("Method Not Allowed").status(StatusCode::METHOD_NOT_ALLOWED).into();
         }
         let build = self.current();
-        let entry = build.pages.find(path).map(|(_, index, _)| &build.manifest.routes[*index]);
+        let entry = build.entry(path);
         let is_static = entry.is_some_and(|e| self.is_static_route(e));
         // `getStaticProps` cannot see the query, so one entry per pathname serves every query string.
-        let (key, search) = if is_static {
-            (format!("{path}?"), String::new())
+        let (query, search) = if is_static {
+            ("", String::new())
         } else {
-            (format!("{path}?{}", ctx.query_string()), ctx.uri().query().map(|q| format!("?{q}")).unwrap_or_default())
+            (ctx.query_string(), ctx.uri().query().map(|q| format!("?{q}")).unwrap_or_default())
         };
-        let cached_route = is_static
-            || entry.is_some_and(|e| e.prerendered.is_some() || e.revalidate.is_some() || !e.static_paths.is_empty());
-        if !self.dev
-            && let Some(hit) = self.cache.get(&key)
-        {
-            return hit.into();
+        let cacheable = !self.dev && entry.is_some_and(|e| e.is_cached() || is_static);
+        if !cacheable {
+            return self.generate(ctx, &build, path, &search).await;
         }
-        let state = match self.resolve(ctx, path, &search).await {
-            Ok(state) => state,
-            Err(error) => match error.kind() {
-                ErrorKind::Redirect(location) => {
-                    return Response::redirect(error.status(), location).into();
+        let key = cache::key(path, query);
+        match self.cache.get(&key) {
+            Lookup::Fresh(page) => return page.into(),
+            Lookup::Stale { page, refresh } => {
+                if refresh {
+                    self.refresh(key, path.to_owned(), search);
                 }
-                _ => self.failure_state(path, &search, &error),
-            },
-        };
-        let page = self.render(&build, state).await;
-        if !self.dev && page.response.status == StatusCode::OK && (cached_route || page.hints.is_static) {
-            let ttl = page.hints.revalidate.or(entry.and_then(|e| e.revalidate)).map(Duration::from_secs);
-            self.cache.put(key, CachedPage { response: page.response.clone(), data: page.data.clone() }, ttl);
+                return page.into();
+            }
+            Lookup::Miss => {}
+        }
+        let ticket = self.cache.ticket();
+        let page = self.generate(ctx, &build, path, &search).await;
+        if page.response.status == StatusCode::OK {
+            self.cache.put(key, &page.cached(), Self::ttl(&build, path, &page), ticket);
         }
         page
     }
 
-    /// Renders routes ahead of time; used by `volt build` for static pages.
-    pub async fn prerender(&self, routes: &[String]) -> Vec<(String, Result<Prerendered>)> {
-        let mut out = Vec::with_capacity(routes.len());
-        for route in routes {
-            let uri = route.parse().unwrap_or_default();
-            let request = RequestParts {
-                method: Method::GET,
-                uri,
-                headers: http::HeaderMap::new(),
-                body: Bytes::new(),
-                remote: None,
-                started: Instant::now(),
-            };
-            let ctx = Ctx::new(request, self.state.clone(), self.config.clone());
-            let page = self.serve_page(&ctx, route).await;
-            let result = match page.response.status {
-                StatusCode::OK => Ok(Prerendered {
-                    html: String::from_utf8_lossy(&page.response.body).into_owned(),
-                    revalidate: page.hints.revalidate,
-                    data: page.data,
-                }),
-                status => Err(Error::internal(format!("prerender returned {status}"))),
-            };
-            out.push((route.clone(), result));
+    /// Cache lifetime of a rendered page: `revalidate` from `getStaticProps`, else from the route.
+    fn ttl(build: &Build, path: &str, page: &Page) -> Option<Duration> {
+        page.hints.revalidate.or_else(|| build.entry(path).and_then(|e| e.revalidate)).map(Duration::from_secs)
+    }
+
+    /// Regenerates a stale page in the background while the stale copy keeps being served.
+    fn refresh(self: &Arc<Self>, key: String, path: String, search: String) {
+        let server = self.clone();
+        tokio::spawn(async move {
+            let ctx = server.synthetic(&format!("{path}{search}"));
+            let build = server.current();
+            let ticket = server.cache.ticket();
+            let page = server.generate(&ctx, &build, &path, &search).await;
+            match page.response.status {
+                StatusCode::OK => server.cache.put(key, &page.cached(), Self::ttl(&build, &path, &page), ticket),
+                StatusCode::NOT_FOUND => server.cache.remove(&key),
+                status => {
+                    log::warn(&format!("revalidating {path} returned {status}; serving the stale page"));
+                    server.cache.release(&key);
+                }
+            }
+        });
+    }
+
+    /// Resolves and renders a page without consulting the cache.
+    async fn generate(&self, ctx: &Ctx, build: &Build, path: &str, search: &str) -> Page {
+        match self.resolve_page(ctx, path, search).await {
+            Resolved::Page(state) => self.render(build, *state).await,
+            Resolved::Redirect(status, location) => Response::redirect(status, &location).into(),
         }
-        out
+    }
+
+    /// A GET request without headers, used for prerendering and background regeneration.
+    fn synthetic(&self, app_path: &str) -> Ctx {
+        let request = RequestParts {
+            method: Method::GET,
+            uri: self.config.public_path(app_path).parse().unwrap_or_default(),
+            headers: http::HeaderMap::new(),
+            body: Bytes::new(),
+            remote: None,
+            started: Instant::now(),
+        };
+        Ctx::new(request, self.state.clone(), self.config.clone(), self.cache.clone())
+    }
+
+    /// Renders one concrete path ahead of time, with the route data the client navigates with.
+    pub(crate) async fn prerender(&self, path: &str) -> Prerendered {
+        let ctx = self.synthetic(path);
+        let build = self.current();
+        match self.resolve_page(&ctx, path, "").await {
+            Resolved::Page(mut state) => {
+                let page = self.render(&build, (*state).clone()).await;
+                if let Some(data) = page.data {
+                    state.data = data;
+                }
+                Prerendered {
+                    path: path.to_owned(),
+                    status: page.response.status,
+                    html: String::from_utf8_lossy(&page.response.body).into_owned(),
+                    data: serde_json::to_string(&state).unwrap_or_default(),
+                    revalidate: page.hints.revalidate,
+                }
+            }
+            Resolved::Redirect(status, location) => Prerendered {
+                path: path.to_owned(),
+                status,
+                html: String::new(),
+                data: json!({ "redirect": location }).to_string(),
+                revalidate: None,
+            },
+        }
+    }
+
+    /// Renders the not-found page, written as `404.html` by `volt export`.
+    pub(crate) async fn prerender_not_found(&self) -> Prerendered {
+        let path = "/404";
+        let state = self.failure_state(path, "", &Error::not_found());
+        let data = serde_json::to_string(&state).unwrap_or_default();
+        let page = self.render(&self.current(), state).await;
+        let html = String::from_utf8_lossy(&page.response.body).into_owned();
+        Prerendered { path: path.to_owned(), status: page.response.status, html, data, revalidate: None }
+    }
+
+    /// `robots.txt`, `sitemap.xml` and `llms.txt` as enabled in `[seo]`.
+    pub(crate) async fn generated_files(&self) -> Vec<(String, Bytes)> {
+        let ctx = self.synthetic("/");
+        let mut files = Vec::new();
+        for name in ["/robots.txt", "/sitemap.xml", "/llms.txt"] {
+            if let Some(response) = self.seo(&ctx, name).await {
+                files.push((name.trim_start_matches('/').to_owned(), response.body));
+            }
+        }
+        files
+    }
+
+    async fn resolve_page(&self, ctx: &Ctx, path: &str, search: &str) -> Resolved {
+        let resolved = self.resolve(ctx, path, search).await;
+        self.settle(resolved, path, search)
+    }
+
+    /// Turns a loader error into a redirect or the error page state.
+    fn settle(&self, resolved: Result<PageState>, path: &str, search: &str) -> Resolved {
+        match resolved {
+            Ok(state) => Resolved::Page(Box::new(state)),
+            Err(error) => match error.kind() {
+                ErrorKind::Redirect(location) => Resolved::Redirect(error.status(), location.clone()),
+                _ => Resolved::Page(Box::new(self.failure_state(path, search, &error))),
+            },
+        }
     }
 
     /// Matches the route and runs its loader.
     async fn resolve(&self, ctx: &Ctx, pathname: &str, search: &str) -> Result<PageState> {
         let build = self.current();
-        let Some((pattern, _, params)) = build.pages.find(pathname) else {
+        let Some((pattern, index, params)) = build.pages.find(pathname) else {
             return Err(Error::not_found());
         };
+        if !self.dev && !build.manifest.routes[*index].accepts(pathname) {
+            return Err(Error::not_found());
+        }
         let route = pattern.as_str().to_owned();
         let ctx = ctx.with_params(params.clone());
         let data = match self.loaders.get(&route) {
@@ -598,6 +724,7 @@ impl Server {
             error,
             build_id: self.current().manifest.build_id.clone(),
             site: Site { name: self.config.site.name.clone(), url: self.config.site_url().to_owned() },
+            export: crate::config::is_export(),
         }
     }
 
@@ -606,7 +733,7 @@ impl Server {
             Ok(page) => page,
             Err(error) if self.dev => {
                 log::error(error.message());
-                Response::html(error_overlay("Render failed", error.message()))
+                Response::html(error_overlay("Render failed", error.message(), self.config.base_path()))
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .into()
             }
@@ -650,15 +777,21 @@ impl Server {
         if self.loaders.contains_key(&state.route) {
             hints = CacheHints::default();
         }
-        let html = Document { manifest: &build.manifest, route, state: &state, dev: self.dev }.render(&rendered.html);
-        let status = StatusCode::from_u16(rendered.status).unwrap_or(StatusCode::OK);
-        let cache = if route.is_some_and(|r| r.prerendered.is_some()) || hints.is_static {
-            PUBLIC_PAGE
-        } else {
-            "private, no-cache, no-store, max-age=0, must-revalidate"
+        let document = Document {
+            manifest: &build.manifest,
+            route,
+            state: &state,
+            dev: self.dev,
+            base_path: self.config.base_path(),
         };
-        let response =
-            Response::html(html).status(status).header(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+        let html = document.render(&rendered.html);
+        let status = StatusCode::from_u16(rendered.status).unwrap_or(StatusCode::OK);
+        let shared = route.filter(|r| !self.dev && !r.id.starts_with("/_") && (r.is_cached() || hints.is_static));
+        let cache = match shared {
+            Some(route) => cache::cache_control(hints.revalidate.or(route.revalidate)),
+            None => HeaderValue::from_static("private, no-cache, no-store, max-age=0, must-revalidate"),
+        };
+        let response = Response::html(html).status(status).header(header::CACHE_CONTROL, cache);
         Ok(Page { response, hints, data: rendered.data })
     }
 
@@ -693,6 +826,12 @@ impl Server {
             response.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
             response.headers.append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
         }
+    }
+}
+
+impl Page {
+    fn cached(&self) -> CachedPage {
+        CachedPage { response: self.response.clone(), data: self.data.clone() }
     }
 }
 

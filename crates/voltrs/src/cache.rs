@@ -1,18 +1,21 @@
-//! In-memory cache for prerendered and revalidated pages.
+//! In-memory cache for prerendered and revalidated pages, with stale-while-revalidate,
+//! on-demand invalidation and a byte budget for pages rendered on demand.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use http::{HeaderValue, header};
 use serde_json::Value;
 
-use crate::manifest::{RouteEntry, props_file};
+use crate::manifest::{RouteEntry, prerender_file, same_path};
 use crate::response::Response;
+use crate::router::RoutePattern;
 
-/// Cache-Control of pages that are the same for every visitor.
-pub const PUBLIC_PAGE: &str = "public, max-age=0, s-maxage=31536000, stale-while-revalidate";
+/// Caches of the running servers, reached by [`revalidate_path`] and [`revalidate_prefix`].
+static CACHES: Mutex<Vec<Weak<PageCache>>> = Mutex::new(Vec::new());
 
 /// A cached page and the Pages Router props it was rendered with.
 #[derive(Clone)]
@@ -24,85 +27,271 @@ pub struct CachedPage {
 struct Entry {
     page: CachedPage,
     expires: Option<Instant>,
+    size: usize,
+    used: AtomicU64,
 }
 
 #[derive(Default)]
 struct Entries {
     map: HashMap<String, Entry>,
-    /// Insertion order of the evictable keys. Prerendered pages are bounded by the build and never evicted.
-    order: VecDeque<String>,
+    /// Keys of build-time paths: never evicted and not counted against the budget.
+    pinned: HashSet<String>,
+    /// Bytes held by entries that are not pinned.
+    bytes: usize,
 }
 
-/// Page cache holding prerendered pages plus at most `capacity` pages rendered at runtime.
+impl Entries {
+    fn remove(&mut self, key: &str) {
+        if let Some(entry) = self.map.remove(key)
+            && !self.pinned.contains(key)
+        {
+            self.bytes -= entry.size;
+        }
+    }
+
+    fn insert(&mut self, key: String, entry: Entry, capacity: usize) {
+        self.remove(&key);
+        if !self.pinned.contains(&key) {
+            if entry.size > capacity {
+                return;
+            }
+            self.bytes += entry.size;
+        }
+        self.map.insert(key, entry);
+        while self.bytes > capacity && self.evict_one() {}
+    }
+
+    fn evict_one(&mut self) -> bool {
+        let oldest = self
+            .map
+            .iter()
+            .filter(|(key, _)| !self.pinned.contains(*key))
+            .min_by_key(|(_, entry)| entry.used.load(Ordering::Relaxed))
+            .map(|(key, _)| key.clone());
+        match oldest {
+            Some(key) => {
+                self.remove(&key);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Result of a cache lookup.
+pub enum Lookup {
+    Fresh(CachedPage),
+    /// Past its `revalidate` time. `refresh` is true for exactly one caller until the entry is replaced.
+    Stale {
+        page: CachedPage,
+        refresh: bool,
+    },
+    Miss,
+}
+
+/// Taken before rendering, so a render that started before an invalidation is not stored.
+#[derive(Clone, Copy)]
+pub struct Ticket(u64);
+
+/// Pages keyed by path and query. Build-time paths stay resident; pages rendered on demand share
+/// a byte budget and the least recently used ones are evicted first.
 pub struct PageCache {
     entries: RwLock<Entries>,
+    refreshing: Mutex<HashSet<String>>,
     capacity: usize,
+    clock: AtomicU64,
+    epoch: AtomicU64,
+}
+
+/// Cache key of a request: app path and raw query string.
+pub fn key(path: &str, query: &str) -> String {
+    format!("{path}?{query}")
+}
+
+fn key_path(key: &str) -> &str {
+    key.split_once('?').map_or(key, |(path, _)| path)
+}
+
+/// `Cache-Control` of a cached page: long-lived when static, `s-maxage` when revalidated every `revalidate` seconds.
+pub fn cache_control(revalidate: Option<u64>) -> HeaderValue {
+    match revalidate {
+        Some(seconds) => {
+            HeaderValue::from_str(&format!("public, max-age=0, s-maxage={seconds}, stale-while-revalidate"))
+                .unwrap_or(HeaderValue::from_static("public, max-age=0, must-revalidate"))
+        }
+        None => HeaderValue::from_static("public, max-age=0, s-maxage=31536000, stale-while-revalidate"),
+    }
 }
 
 impl PageCache {
+    /// A cache holding at most `capacity` bytes of pages rendered on demand.
     pub fn new(capacity: usize) -> Self {
-        Self { entries: RwLock::new(Entries::default()), capacity }
-    }
-
-    pub fn get(&self, key: &str) -> Option<CachedPage> {
-        let entries = self.entries.read().ok()?;
-        let entry = entries.map.get(key)?;
-        match entry.expires {
-            Some(expires) if Instant::now() >= expires => None,
-            _ => Some(entry.page.clone()),
+        Self {
+            entries: RwLock::default(),
+            refreshing: Mutex::default(),
+            capacity,
+            clock: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
         }
     }
 
-    pub fn put(&self, key: String, page: CachedPage, ttl: Option<Duration>) {
-        self.insert(key, page, ttl, false);
+    /// Creates a cache reachable from the global revalidation functions.
+    pub fn shared(capacity: usize) -> Arc<Self> {
+        let cache = Arc::new(Self::new(capacity));
+        if let Ok(mut caches) = CACHES.lock() {
+            caches.retain(|c| c.strong_count() > 0);
+            caches.push(Arc::downgrade(&cache));
+        }
+        cache
     }
 
-    fn insert(&self, key: String, page: CachedPage, ttl: Option<Duration>, pin: bool) {
+    pub fn get(&self, key: &str) -> Lookup {
+        let Ok(entries) = self.entries.read() else {
+            return Lookup::Miss;
+        };
+        let Some(entry) = entries.map.get(key) else {
+            return Lookup::Miss;
+        };
+        entry.used.store(self.tick(), Ordering::Relaxed);
+        match entry.expires {
+            Some(expires) if Instant::now() >= expires => {
+                let refresh = self.refreshing.lock().is_ok_and(|mut set| set.insert(key.to_owned()));
+                Lookup::Stale { page: entry.page.clone(), refresh }
+            }
+            _ => Lookup::Fresh(entry.page.clone()),
+        }
+    }
+
+    pub fn ticket(&self) -> Ticket {
+        Ticket(self.epoch.load(Ordering::Acquire))
+    }
+
+    /// Stores a rendered page unless the cache was invalidated after `ticket` was taken.
+    pub fn put(&self, key: String, page: &CachedPage, ttl: Option<Duration>, ticket: Ticket) {
+        self.release(&key);
         let Ok(mut entries) = self.entries.write() else {
             return;
         };
-        let expires = ttl.map(|ttl| Instant::now() + ttl);
-        if let Some(entry) = entries.map.get_mut(&key) {
-            entry.page = page;
-            entry.expires = expires;
-            return;
+        if self.epoch.load(Ordering::Acquire) == ticket.0 {
+            let entry = self.entry(&key, page, ttl);
+            entries.insert(key, entry, self.capacity);
         }
-        if !pin {
-            if self.capacity == 0 {
-                return;
-            }
-            while entries.order.len() >= self.capacity {
-                if let Some(oldest) = entries.order.pop_front() {
-                    entries.map.remove(&oldest);
-                }
-            }
-            entries.order.push_back(key.clone());
-        }
-        entries.map.insert(key, Entry { page, expires });
     }
 
-    /// Loads HTML and props that `volt build` prerendered for static routes.
+    pub fn remove(&self, key: &str) {
+        self.release(key);
+        if let Ok(mut entries) = self.entries.write() {
+            entries.remove(key);
+        }
+    }
+
+    /// Lets the next stale lookup trigger a refresh again, e.g. after a failed regeneration.
+    pub fn release(&self, key: &str) {
+        if let Ok(mut set) = self.refreshing.lock() {
+            set.remove(key);
+        }
+    }
+
+    /// Drops every entry whose path satisfies `matches`; the next request renders it again.
+    pub fn invalidate(&self, matches: impl Fn(&str) -> bool) -> usize {
+        let Ok(mut entries) = self.entries.write() else {
+            return 0;
+        };
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        let keys: Vec<String> = entries.map.keys().filter(|key| matches(key_path(key))).cloned().collect();
+        for key in &keys {
+            entries.remove(key);
+        }
+        keys.len()
+    }
+
+    /// Loads the HTML (and Pages Router props) that `volt build` prerendered and pins it.
     pub fn preload(&self, routes: &[RouteEntry], out_dir: &Path) {
+        let Ok(mut entries) = self.entries.write() else {
+            return;
+        };
         for route in routes {
-            for (path, file) in route.prerendered_files() {
+            for path in &route.prerendered {
+                let Some(file) = prerender_file(path, "html") else {
+                    continue;
+                };
                 let Ok(html) = std::fs::read_to_string(out_dir.join(file)) else {
                     continue;
                 };
-                let data = std::fs::read(out_dir.join(props_file(file)))
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-                let response =
-                    Response::html(html).header(header::CACHE_CONTROL, HeaderValue::from_static(PUBLIC_PAGE));
-                let ttl = route.revalidate.map(Duration::from_secs);
-                self.insert(format!("{path}?"), CachedPage { response, data }, ttl, true);
+                let response = Response::html(html).header(header::CACHE_CONTROL, cache_control(route.revalidate));
+                let data = route.static_props.then(|| Self::prerendered_props(out_dir, path)).flatten();
+                let key = key(path, "");
+                let entry = self.entry(&key, &CachedPage { response, data }, route.revalidate.map(Duration::from_secs));
+                entries.remove(&key);
+                entries.pinned.insert(key.clone());
+                entries.insert(key, entry, self.capacity);
             }
         }
     }
 
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries.read().map(|e| e.map.len()).unwrap_or_default()
+    /// Props stored in the route data file written next to a prerendered page.
+    fn prerendered_props(out_dir: &Path, path: &str) -> Option<Value> {
+        let bytes = std::fs::read(out_dir.join(prerender_file(path, "json")?)).ok()?;
+        let mut state: Value = serde_json::from_slice(&bytes).ok()?;
+        Some(state.get_mut("data")?.take())
     }
+
+    fn entry(&self, key: &str, page: &CachedPage, ttl: Option<Duration>) -> Entry {
+        let props = page.data.as_ref().map_or(0, |data| data.to_string().len());
+        Entry {
+            page: page.clone(),
+            expires: ttl.map(|ttl| Instant::now() + ttl),
+            size: key.len() + page.response.body.len() + props,
+            used: AtomicU64::new(self.tick()),
+        }
+    }
+
+    fn tick(&self) -> u64 {
+        self.clock.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// What a revalidation call targets.
+pub(crate) enum Target {
+    /// One path, or every path of a route pattern such as `/blog/[slug]`.
+    Path(String),
+    /// A path and everything below it.
+    Prefix(String),
+}
+
+impl Target {
+    fn matches(&self, path: &str) -> bool {
+        match self {
+            Self::Path(target) if target.contains('[') => RoutePattern::parse(target).matches(path).is_some(),
+            Self::Path(target) => same_path(target, path),
+            Self::Prefix(prefix) => {
+                let prefix = prefix.trim_end_matches('/');
+                prefix.is_empty() || same_path(prefix, path) || path.starts_with(&format!("{prefix}/"))
+            }
+        }
+    }
+
+    pub(crate) fn apply(&self, cache: &PageCache) -> usize {
+        cache.invalidate(|path| self.matches(path))
+    }
+
+    fn apply_all(&self) -> usize {
+        let caches: Vec<Arc<PageCache>> =
+            CACHES.lock().map(|c| c.iter().filter_map(Weak::upgrade).collect()).unwrap_or_default();
+        caches.iter().map(|cache| self.apply(cache)).sum()
+    }
+}
+
+/// Purges the cached page at `path` (an app path such as `/blog/hello`, without the base path)
+/// so the next request renders it again. A route pattern like `/blog/[slug]` purges all its pages.
+/// Returns the number of purged entries.
+pub fn revalidate_path(path: &str) -> usize {
+    Target::Path(path.to_owned()).apply_all()
+}
+
+/// Purges every cached page at or below `prefix`, e.g. everything under a layout.
+pub fn revalidate_prefix(prefix: &str) -> usize {
+    Target::Prefix(prefix.to_owned()).apply_all()
 }
 
 #[cfg(test)]
@@ -113,33 +302,71 @@ mod tests {
         CachedPage { response: Response::html(body.to_owned()), data: None }
     }
 
+    fn put(cache: &PageCache, path: &str, query: &str, body: &str, ttl: Option<Duration>) {
+        cache.put(key(path, query), &page(body), ttl, cache.ticket());
+    }
+
+    fn cached(cache: &PageCache, key: &str) -> bool {
+        matches!(cache.get(key), Lookup::Fresh(_))
+    }
+
     #[test]
-    fn evicts_oldest_runtime_pages_beyond_capacity() {
-        let cache = PageCache::new(2);
-        cache.insert("/pinned?".into(), page("pinned"), None, true);
-        for key in ["/a?", "/b?", "/c?"] {
-            cache.put(key.into(), page(key), None);
+    fn serves_stale_once_per_refresh() {
+        let cache = PageCache::new(1 << 20);
+        put(&cache, "/a", "", "a", Some(Duration::ZERO));
+        assert!(matches!(cache.get("/a?"), Lookup::Stale { refresh: true, .. }));
+        assert!(matches!(cache.get("/a?"), Lookup::Stale { refresh: false, .. }));
+        put(&cache, "/a", "", "b", Some(Duration::from_secs(60)));
+        assert!(cached(&cache, "/a?"));
+        assert!(matches!(cache.get("/b?"), Lookup::Miss));
+    }
+
+    #[test]
+    fn invalidates_paths_patterns_and_prefixes() {
+        let cache = PageCache::new(1 << 20);
+        for path in ["/", "/blog", "/blog/a", "/blog/b", "/blogger"] {
+            put(&cache, path, "", path, None);
         }
-        assert!(cache.get("/a?").is_none());
-        assert!(cache.get("/b?").is_some() && cache.get("/c?").is_some());
-        assert!(cache.get("/pinned?").is_some());
-        assert_eq!(cache.len(), 3);
+        put(&cache, "/blog/a", "x=1", "q", None);
+        assert_eq!(Target::Path("/blog/a/".into()).apply(&cache), 2);
+        assert_eq!(Target::Path("/blog/[slug]".into()).apply(&cache), 1);
+        assert_eq!(Target::Prefix("/blog".into()).apply(&cache), 1);
+        assert!(cached(&cache, "/blogger?"));
+        assert_eq!(Target::Prefix("/".into()).apply(&cache), 2);
     }
 
     #[test]
-    fn replacing_a_key_keeps_its_slot() {
-        let cache = PageCache::new(2);
-        cache.put("/a?".into(), page("1"), None);
-        cache.put("/a?".into(), page("2"), None);
-        cache.put("/b?".into(), page("b"), None);
-        assert_eq!(cache.get("/a?").map(|p| p.response.body), Some("2".into()));
-        assert_eq!(cache.len(), 2);
+    fn evicts_least_recently_used_within_budget() {
+        let body = "x".repeat(100);
+        let cache = PageCache::new(350);
+        for path in ["/a", "/b", "/c"] {
+            put(&cache, path, "", &body, None);
+        }
+        assert!(cached(&cache, "/a?"));
+        put(&cache, "/d", "", &body, None);
+        assert!(matches!(cache.get("/b?"), Lookup::Miss));
+        for kept in ["/a?", "/c?", "/d?"] {
+            assert!(cached(&cache, kept), "{kept}");
+        }
+        put(&cache, "/huge", "", &"x".repeat(400), None);
+        assert!(matches!(cache.get("/huge?"), Lookup::Miss));
+        assert!(cache.entries.read().unwrap().bytes <= 350);
     }
 
     #[test]
-    fn zero_capacity_keeps_only_prerendered_pages() {
+    fn keeps_pinned_paths_and_drops_renders_older_than_a_purge() {
         let cache = PageCache::new(0);
-        cache.put("/a?".into(), page("a"), None);
-        assert!(cache.get("/a?").is_none());
+        cache.entries.write().unwrap().pinned.insert(key("/a", ""));
+        put(&cache, "/a", "", "a", None);
+        put(&cache, "/b", "", "b", None);
+        assert!(cached(&cache, "/a?"));
+        assert!(matches!(cache.get("/b?"), Lookup::Miss));
+
+        let ticket = cache.ticket();
+        assert_eq!(Target::Path("/a".into()).apply(&cache), 1);
+        cache.put(key("/a", ""), &page("old"), None, ticket);
+        assert!(matches!(cache.get("/a?"), Lookup::Miss));
+        put(&cache, "/a", "", "new", None);
+        assert!(cached(&cache, "/a?"));
     }
 }

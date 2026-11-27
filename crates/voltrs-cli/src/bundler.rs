@@ -46,6 +46,7 @@ struct Shared {
     modules: HashMap<String, String>,
     css: Mutex<BTreeSet<String>>,
     media_dir: PathBuf,
+    static_prefix: String,
     root: PathBuf,
 }
 
@@ -81,7 +82,7 @@ impl VoltPlugin {
             std::fs::create_dir_all(&self.0.media_dir)?;
             std::fs::write(&target, &bytes)?;
         }
-        let url = format!("{}media/{name}", voltrs::manifest::STATIC_PREFIX);
+        let url = format!("{}media/{name}", self.0.static_prefix);
         let code = match imagesize::blob_size(&bytes) {
             Ok(size) if !matches!(ext, "woff" | "woff2" | "ttf" | "otf" | "mp4") => {
                 format!("export default {{ src: {url:?}, width: {}, height: {} }};", size.width, size.height)
@@ -269,6 +270,7 @@ impl<'a> Bundle<'a> {
             modules: self.modules(client),
             css: Mutex::default(),
             media_dir: self.project.static_dir().join("media"),
+            static_prefix: self.project.config.static_prefix(),
             root: self.project.root.clone(),
         })
     }
@@ -278,6 +280,13 @@ impl<'a> Bundle<'a> {
         let env = if self.dev { "development" } else { "production" };
         let mut define: Vec<(String, String)> = vec![("process.env.NODE_ENV".into(), format!("{env:?}"))];
         define.extend(crate::env::public().into_iter().map(|(k, v)| (format!("process.env.{k}"), format!("{v:?}"))));
+        let config = &self.project.config;
+        let optimize_images = config.images.optimize && !voltrs::config::is_export();
+        define.extend([
+            ("process.env.__VOLT_BASE_PATH__".to_owned(), format!("{:?}", config.base_path())),
+            ("process.env.__VOLT_TRAILING_SLASH__".to_owned(), build.trailing_slash.to_string()),
+            ("process.env.__VOLT_IMAGE_OPTIMIZATION__".to_owned(), optimize_images.to_string()),
+        ]);
         define.extend(build.define.iter().map(|(k, v)| (k.clone(), v.clone())));
         let sdk = to_slash(&self.project.sdk_file());
         let mut alias: Vec<(String, Vec<Option<String>>)> =
@@ -377,7 +386,8 @@ impl<'a> Bundle<'a> {
                 Output::Asset(_) => None,
             })
             .collect();
-        let url = |file: &str| format!("{}js/{file}", voltrs::manifest::STATIC_PREFIX);
+        let prefix = self.project.config.static_prefix();
+        let url = |file: &str| format!("{prefix}js/{file}");
         let closure = |start: &str| -> Vec<String> {
             let mut seen = HashSet::new();
             let mut stack = vec![start.to_owned()];

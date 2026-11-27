@@ -1,11 +1,12 @@
-//! The build pipeline shared by `volt dev` and `volt build`.
+//! The build pipeline shared by `volt dev`, `volt build` and `volt export`.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use voltrs::manifest::{ClientAssets, Manifest, RouteEntry};
+use serde_json::Value;
+use voltrs::manifest::{ClientAssets, Manifest, RouteEntry, prerender_file};
+use voltrs::router::{Params, RoutePattern};
 use voltrs::sdk::{SERVER_INFO_FILE, Sdk, ServerInfo};
 use voltrs::ssr::{Engine, EngineOptions};
 
@@ -15,17 +16,58 @@ use crate::project::Project;
 use crate::routes::Route;
 use crate::util::hash;
 
+/// Route exports read from the server bundle by `__VOLT__.routes()`.
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RouteConfig {
     id: String,
     revalidate: Option<u64>,
     dynamic: String,
-    /// Concrete paths from a Pages Router `getStaticPaths`.
+    #[serde(default = "enabled")]
+    dynamic_params: bool,
     #[serde(default)]
-    paths: Vec<String>,
+    static_params: bool,
     /// A Pages Router page with `getStaticProps`.
     #[serde(default, rename = "static")]
     is_static: bool,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+/// Result of `__VOLT__.staticParams(id)`: `generateStaticParams` or `getStaticPaths` output.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticParams {
+    #[serde(default)]
+    params: Vec<Value>,
+    #[serde(default)]
+    paths: Vec<String>,
+    dynamic_params: Option<bool>,
+}
+
+impl StaticParams {
+    /// Concrete URL paths for `pattern`, skipping entries that miss a param.
+    fn resolve(self, pattern: &RoutePattern) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for value in &self.params {
+            match Params::from_json(value).and_then(|params| pattern.href(&params)) {
+                Some(path) => out.push(path),
+                None => voltrs::log::warn(&format!("{}: ignored static params {value}", pattern.as_str())),
+            }
+        }
+        for path in self.paths {
+            if pattern.matches(&path).is_some() {
+                out.push(path);
+            } else {
+                voltrs::log::warn(&format!("{}: static path `{path}` does not match the route", pattern.as_str()));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|path| seen.insert(path.clone()));
+        out
+    }
 }
 
 pub struct Pipeline<'a> {
@@ -82,9 +124,10 @@ impl<'a> Pipeline<'a> {
         manifest.save(&self.project.out_dir)?;
 
         if !self.dev {
-            let static_paths = self.apply_route_config(&mut manifest, info).await?;
-            if self.project.config.build.prerender {
-                self.prerender(&mut manifest, &routes, info, &static_paths).await?;
+            self.apply_route_config(&mut manifest, &routes, info).await?;
+            manifest.save(&self.project.out_dir)?;
+            if self.project.config.build.prerender || voltrs::config::is_export() {
+                self.prerender(&mut manifest, info).await?;
             }
             manifest.save(&self.project.out_dir)?;
             let compressed = crate::compress::precompress(&self.project.static_dir())?;
@@ -94,12 +137,9 @@ impl<'a> Pipeline<'a> {
         Ok(manifest)
     }
 
-    /// Reads `revalidate` and `dynamic` exports from the built server bundle and returns `getStaticPaths` results.
-    async fn apply_route_config(
-        &self,
-        manifest: &mut Manifest,
-        info: &ServerInfo,
-    ) -> Result<HashMap<String, Vec<String>>> {
+    /// Reads route exports (`revalidate`, `dynamic`, `dynamicParams`) and build-time paths
+    /// (`generateStaticParams`, `getStaticPaths`) from the built server bundle.
+    async fn apply_route_config(&self, manifest: &mut Manifest, routes: &[Route], info: &ServerInfo) -> Result<()> {
         let engine = Engine::start(EngineOptions {
             bundle: self.project.out_dir.join(&manifest.server),
             workers: 1,
@@ -109,88 +149,102 @@ impl<'a> Pipeline<'a> {
         .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
         let output = engine.call("routes", String::new()).await.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
         let configs: Vec<RouteConfig> = serde_json::from_str(&output).context("invalid route config")?;
-        let mut static_paths = HashMap::new();
         for config in configs {
-            if let Some(route) = manifest.routes.iter_mut().find(|r| r.id == config.id) {
-                route.revalidate = config.revalidate;
-                route.dynamic |= config.dynamic == "force-dynamic";
-                route.static_props = config.is_static;
-            }
-            if config.is_static && info.loaders.contains(&config.id) {
+            let Some(route) = routes.iter().find(|r| r.id == config.id).filter(|r| !r.is_special()) else {
+                continue;
+            };
+            let Some(entry) = manifest.routes.iter_mut().find(|r| r.id == config.id) else {
+                continue;
+            };
+            entry.dynamic_params = config.dynamic_params;
+            entry.static_props = config.is_static;
+            let loader = info.loaders.contains(&route.id);
+            if config.is_static && loader {
                 voltrs::log::warn(&format!(
                     "{} has getStaticProps and a Rust loader: it renders per request and is never cached",
                     config.id
                 ));
             }
-            if !config.paths.is_empty() {
-                static_paths.insert(config.id, config.paths);
+            // Like Next.js, `revalidate = 0` opts out of caching instead of expiring on every request.
+            if config.dynamic == "force-dynamic" || config.revalidate == Some(0) {
+                entry.dynamic = true;
+                continue;
             }
+            entry.revalidate = config.revalidate;
+            if !route.is_dynamic() {
+                entry.paths = vec![route.id.clone()];
+                continue;
+            }
+            if !config.static_params {
+                continue;
+            }
+            let output = engine
+                .call("staticParams", route.id.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("generating static params of {}: {}", route.id, e.message()))?;
+            let Some(params) = serde_json::from_str::<Option<StaticParams>>(&output)
+                .with_context(|| format!("invalid static params of {}", route.id))?
+            else {
+                continue;
+            };
+            entry.dynamic_params &= params.dynamic_params.unwrap_or(true);
+            entry.paths = params.resolve(&RoutePattern::parse(&route.id));
+            entry.dynamic = loader;
         }
-        Ok(static_paths)
+        Ok(())
     }
 
-    async fn prerender(
-        &self,
-        manifest: &mut Manifest,
-        routes: &[Route],
-        info: &ServerInfo,
-        static_paths: &HashMap<String, Vec<String>>,
-    ) -> Result<()> {
-        let mut owners = HashMap::new();
-        for route in routes.iter().filter(|r| !r.is_special() && !info.loaders.contains(&r.id)) {
-            if manifest.route(&route.id).is_some_and(|m| !m.dynamic) {
-                owners.insert(route.id.clone(), route.id.clone());
-            }
-            for path in static_paths.get(&route.id).into_iter().flatten() {
-                owners.entry(path.clone()).or_insert_with(|| route.id.clone());
-            }
-        }
-        let mut targets: Vec<String> = owners.keys().cloned().collect();
-        targets.sort();
+    /// Renders every known path of routes without a Rust loader into `prerender/`.
+    async fn prerender(&self, manifest: &mut Manifest, info: &ServerInfo) -> Result<()> {
+        let targets: Vec<String> = manifest
+            .routes
+            .iter()
+            .filter(|r| !r.id.starts_with("/_") && !r.dynamic && !info.loaders.contains(&r.id))
+            .flat_map(|r| r.paths.iter().cloned())
+            .collect();
+        let dir = self.project.out_dir.join(voltrs::manifest::PRERENDER_DIR);
+        crate::util::reset_dir(&dir)?;
         if targets.is_empty() {
             return Ok(());
         }
-        let dir = self.project.out_dir.join("prerender");
-        crate::util::reset_dir(&dir)?;
-        let rendered = voltrs::App::new()
+        let renderer = voltrs::App::new()
             .root(&self.project.root)
-            .prerender(&targets)
-            .await
+            .static_renderer()
             .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+        let mut jobs = tokio::task::JoinSet::new();
+        for path in targets {
+            let renderer = renderer.clone();
+            jobs.spawn(async move { renderer.page(&path).await });
+        }
         let mut count = 0;
-        for (url, page) in rendered {
-            let page = match page {
-                Ok(page) => page,
-                Err(error) => {
-                    voltrs::log::warn(&format!("skipped prerendering {url}: {}", error.message()));
-                    continue;
-                }
+        while let Some(page) = jobs.join_next().await {
+            let page = page?;
+            if page.status != voltrs::StatusCode::OK {
+                voltrs::log::warn(&format!("skipped prerendering {}: status {}", page.path, page.status));
+                continue;
+            }
+            let (Some(html), Some(data)) = (prerender_file(&page.path, "html"), prerender_file(&page.path, "json"))
+            else {
+                voltrs::log::warn(&format!("skipped prerendering {}: unsafe file name", page.path));
+                continue;
             };
-            let name =
-                if url == "/" { "index.html".to_owned() } else { format!("{}.html", url.trim_start_matches('/')) };
-            let path = dir.join(&name);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, page.html)?;
-            let file = format!("prerender/{name}");
-            if let Some(data) = &page.data {
-                std::fs::write(
-                    self.project.out_dir.join(voltrs::manifest::props_file(&file)),
-                    serde_json::to_vec(data)?,
-                )?;
-            }
-            if let Some(entry) = owners.get(&url).and_then(|id| manifest.routes.iter_mut().find(|r| &r.id == id)) {
-                if entry.id == url {
-                    entry.prerendered = Some(file);
-                } else {
-                    entry.static_paths.insert(url.clone(), file);
+            for (file, body) in [(html, &page.html), (data, &page.data)] {
+                let path = self.project.out_dir.join(file);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
                 }
+                std::fs::write(&path, body)?;
+            }
+            if let Some(entry) = manifest.routes.iter_mut().find(|r| r.paths.contains(&page.path)) {
                 entry.revalidate = entry.revalidate.or(page.revalidate);
+                entry.prerendered.push(page.path);
             }
             count += 1;
         }
-        voltrs::log::ready(&format!("prerendered {count} static pages"));
+        for entry in &mut manifest.routes {
+            entry.prerendered.sort();
+        }
+        voltrs::log::ready(&format!("prerendered {count} pages"));
         Ok(())
     }
 

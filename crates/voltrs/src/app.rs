@@ -1,5 +1,9 @@
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use http::StatusCode;
 
 use crate::config::Config;
 use crate::context::{Ctx, State};
@@ -94,10 +98,43 @@ impl App {
         server::serve(server, listener).await.map_err(Error::from)
     }
 
-    /// Renders the given static routes to HTML without starting a listener.
-    pub async fn prerender(self, routes: &[String]) -> Result<Vec<(String, Result<server::Prerendered>)>> {
+    /// Loads the build without binding a listener, to render pages ahead of time.
+    pub fn static_renderer(self) -> Result<StaticRenderer> {
         let config = Config::load(&self.root)?;
-        let server = Server::new(config, self.state, self.middleware)?;
-        Ok(server.prerender(routes).await)
+        Ok(StaticRenderer { server: Server::new(config, self.state, self.middleware)? })
+    }
+}
+
+/// A page rendered ahead of time.
+#[derive(Debug, Clone)]
+pub struct Prerendered {
+    /// Concrete app path, e.g. `/blog/hello`.
+    pub path: String,
+    pub status: StatusCode,
+    pub html: String,
+    /// Route data as served by `/_volt/data`, for client navigation on static hosts.
+    pub data: String,
+    /// `revalidate` seconds returned by `getStaticProps`.
+    pub revalidate: Option<u64>,
+}
+
+/// Renders pages and generated files of the current build; used by `volt build` and `volt export`.
+#[derive(Clone)]
+pub struct StaticRenderer {
+    server: Arc<Server>,
+}
+
+impl StaticRenderer {
+    pub async fn page(&self, path: &str) -> Prerendered {
+        self.server.prerender(path).await
+    }
+
+    pub async fn not_found(&self) -> Prerendered {
+        self.server.prerender_not_found().await
+    }
+
+    /// `robots.txt`, `sitemap.xml` and `llms.txt` as `(file name, body)`.
+    pub async fn files(&self) -> Vec<(String, Bytes)> {
+        self.server.generated_files().await
     }
 }

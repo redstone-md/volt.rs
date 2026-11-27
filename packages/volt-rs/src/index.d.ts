@@ -39,6 +39,22 @@ export interface LayoutProps<P extends Params = Params> {
   params: Awaitable<P>;
 }
 
+/**
+ * `export function generateStaticParams()` of a dynamic page or layout, evaluated by `volt build`.
+ * Child generators receive the params produced by parent layouts.
+ */
+export type GenerateStaticParams<P extends Params = Params, Parent extends Params = Params> = (props: {
+  params: Parent;
+}) => P[] | Promise<P[]>;
+
+/** Result of a Pages Router `getStaticPaths`. `fallback: false` answers 404 for other params. */
+export interface GetStaticPathsResult<P extends Params = Params> {
+  paths: (string | { params: P })[];
+  fallback: boolean | "blocking";
+}
+
+export type GetStaticPaths<P extends Params = Params> = () => GetStaticPathsResult<P> | Promise<GetStaticPathsResult<P>>;
+
 export interface ErrorProps {
   error: Error & { status?: number; digest?: string };
   reset: () => void;

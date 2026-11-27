@@ -1,15 +1,23 @@
 import { createElement as h, forwardRef } from "react";
 import { preload } from "react-dom";
+import { BASE_PATH, IMAGE_OPTIMIZATION, endpoint } from "./internal/config.js";
 
 export const DEVICE_SIZES = [640, 750, 828, 1080, 1200, 1920, 2048, 3840];
 export const IMAGE_SIZES = [16, 32, 48, 64, 96, 128, 256, 384];
 const ALL_SIZES = [...IMAGE_SIZES, ...DEVICE_SIZES];
 
 export function defaultLoader({ src, width, quality }) {
-  return `/_volt/image?url=${encodeURIComponent(src)}&w=${width}&q=${quality ?? 75}`;
+  return endpoint(`/_volt/image?url=${encodeURIComponent(src)}&w=${width}&q=${quality ?? 75}`);
 }
 
-const optimizable = (src) => src.startsWith("/") && !src.startsWith("//") && !/\.svg($|\?)/i.test(src);
+// Static imports already carry the base path; plain `public/` paths get it here.
+const withBasePath = (src) =>
+  BASE_PATH && typeof src === "string" && src.startsWith("/") && !src.startsWith("//") && !src.startsWith(`${BASE_PATH}/`)
+    ? `${BASE_PATH}${src}`
+    : src;
+
+const optimizable = (src) =>
+  IMAGE_OPTIMIZATION && src.startsWith("/") && !src.startsWith("//") && !/\.svg($|\?)/i.test(src);
 
 function candidates(width, sizes) {
   if (sizes) return { widths: ALL_SIZES, kind: "w" };
@@ -47,7 +55,7 @@ const Image = forwardRef(function Image(
   const optimize = !unoptimized && typeof src === "string" && (loader !== defaultLoader || optimizable(src));
 
   let srcSet;
-  let url = src;
+  let url = withBasePath(src);
   if (optimize) {
     const { widths, kind } = candidates(w, sizes ?? (fill ? "100vw" : undefined));
     srcSet = widths.map((size, i) => `${loader({ src, width: size, quality })} ${kind === "w" ? `${size}w` : `${i + 1}x`}`).join(", ");

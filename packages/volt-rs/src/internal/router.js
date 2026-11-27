@@ -12,6 +12,7 @@ import {
   useState,
   useTransition,
 } from "react";
+import { endpoint, stripBase, withBase } from "./config.js";
 import { isNotFound, readRedirect } from "./errors.js";
 import { routerEvents } from "./events.js";
 import { Metadata, resolveMetadata } from "./metadata.js";
@@ -148,6 +149,18 @@ function AppTree({ view }) {
 
 const historyKey = () => Math.random().toString(36).slice(2, 10);
 
+/** Where route data comes from: the server, or JSON files written by `volt export`. */
+function dataUrl(path, search, exported) {
+  if (exported) return endpoint(`/_volt/data${path === "/" ? "/index" : path}.json`);
+  return endpoint(`/_volt/data?path=${encodeURIComponent(path + search)}`);
+}
+
+/** Resolves an app href to a URL and its app path (`null` when it is not part of this app). */
+function locate(href) {
+  const url = new URL(withBase(href), location.href);
+  return { url, path: url.origin === location.origin ? stripBase(url.pathname) : null };
+}
+
 function saveScroll(key) {
   try {
     sessionStorage.setItem(`volt:scroll:${key}`, String(window.scrollY));
@@ -185,20 +198,24 @@ export function App({ routes, initial }) {
   const beforePop = useRef(null);
   const buildId = initial.state.buildId;
   current.current = view;
+  const exported = initial.state.export === true;
 
   const load = useCallback(
-    (url, fresh) => {
-      const key = url.pathname + url.search;
+    (path, search, fresh) => {
+      const key = path + search;
       const cached = cache.current.get(key);
       if (!fresh && cached && Date.now() - cached.at < PREFETCH_TTL) return cached.promise;
-      const promise = fetch(`/_volt/data?path=${encodeURIComponent(key)}`, { headers: { accept: "application/json" } })
-        .then((response) => response.json())
+      const promise = fetch(dataUrl(path, search, exported), { headers: { accept: "application/json" } })
+        .then((response) => {
+          if (!response.ok && exported) throw new Error(`no exported data for ${path}`);
+          return response.json();
+        })
         .then((state) => (state.redirect ? { redirect: state.redirect } : createView(routes, state)));
       cache.current.set(key, { promise, at: Date.now() });
       promise.catch(() => cache.current.delete(key));
       return promise;
     },
-    [routes],
+    [routes, exported],
   );
 
   const commit = useCallback((next, after, event) => {
@@ -211,8 +228,8 @@ export function App({ routes, initial }) {
 
   const navigate = useCallback(
     async (href, { replace = false, scroll: toTop = true, fresh = false, shallow = false } = {}) => {
-      const url = new URL(href, location.href);
-      if (url.origin !== location.origin) {
+      const { url, path } = locate(href);
+      if (path === null) {
         location.href = url.href;
         return;
       }
@@ -239,7 +256,7 @@ export function App({ routes, initial }) {
       }
       let next;
       try {
-        next = await load(url, fresh);
+        next = await load(path, url.search, fresh);
       } catch (error) {
         if (own !== ticket.current) return;
         inflight.current = null;
@@ -265,12 +282,17 @@ export function App({ routes, initial }) {
     () => ({
       push: (href, options) => navigate(href, options),
       replace: (href, options) => navigate(href, { ...options, replace: true }),
-      refresh: () => navigate(location.href, { replace: true, scroll: false, fresh: true }),
+      refresh: () =>
+        navigate(`${stripBase(location.pathname) ?? "/"}${location.search}${location.hash}`, {
+          replace: true,
+          scroll: false,
+          fresh: true,
+        }),
       back: () => history.back(),
       forward: () => history.forward(),
       prefetch: (href) => {
-        const url = new URL(href, location.href);
-        if (url.origin === location.origin) load(url, false).catch(() => {});
+        const { url, path } = locate(href);
+        if (path !== null) load(path, url.search, false).catch(() => {});
       },
       beforePopState: (callback) => {
         beforePop.current = callback;
@@ -292,7 +314,9 @@ export function App({ routes, initial }) {
       if (beforePop.current && beforePop.current({ url: as, as, options: {} }) === false) return;
       routerEvents.emit("routeChangeStart", as, { shallow: false });
       try {
-        const next = await load(new URL(location.href), false);
+        const path = stripBase(location.pathname);
+        if (path === null) return location.reload();
+        const next = await load(path, location.search, false);
         if (next.redirect || next.state.buildId !== buildId || kindOf(next.route) !== kindOf(current.current.route)) {
           return location.reload();
         }

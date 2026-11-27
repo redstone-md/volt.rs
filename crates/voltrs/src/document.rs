@@ -23,6 +23,9 @@ pub struct PageState {
     pub error: Option<Value>,
     pub build_id: String,
     pub site: Site,
+    /// Set by `volt export`: the client reads route data from `/_volt/data/<path>.json` files.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub export: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +63,7 @@ pub struct Document<'a> {
     pub route: Option<&'a RouteEntry>,
     pub state: &'a PageState,
     pub dev: bool,
+    pub base_path: &'a str,
 }
 
 impl Document<'_> {
@@ -123,14 +127,14 @@ impl Document<'_> {
             self.manifest.client.entry
         );
         if self.dev {
-            body.push_str(crate::dev::CLIENT);
+            body.push_str(&crate::dev::client(self.base_path));
         }
         body
     }
 }
 
 /// Development error page for render failures.
-pub fn error_overlay(title: &str, detail: &str) -> String {
+pub fn error_overlay(title: &str, detail: &str, base_path: &str) -> String {
     format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{t}</title><style>\
 body{{margin:0;font:14px/1.6 ui-monospace,monospace;background:#0b0b0f;color:#e4e4e7}}\
@@ -139,7 +143,7 @@ pre{{white-space:pre-wrap;background:#18181b;border:1px solid #27272a;border-rad
 </style></head><body><main><h1>⚡ {t}</h1><pre>{d}</pre></main>{c}</body></html>",
         t = escape_html(title),
         d = escape_html(detail),
-        c = crate::dev::CLIENT
+        c = crate::dev::client(base_path)
     )
 }
 

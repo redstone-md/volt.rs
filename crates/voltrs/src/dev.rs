@@ -8,14 +8,14 @@ use bytes::Bytes;
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::sync::mpsc;
 
-/// Browser-side client injected into dev pages.
-pub const CLIENT: &str = r#"<script type="module">
+/// Browser-side client injected into dev pages; `{base}` is replaced with the base path.
+const CLIENT: &str = r#"<script type="module">
 const connect = (stale) => {
-  const source = new EventSource("/_volt/hmr");
+  const source = new EventSource("{base}/_volt/hmr");
   source.onopen = () => { if (stale) location.reload(); };
   source.addEventListener("reload", () => location.reload());
   source.addEventListener("css", () => {
-    for (const link of document.querySelectorAll('link[rel="stylesheet"][href^="/_volt/"]')) {
+    for (const link of document.querySelectorAll('link[rel="stylesheet"][href^="{base}/_volt/"]')) {
       const url = new URL(link.href);
       url.searchParams.set("t", Date.now());
       link.href = url.toString();
@@ -28,6 +28,11 @@ const connect = (stale) => {
 };
 connect(false);
 </script>"#;
+
+/// The live reload client for an app mounted at `base_path`.
+pub fn client(base_path: &str) -> String {
+    CLIENT.replace("{base}", base_path)
+}
 
 #[derive(Default)]
 pub struct Hub {
