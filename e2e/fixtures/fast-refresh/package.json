@@ -1,0 +1,1 @@
+{ "name": "fast-refresh", "private": true, "type": "module", "e2e": { "dev": true }, "dependencies": { "react": "^19.1.0", "react-dom": "^19.1.0", "volt-rs": "*" } }

@@ -1,5 +1,7 @@
 // Builds a fixture app against the local crates and packages, serves it and runs its browser test.
-// Usage: node e2e/run.mjs <fixture> [--keep]
+// Usage: node e2e/run.mjs <fixture> [--keep] [--dev]
+// With --dev, or `"e2e": { "dev": true }` in the fixture's package.json, the app runs under `volt dev`
+// instead of a production build, and the test may edit the files in APP_DIR.
 // Env: VOLT_BIN (default target/debug/volt), PORT (default 3900), E2E_DIR (default /tmp/volt-e2e)
 import { spawn, spawnSync } from "node:child_process";
 import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -39,12 +41,13 @@ if (existsSync(cargoPath)) {
   writeFileSync(cargoPath, cargo);
 }
 run("npm", ["install", "--install-links", "--no-audit", "--no-fund", "--loglevel=error"]);
-run(volt, ["build"]);
+const dev = flags.includes("--dev") || pkg.e2e?.dev === true;
+if (!dev) run(volt, ["build"]);
 
-const server = spawn(volt, ["start"], { cwd: dir, env: { ...process.env, PORT: port }, stdio: "inherit" });
+const server = spawn(volt, [dev ? "dev" : "start"], { cwd: dir, env: { ...process.env, PORT: port }, stdio: "inherit" });
 const base = `http://localhost:${port}`;
 let ready = false;
-for (let i = 0; i < 200 && !ready; i++) {
+for (let i = 0; i < (dev ? 1200 : 200) && !ready; i++) {
   ready = await fetch(base).then(() => true, () => false);
   if (!ready) await new Promise((r) => setTimeout(r, 100));
 }
