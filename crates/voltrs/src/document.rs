@@ -52,11 +52,14 @@ pub struct SlotState {
     pub route: Option<String>,
     pub params: Value,
     pub data: Value,
+    /// Set when the page's loader failed: the slot renders its `not-found` or `error` file instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<Value>,
 }
 
 impl Default for SlotState {
     fn default() -> Self {
-        Self { route: None, params: Value::Object(Default::default()), data: Value::Null }
+        Self { route: None, params: Value::Object(Default::default()), data: Value::Null, error: None }
     }
 }
 

@@ -1,7 +1,7 @@
 //! Parallel route resolution: which page of each `@slot` renders for a URL.
 
 use crate::manifest::{SlotEntry, SlotRoute};
-use crate::router::{Params, Router};
+use crate::router::{Params, RoutePattern, Router};
 
 /// The slots of one build, matched with [`Router`] like pages.
 #[derive(Default)]
@@ -18,6 +18,8 @@ struct Table {
 /// What one slot renders: a page with its params, or nothing when no page matches.
 pub(crate) struct SlotMatch<'a> {
     pub key: &'a str,
+    /// Directory key of the layout that receives the slot.
+    pub segment: &'a str,
     pub route: Option<(&'a SlotRoute, Params)>,
     pub default: bool,
 }
@@ -60,10 +62,24 @@ impl Slots {
                 if let Some((route, _)) = &found {
                     pending.extend(route.segments.iter().map(String::as_str));
                 }
-                out.push(SlotMatch { key: &table.entry.key, route: found, default: table.entry.default });
+                out.push(SlotMatch {
+                    key: &table.entry.key,
+                    segment: &table.entry.segment,
+                    route: found,
+                    default: table.entry.default,
+                });
             }
         }
         out
+    }
+
+    /// Whether `path` exists in a slot of the layouts in `dirs`. Catch-all slot pages, the usual way to clear a
+    /// slot on other URLs, render for URLs that exist but do not make every URL exist.
+    pub fn matches(&self, dirs: &[String], path: &str) -> bool {
+        self.resolve(dirs, path, false)
+            .iter()
+            .filter_map(|m| m.route.as_ref())
+            .any(|(route, _)| !RoutePattern::parse(&route.pattern).is_catch_all())
     }
 
     /// Whether an intercepting slot page of the layouts in `dirs` matches `path`.
@@ -77,7 +93,13 @@ mod tests {
     use super::*;
 
     fn route(id: &str, pattern: &str, intercept: bool) -> SlotRoute {
-        SlotRoute { id: id.into(), pattern: pattern.into(), intercept, segments: vec![id.into()] }
+        SlotRoute {
+            id: id.into(),
+            pattern: pattern.into(),
+            intercept,
+            segments: vec![id.into()],
+            ..SlotRoute::default()
+        }
     }
 
     #[test]
@@ -87,7 +109,10 @@ mod tests {
                 key: "/@modal".into(),
                 segment: "/".into(),
                 default: true,
-                routes: vec![route("/@modal/(.)photos/[id]", "/photos/[id]", true)],
+                routes: vec![
+                    route("/@modal/(.)photos/[id]", "/photos/[id]", true),
+                    route("/@modal/[...rest]", "/[...rest]", false),
+                ],
             },
             SlotEntry {
                 key: "/dashboard/@team".into(),
@@ -99,16 +124,18 @@ mod tests {
         let root = vec!["/".to_owned()];
         let hard = slots.resolve(&root, "/photos/1", false);
         assert_eq!(hard.len(), 1);
-        assert!(hard[0].route.is_none());
+        assert_eq!(hard[0].route.as_ref().unwrap().0.id, "/@modal/[...rest]");
         let soft = slots.resolve(&root, "/photos/1", true);
         let (route, params) = soft[0].route.as_ref().unwrap();
         assert_eq!(route.id, "/@modal/(.)photos/[id]");
         assert_eq!(params.get("id"), Some("1"));
         assert!(slots.intercepts(&root, "/photos/1"));
         assert!(!slots.intercepts(&root, "/photos"));
+        assert!(!slots.matches(&root, "/photos/1"));
+        assert!(slots.matches(&["/dashboard".to_owned()], "/dashboard"));
         let dashboard = vec!["/".to_owned(), "/dashboard".to_owned()];
         let matched = slots.resolve(&dashboard, "/dashboard", false);
-        assert_eq!(matched[1].key, "/dashboard/@team");
+        assert_eq!((matched[1].key, matched[1].segment), ("/dashboard/@team", "/dashboard"));
         assert!(matched[1].route.is_some());
         assert!(slots.resolve(&dashboard, "/dashboard/settings", false)[1].route.is_none());
     }

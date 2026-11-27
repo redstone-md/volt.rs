@@ -130,6 +130,12 @@ pub struct SlotRoute {
     /// Directory keys of the page inside the slot, for slots nested in it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<String>,
+    /// A `not-found` file inside the slot renders when the page's loader fails with `not_found()`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_found: bool,
+    /// An `error` file inside the slot renders when the page's loader fails with any other error.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub error: bool,
 }
 
 impl Default for RouteEntry {

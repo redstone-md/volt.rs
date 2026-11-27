@@ -159,6 +159,20 @@ impl RoutePattern {
         self.segments.iter().any(|s| !matches!(s, Segment::Static(_)))
     }
 
+    /// Whether the pattern ends in a catch-all (`[...x]` or `[[...x]]`).
+    pub fn is_catch_all(&self) -> bool {
+        self.segments.iter().any(|s| matches!(s, Segment::CatchAll(_) | Segment::OptionalCatchAll(_)))
+    }
+
+    /// Whether both patterns match the same paths: equal up to parameter names.
+    pub fn same_paths(&self, other: &Self) -> bool {
+        self.segments.len() == other.segments.len()
+            && self.segments.iter().zip(&other.segments).all(|(a, b)| match (a, b) {
+                (Segment::Static(a), Segment::Static(b)) => a == b,
+                (a, b) => a.weight() == b.weight(),
+            })
+    }
+
     /// Sort key: more specific patterns first.
     fn specificity(&self) -> (Vec<u8>, std::cmp::Reverse<usize>) {
         (self.segments.iter().map(Segment::weight).collect(), std::cmp::Reverse(self.segments.len()))
@@ -340,6 +354,9 @@ mod tests {
         assert_eq!(*router.find("/blog/x").unwrap().1, 1);
         assert_eq!(*router.find("/a/b").unwrap().1, 0);
         assert_eq!(*router.find_by("/blog/new", |v| *v != 2).unwrap().1, 1);
+        assert!(RoutePattern::parse("/shop/[id]").same_paths(&RoutePattern::parse("/shop/[slug]")));
+        assert!(!RoutePattern::parse("/shop/[id]").same_paths(&RoutePattern::parse("/shop/[...id]")));
+        assert!(!RoutePattern::parse("/shop/new").same_paths(&RoutePattern::parse("/shop/[id]")));
     }
 
     #[test]

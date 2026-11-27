@@ -107,6 +107,8 @@ impl Slot {
                     pattern: r.pattern.clone(),
                     intercept: r.intercept,
                     segments: r.dirs.clone(),
+                    not_found: r.segments.iter().any(|s| s.not_found.is_some()),
+                    error: r.segments.iter().any(|s| s.error.is_some()),
                 })
                 .collect(),
         }
@@ -398,12 +400,18 @@ impl AppDir {
     }
 
     /// Every URL route, including those that only exist in slots and render the `default` page of their layout.
+    /// A slot URL that a page answers too needs no fallback: the page renders as `children`.
     fn scan(&self) -> Result<BTreeMap<String, Route>> {
         let mut found = Found::default();
         let mut stack = vec![self.root.clone()];
         Self::walk(&self.dir, &Place::root(), &mut stack, &mut found, &mut None)?;
         for route in found.fallbacks {
-            found.routes.entry(route.id.clone()).or_insert(route);
+            let pattern = RoutePattern::parse(&route.id);
+            let answered =
+                found.routes.values().any(|r| r.intercept.is_none() && RoutePattern::parse(&r.id).same_paths(&pattern));
+            if !answered {
+                found.routes.insert(route.id.clone(), route);
+            }
         }
         for route in found.routes.values_mut() {
             route.global_error = self.global_error.clone();
@@ -481,7 +489,8 @@ impl AppDir {
             && let Some(own) = stack.last()
         {
             let (segments, files) = segments(stack);
-            for route in own.slots.iter().flat_map(|s| &s.routes).filter(|r| !r.intercept) {
+            let creates_url = |r: &&SlotRoute| !r.intercept && !RoutePattern::parse(&r.pattern).is_catch_all();
+            for route in own.slots.iter().flat_map(|s| &s.routes).filter(creates_url) {
                 found.fallbacks.push(Route {
                     dirs: place.dirs.clone(),
                     path: place.path.clone(),
@@ -748,6 +757,34 @@ mod tests {
             vec!["/", "/(main)", "/(main)/feed", "/(main)/feed/(..)photos", "/(main)/feed/(..)photos/[id]"]
         );
         assert!(routes.iter().find(|r| r.id == "/photos/[id]").unwrap().intercept.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pages_answer_slot_urls_before_fallbacks() {
+        let dir = fixture(
+            "shadow",
+            &[
+                "layout.tsx",
+                "shop/layout.tsx",
+                "shop/page.tsx",
+                "shop/default.tsx",
+                "shop/[slug]/page.tsx",
+                "shop/@side/default.tsx",
+                "shop/@side/[id]/page.tsx",
+                "shop/@side/[id]/not-found.tsx",
+                "shop/@side/cart/page.tsx",
+                "shop/@side/[...rest]/page.tsx",
+            ],
+        );
+        let routes = scan(Some(&dir), None).unwrap();
+        let ids: Vec<&str> = routes.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["/shop", "/shop/[slug]", "/shop/cart", NOT_FOUND, ERROR]);
+        assert!(routes[1].fallback.is_none());
+        assert_eq!(routes[2].fallback.as_deref(), Some("/shop"));
+        let side = routes[0].slots()[0].1.entry("/shop");
+        let item = side.routes.iter().find(|r| r.id == "/shop/@side/[id]").unwrap();
+        assert!(item.not_found && !item.error);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

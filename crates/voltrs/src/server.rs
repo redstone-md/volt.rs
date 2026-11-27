@@ -26,7 +26,7 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::flash::ActionFlash;
 use crate::form::FormData;
 use crate::log;
-use crate::manifest::{Manifest, RouteEntry, STATIC_PREFIX};
+use crate::manifest::{Manifest, RouteEntry, STATIC_PREFIX, SlotRoute};
 use crate::metadata::MetadataAssets;
 use crate::registry::{self, ActionDef, ApiDef, BoxFuture, LoaderDef, Payload};
 use crate::response::{IntoResponse, Response};
@@ -46,6 +46,8 @@ type HyperResponse = hyper::Response<Either<Full<Bytes>, Either<EventStream, Pag
 struct Build {
     manifest: Manifest,
     pages: Router<usize>,
+    /// Routes that only exist in slots and render the `default` page of their layout, tried after `pages`.
+    fallbacks: Router<usize>,
     /// Intercepting routes by the pattern they intercept.
     intercepts: Router<usize>,
     slots: Slots,
@@ -55,14 +57,20 @@ struct Build {
 
 impl Build {
     fn entry(&self, path: &str) -> Option<&RouteEntry> {
-        self.pages.find(path).map(|(_, index, _)| &self.manifest.routes[*index])
+        let (_, index, _) = self.pages.find(path).or_else(|| self.fallbacks.find(path))?;
+        Some(&self.manifest.routes[*index])
+    }
+
+    /// The routes that `keep` selects, by their own pattern.
+    fn table(manifest: &Manifest, keep: impl Fn(&RouteEntry) -> bool) -> Router<usize> {
+        manifest.routes.iter().enumerate().filter(|(_, r)| keep(r)).map(|(i, r)| (r.id.clone(), i)).collect()
     }
 
     fn load(out_dir: &std::path::Path) -> Result<Self> {
         let manifest = Manifest::load(out_dir)
             .map_err(|e| Error::internal(format!("no build found in {} ({e}); run `volt build`", out_dir.display())))?;
-        let pages =
-            manifest.routes.iter().enumerate().filter(|(_, r)| r.is_page()).map(|(i, r)| (r.id.clone(), i)).collect();
+        let pages = Self::table(&manifest, |r| r.is_page() && r.fallback.is_none());
+        let fallbacks = Self::table(&manifest, |r| r.is_page() && r.fallback.is_some());
         let intercepts = manifest
             .routes
             .iter()
@@ -72,7 +80,7 @@ impl Build {
         let slots = Slots::new(&manifest.slots);
         let assets = StaticAssets::load(&out_dir.join("static"));
         let metadata = MetadataAssets::load(out_dir, &manifest.metadata);
-        Ok(Self { manifest, pages, intercepts, slots, assets, metadata })
+        Ok(Self { manifest, pages, fallbacks, intercepts, slots, assets, metadata })
     }
 
     fn has_route(&self, route: MetadataRoute) -> bool {
@@ -958,6 +966,8 @@ impl Server {
     ///
     /// On a client navigation from a route that shares a layout with an intercepting route, the intercepting route
     /// wins: in a slot, the client keeps its page and only the slots change; otherwise it renders instead of the target.
+    /// A URL that no page matches but a slot of a mounted layout does keeps the page as well; otherwise the `default`
+    /// page of the layout renders, if there is one.
     async fn resolve(&self, ctx: &Ctx, pathname: &str, search: &str, navigation: Navigation<'_>) -> Result<PageState> {
         let build = self.current();
         let from = match navigation {
@@ -973,19 +983,19 @@ impl Server {
             let scope = build.manifest.routes[*index].intercept.as_ref().map(|i| &i.scope);
             from.zip(scope).is_some_and(|(from, scope)| from.segments.contains(scope))
         };
-        let Some((_, index, params)) =
-            build.intercepts.find_by(pathname, in_scope).or_else(|| build.pages.find(pathname))
-        else {
+        let page = build.intercepts.find_by(pathname, in_scope).or_else(|| build.pages.find(pathname));
+        if page.is_none()
+            && let Some(from) = from
+            && build.slots.matches(&from.segments, pathname)
+        {
+            return self.retain(ctx, &build, from, pathname, search).await;
+        }
+        let Some((_, index, params)) = page.or_else(|| build.fallbacks.find(pathname)) else {
             return Err(Error::not_found());
         };
         let entry = &build.manifest.routes[*index];
         if !self.dev && !entry.accepts(pathname) {
             return Err(Error::not_found());
-        }
-        if let (Some(from), Some(holder)) = (from, &entry.fallback)
-            && from.segments.contains(holder)
-        {
-            return self.retain(ctx, &build, from, pathname, search).await;
         }
         // `force-static` pages render once per pathname and are shared with every visitor, so their loader
         // sees a request without query, cookies or headers, as in Next.js.
@@ -998,8 +1008,8 @@ impl Server {
             ctx
         };
         let data = self.load(ctx, &entry.id, &params).await?;
-        let hard = matches!(navigation, Navigation::Hard);
-        let slots = self.slots(ctx, &build, &entry.segments, pathname, false, hard).await?;
+        let mounted = from.map_or(&[][..], |from| &from.segments[..]);
+        let slots = self.slots(ctx, &build, &entry.segments, pathname, false, mounted).await?;
         let mut state = self.state(entry.id.clone(), pathname, search, params.to_json(), data, 200, None);
         state.slots = slots;
         Ok(state)
@@ -1013,8 +1023,9 @@ impl Server {
         }
     }
 
-    /// What every slot of the layouts in `dirs` renders. On a hard load, a slot without a match or a `default`
-    /// page makes the whole page a 404, as in Next.js.
+    /// What every slot of the layouts in `dirs` renders. `mounted` lists the layouts the client keeps from the
+    /// view it navigates from: their unmatched slots keep what they showed. Any other slot without a match or a
+    /// `default` page makes the whole page a 404, as in Next.js.
     async fn slots(
         &self,
         ctx: &Ctx,
@@ -1022,22 +1033,43 @@ impl Server {
         dirs: &[String],
         pathname: &str,
         intercept: bool,
-        hard: bool,
+        mounted: &[String],
     ) -> Result<BTreeMap<String, SlotState>> {
         let mut out = BTreeMap::new();
         for slot in build.slots.resolve(dirs, pathname, intercept) {
             let state = match slot.route {
-                Some((route, params)) => SlotState {
-                    route: Some(route.id.clone()),
-                    data: self.load(ctx, &route.id, &params).await?,
-                    params: params.to_json(),
-                },
-                None if hard && !slot.default => return Err(Error::not_found()),
+                Some((route, params)) => {
+                    let (data, error) = match self.load(ctx, &route.id, &params).await {
+                        Ok(data) => (data, None),
+                        Err(error) => (Value::Null, Some(self.slot_error(route, pathname, error)?)),
+                    };
+                    SlotState { route: Some(route.id.clone()), data, params: params.to_json(), error }
+                }
+                None if !slot.default && !mounted.iter().any(|dir| dir == slot.segment) => {
+                    return Err(Error::not_found());
+                }
                 None => SlotState::default(),
             };
             out.insert(slot.key.to_owned(), state);
         }
         Ok(out)
+    }
+
+    /// A slot loader failure that a `not-found` or `error` boundary inside the slot renders, or the error itself
+    /// when the slot has none and the whole page fails.
+    fn slot_error(&self, route: &SlotRoute, pathname: &str, error: Error) -> Result<Value> {
+        let caught = match error.kind() {
+            ErrorKind::NotFound => route.not_found,
+            ErrorKind::Redirect(_) => false,
+            ErrorKind::Status => route.error,
+        };
+        if !caught {
+            return Err(error);
+        }
+        if error.status().is_server_error() {
+            log::error(&format!("{pathname} ({}): {}", route.id, error.message()));
+        }
+        Ok(error.to_json(self.dev))
     }
 
     /// A client navigation that keeps the page of `from` and only updates the slots of its layouts.
@@ -1049,7 +1081,7 @@ impl Server {
         pathname: &str,
         search: &str,
     ) -> Result<PageState> {
-        let slots = self.slots(ctx, build, &from.segments, pathname, true, false).await?;
+        let slots = self.slots(ctx, build, &from.segments, pathname, true, &from.segments).await?;
         let mut state = self.state(from.id.clone(), pathname, search, json!({}), Value::Null, 200, None);
         state.slots = slots;
         state.retain = true;
