@@ -242,8 +242,11 @@ fn routes(project: &Project) -> Result<()> {
         println!("  {:<32} {:<8}", api, "api");
     }
     if let Some(middleware) = middleware::Middleware::find(&project.root)? {
-        let matcher =
-            if middleware.matcher.is_empty() { "every path".to_owned() } else { middleware.matcher.join(" ") };
+        let matcher = if middleware.matcher.is_empty() {
+            "every path".to_owned()
+        } else {
+            middleware.matcher.iter().map(|rule| rule.source.as_str()).collect::<Vec<_>>().join(" ")
+        };
         println!("  {:<32} {:<8} {}", "middleware", project.relative(&middleware.file), log::paint("2", &matcher));
     }
     Ok(())

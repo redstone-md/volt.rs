@@ -133,9 +133,9 @@ pub struct PrerenderedResponse {
 /// `middleware.ts`: which paths it runs on.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MiddlewareEntry {
-    /// `config.matcher` patterns; empty runs it on every path.
+    /// `config.matcher` rules; empty runs it on every path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub matcher: Vec<String>,
+    pub matcher: Vec<crate::matcher::MatcherRule>,
 }
 
 /// A parallel route slot: the `@name` folder of a layout.

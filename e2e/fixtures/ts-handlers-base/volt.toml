@@ -1,0 +1,5 @@
+[site]
+name = "ts-handlers-base"
+
+[build]
+base_path = "/app"

@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{ArrayExpressionElement, Declaration, Expression, ObjectPropertyKind, Statement};
+use oxc_ast::ast::{ArrayExpressionElement, Declaration, Expression, ObjectExpression, ObjectPropertyKind, Statement};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use voltrs::manifest::MiddlewareEntry;
-use voltrs::matcher::PathMatcher;
+use voltrs::matcher::{Condition, ConditionKind, MatcherRule, PathMatcher};
 
 const NAMES: [&str; 2] = ["middleware", "proxy"];
 const DIRS: [&str; 2] = ["", "src"];
@@ -17,8 +17,8 @@ const DIRS: [&str; 2] = ["", "src"];
 #[derive(Debug, Clone)]
 pub struct Middleware {
     pub file: PathBuf,
-    /// `config.matcher` patterns, empty for every path.
-    pub matcher: Vec<String>,
+    /// `config.matcher` rules, empty for every path.
+    pub matcher: Vec<MatcherRule>,
 }
 
 impl Middleware {
@@ -40,8 +40,8 @@ impl Middleware {
     }
 }
 
-/// The `matcher` of `export const config`: a string, or an array of strings and `{ source }` objects.
-fn matcher(path: &Path, code: &str) -> Result<Vec<String>> {
+/// The `matcher` of `export const config`: a string, or an array of strings and `{ source, has, missing }` objects.
+fn matcher(path: &Path, code: &str) -> Result<Vec<MatcherRule>> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::ts());
     let parsed = Parser::new(&allocator, code, source_type).parse();
@@ -66,7 +66,7 @@ fn matcher(path: &Path, code: &str) -> Result<Vec<String>> {
                 }
                 return match unwrap(&property.value) {
                     Expression::ArrayExpression(array) => array.elements.iter().map(element).collect(),
-                    value => Ok(vec![source(value)?]),
+                    value => Ok(vec![rule(value)?]),
                 };
             }
         }
@@ -84,30 +84,54 @@ fn unwrap<'a, 'b>(expression: &'b Expression<'a>) -> &'b Expression<'a> {
     }
 }
 
-fn element(element: &ArrayExpressionElement) -> Result<String> {
+fn element(element: &ArrayExpressionElement) -> Result<MatcherRule> {
     match element.as_expression() {
-        Some(expression) => source(unwrap(expression)),
+        Some(expression) => rule(unwrap(expression)),
         None => bail!("matcher entries must be strings or `{{ source }}` objects"),
     }
 }
 
-/// A matcher pattern: a string literal, a template without substitutions, or `{ source: "..." }`.
-fn source(expression: &Expression) -> Result<String> {
+/// A matcher entry: a pattern string, or `{ source: "...", has: [...], missing: [...] }`.
+fn rule(expression: &Expression) -> Result<MatcherRule> {
+    let Expression::ObjectExpression(object) = expression else { return Ok(MatcherRule::path(string(expression)?)) };
+    let source = property(object, "source").ok_or_else(|| anyhow::anyhow!("matcher objects need a `source`"))?;
+    let conditions = |name| match property(object, name) {
+        Some(Expression::ArrayExpression(array)) => array
+            .elements
+            .iter()
+            .map(|element| match element.as_expression().map(unwrap) {
+                Some(Expression::ObjectExpression(object)) => condition(object),
+                _ => bail!("`{name}` entries must be `{{ type, key, value }}` objects"),
+            })
+            .collect(),
+        Some(_) => bail!("`{name}` must be an array"),
+        None => Ok(Vec::new()),
+    };
+    Ok(MatcherRule { source: string(source)?, has: conditions("has")?, missing: conditions("missing")? })
+}
+
+/// A `has` / `missing` entry.
+fn condition(object: &ObjectExpression) -> Result<Condition> {
+    let text = |name| property(object, name).map(string).transpose();
+    let kind = text("type")?.unwrap_or_default();
+    let kind = ConditionKind::parse(&kind)
+        .ok_or_else(|| anyhow::anyhow!("condition type `{kind}` must be header, cookie, query or host"))?;
+    Ok(Condition { kind, key: text("key")?, value: text("value")? })
+}
+
+/// The unwrapped value of the property `name` of an object literal.
+fn property<'a, 'b>(object: &'b ObjectExpression<'a>, name: &str) -> Option<&'b Expression<'a>> {
+    object.properties.iter().find_map(|property| match property {
+        ObjectPropertyKind::ObjectProperty(p) if p.key.static_name()?.as_str() == Some(name) => Some(unwrap(&p.value)),
+        _ => None,
+    })
+}
+
+/// A string literal or a template without substitutions.
+fn string(expression: &Expression) -> Result<String> {
     let text = match expression {
         Expression::StringLiteral(literal) => literal.value.as_str(),
         Expression::TemplateLiteral(template) => template.single_quasi().and_then(|q| q.as_str()),
-        Expression::ObjectExpression(object) => {
-            let source = object.properties.iter().find_map(|property| match property {
-                ObjectPropertyKind::ObjectProperty(p) if p.key.static_name()?.as_str() == Some("source") => {
-                    Some(&p.value)
-                }
-                _ => None,
-            });
-            return match source {
-                Some(value) => self::source(unwrap(value)),
-                None => bail!("matcher objects need a `source`"),
-            };
-        }
         _ => None,
     };
     match text {
@@ -121,7 +145,7 @@ mod tests {
     use super::*;
 
     fn read(code: &str) -> Result<Vec<String>> {
-        matcher(Path::new("middleware.ts"), code)
+        Ok(matcher(Path::new("middleware.ts"), code)?.into_iter().map(|rule| rule.source).collect())
     }
 
     #[test]
@@ -135,5 +159,18 @@ mod tests {
         assert_eq!(read("export const config = { matcher: '/x' };").unwrap(), vec!["/x"]);
         assert!(read("export function middleware() {}").unwrap().is_empty());
         assert!(read("const m = '/x'; export const config = { matcher: m };").is_err());
+    }
+
+    #[test]
+    fn reads_conditions() {
+        let code = r#"export const config = {
+            matcher: [{ source: "/a", has: [{ type: "header", key: "x-beta", value: "on" }], missing: [{ type: "cookie", key: "s" }] }],
+        };"#;
+        let rules = matcher(Path::new("middleware.ts"), code).unwrap();
+        let header = Condition { kind: ConditionKind::Header, key: Some("x-beta".into()), value: Some("on".into()) };
+        assert_eq!(rules[0].has, [header]);
+        assert_eq!(rules[0].missing, [Condition { kind: ConditionKind::Cookie, key: Some("s".into()), value: None }]);
+        let bad = r#"export const config = { matcher: [{ source: "/a", has: [{ type: "path", key: "x" }] }] };"#;
+        assert!(matcher(Path::new("middleware.ts"), bad).is_err());
     }
 }

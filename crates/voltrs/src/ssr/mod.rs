@@ -5,7 +5,7 @@ mod fetch;
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,6 +50,17 @@ impl Reply {
             Self::Stream(sink) => sink.close(result),
         }
     }
+
+    /// Whether the job streams a response body past its deadline, see [`Engine::stream_response`].
+    fn unbounded(&self) -> bool {
+        matches!(self, Self::Stream(sink) if sink.open && sink.shell.load(Ordering::SeqCst))
+    }
+
+    /// Whether nobody reads the stream any more.
+    fn detached(&self) -> bool {
+        let Self::Stream(sink) = self else { return false };
+        sink.events.lock().ok().is_none_or(|events| events.as_ref().is_none_or(|events| events.is_closed()))
+    }
 }
 
 /// Output of a streamed render, in order: at most one shell, its chunks, then the end.
@@ -69,10 +80,17 @@ struct Sink {
     events: Mutex<Option<mpsc::UnboundedSender<StreamEvent>>>,
     /// Request body handed to the function as `sink.body`, a `Uint8Array`.
     body: Bytes,
+    /// Whether the body may keep streaming once the shell is out, as a route handler's response may.
+    open: bool,
+    /// Whether the shell went out.
+    shell: AtomicBool,
 }
 
 impl Sink {
     fn send(&self, event: StreamEvent) -> bool {
+        if matches!(event, StreamEvent::Shell(_)) {
+            self.shell.store(true, Ordering::SeqCst);
+        }
         match self.events.lock().ok().as_deref() {
             Some(Some(events)) => events.send(event).is_ok(),
             _ => false,
@@ -166,8 +184,30 @@ impl Engine {
         payload: String,
         body: Bytes,
     ) -> Result<mpsc::UnboundedReceiver<StreamEvent>> {
+        self.open_stream(method, payload, body, false)
+    }
+
+    /// [`Engine::stream_with`] for a response whose body may stream for as long as the client reads it, such as
+    /// server-sent events: the render deadline covers the time to the shell only. The job ends when the function
+    /// returns, when nobody reads the stream any more, or when the bundle is reloaded.
+    pub fn stream_response(
+        &self,
+        method: &'static str,
+        payload: String,
+        body: Bytes,
+    ) -> Result<mpsc::UnboundedReceiver<StreamEvent>> {
+        self.open_stream(method, payload, body, true)
+    }
+
+    fn open_stream(
+        &self,
+        method: &'static str,
+        payload: String,
+        body: Bytes,
+        open: bool,
+    ) -> Result<mpsc::UnboundedReceiver<StreamEvent>> {
         let (events, rx) = mpsc::unbounded_channel();
-        let sink = Arc::new(Sink { events: Mutex::new(Some(events)), body });
+        let sink = Arc::new(Sink { events: Mutex::new(Some(events)), body, open, shell: AtomicBool::new(false) });
         self.send(Job { method, payload, reply: Reply::Stream(sink) })?;
         Ok(rx)
     }
@@ -358,7 +398,7 @@ impl Worker {
                 if self.deliver(&ctx) {
                     continue;
                 }
-                active = self.settle(&ctx, active);
+                active = self.settle(&ctx, active, shared.generation() != self.generation);
                 if active.is_empty() {
                     break;
                 }
@@ -387,6 +427,7 @@ impl Worker {
                 }
                 let until_deadline = active
                     .iter()
+                    .filter(|job| !job.reply.unbounded())
                     .map(|job| job.deadline.saturating_duration_since(Instant::now()))
                     .min()
                     .unwrap_or(RENDER_TIMEOUT);
@@ -438,10 +479,19 @@ impl Worker {
 
     /// Replies to settled jobs, aborts or fails timed-out ones and returns the ones still pending. An
     /// aborted render still completes its document, with the boundaries left pending rendered in the browser.
-    fn settle<'js>(&self, ctx: &Ctx<'js>, active: Vec<Active<'js>>) -> Vec<Active<'js>> {
+    fn settle<'js>(&self, ctx: &Ctx<'js>, active: Vec<Active<'js>>, reloaded: bool) -> Vec<Active<'js>> {
         let mut pending = Vec::with_capacity(active.len());
         for mut job in active {
             match job.promise.state() {
+                PromiseState::Pending if job.reply.unbounded() => {
+                    if job.reply.detached() {
+                        job.reply.finish(Err("the client went away".into()));
+                    } else if reloaded {
+                        job.reply.finish(Err("the server bundle was reloaded".into()));
+                    } else {
+                        pending.push(job);
+                    }
+                }
                 PromiseState::Pending if Instant::now() > job.deadline => {
                     let reason = format!("render timed out after {}s", RENDER_TIMEOUT.as_secs());
                     if self.guarded(|| job.abort(&reason)) {

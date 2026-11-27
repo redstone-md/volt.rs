@@ -81,6 +81,6 @@ export default function Post({ data }: PageProps<"/posts/[id]">) {
 - React Server Components. Every component renders on the server (streaming Suspense boundaries) and hydrates in the browser; data that needs the server comes from Rust loaders, which run before rendering starts.
 - Intercepting routes in `volt export` builds (client navigations render the original route) and `metadata` from slot pages.
 - `next/og`, edge runtime, Node.js APIs in route handlers and middleware (`fs`, `Buffer`, `node:crypto`, npm packages that need them).
-- Route handler streaming (bodies are collected before they are sent), `force-static` handlers with params (`generateStaticParams`) and `revalidate` on handlers; `has` / `missing` conditions in middleware matchers; `waitUntil` work after the response; the `fetch` cache and `next.revalidate`.
+- `force-static` handlers with params (`generateStaticParams`) and `revalidate` on handlers; `waitUntil` work after the response; the `fetch` cache and `next.revalidate`. Middleware does not run for server actions, which must check auth themselves.
 - `next/font` metric-adjusted fallback fonts (`adjustFontFallback`) and the Google `axes` option.
 - Pages Router `getInitialProps`, i18n locale domains and `req`/`res` in `getServerSideProps` (see [Pages Router](./pages-router.md#not-supported)).

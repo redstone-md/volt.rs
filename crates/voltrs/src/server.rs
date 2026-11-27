@@ -25,14 +25,14 @@ use crate::document::{Document, ERROR_ROUTE, NOT_FOUND_ROUTE, PageState, Site, S
 use crate::error::{Error, ErrorKind, Result};
 use crate::flash::ActionFlash;
 use crate::form::FormData;
-use crate::handlers::{Outcome, ScriptRequest, collect, origin};
+use crate::handlers::{self, Outcome, ScriptRequest, ScriptStream, collect, origin};
 use crate::log;
 use crate::manifest::{Manifest, RouteEntry, STATIC_PREFIX, SlotRoute};
-use crate::matcher::{PathMatcher, Verdict};
+use crate::matcher::{ConditionKind, PathMatcher, Verdict};
 use crate::metadata::MetadataAssets;
 use crate::registry::{self, ActionDef, ApiDef, BoxFuture, LoaderDef, Payload};
 use crate::response::{IntoResponse, Response};
-use crate::router::{Params, RoutePattern, Router};
+use crate::router::{Params, RoutePattern, Router, canonical_path};
 use crate::seo::{self, MetadataRoute, Robots, SitemapEntry};
 use crate::slots::Slots;
 use crate::ssr::{Engine, EngineOptions, FetchOptions, FetchRequest, Fetcher, StreamEvent};
@@ -42,7 +42,7 @@ use crate::stream::PageStream;
 const FROM_HEADER: &str = "x-volt-from";
 
 pub type Middleware = Arc<dyn Fn(Ctx) -> BoxFuture<Option<Response>> + Send + Sync>;
-type HyperResponse = hyper::Response<Either<Full<Bytes>, Either<EventStream, PageStream>>>;
+type HyperResponse = hyper::Response<Either<Full<Bytes>, Either<EventStream, Either<PageStream, ScriptStream>>>>;
 
 /// A loaded build: manifest, page routes, intercepting routes, slots, static assets and `app/` metadata files.
 struct Build {
@@ -212,10 +212,10 @@ struct Page {
     stream: Option<PageStream>,
 }
 
-/// A response on its way out, with the streaming body of a page when there is one.
+/// A response on its way out, with the streaming body of a page or a route handler when there is one.
 struct Reply {
     response: Response,
-    stream: Option<PageStream>,
+    stream: Option<Either<PageStream, ScriptStream>>,
 }
 
 impl From<Response> for Reply {
@@ -226,7 +226,7 @@ impl From<Response> for Reply {
 
 impl From<Page> for Reply {
     fn from(page: Page) -> Self {
-        Self { response: page.response, stream: page.stream }
+        Self { response: page.response, stream: page.stream.map(Either::Left) }
     }
 }
 
@@ -437,12 +437,22 @@ impl Server {
     }
 
     async fn dispatch(self: &Arc<Self>, ctx: &Ctx) -> Reply {
-        let Some(path) = self.config.app_path(ctx.path()).map(str::to_owned) else {
+        let Some(raw) = self.config.app_path(ctx.path()) else {
             return not_found_text().into();
         };
-        if let Some(response) = self.normalize_slash(ctx, &path) {
+        if let Some(response) = self.normalize_slash(ctx, raw) {
             return response.into();
         }
+        // Everything below, Rust and TypeScript middleware included, reads the one spelling the router resolves.
+        let path = canonical_path(raw);
+        let canonical;
+        let ctx = if path == raw {
+            ctx
+        } else {
+            let uri = self.config.public_path(&with_query(&path, ctx.uri().query())).parse().ok();
+            canonical = ctx.with_request(uri, None);
+            &canonical
+        };
         if let Some(response) = self.redirect(&path) {
             return response.into();
         }
@@ -478,23 +488,25 @@ impl Server {
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into();
         }
-        let (ctx, path) = match self.edge(ctx, &with_query(&path, ctx.uri().query())).await {
+        // `spelled` is the path as requested, which the locale redirect compares with its canonical form.
+        let (ctx, path, spelled) = match self.edge(ctx, &with_query(&path, ctx.uri().query())).await {
             Edge::Respond(response) => return response.into(),
             Edge::Continue { ctx: replaced, target } => {
                 let ctx = replaced.unwrap_or_else(|| ctx.clone());
                 match target {
                     Some(target) => {
                         let uri = self.config.public_path(&target).parse().ok();
-                        (ctx.with_request(uri, None), split_query(&target).0.to_owned())
+                        let path = split_query(&target).0.to_owned();
+                        (ctx.with_request(uri, None), path.clone(), path)
                     }
-                    None => (ctx, path),
+                    None => (ctx, path, raw.to_owned()),
                 }
             }
         };
         let ctx = &ctx;
         let (prefix, route_path) = self.config.i18n.split(&path);
         let detects = self.detects_locale(ctx, prefix, route_path);
-        if let Some(response) = self.locale_redirect(ctx, prefix, &path, route_path, detects) {
+        if let Some(response) = self.locale_redirect(ctx, prefix, &spelled, route_path, detects) {
             return response.into();
         }
         let ctx = &ctx.with_locale(prefix.unwrap_or(self.config.default_locale()));
@@ -505,8 +517,8 @@ impl Server {
             if let Some(response) = self.api(ctx, &path).await {
                 return response.into();
             }
-            if let Some(response) = self.route_handler(ctx, &path).await {
-                return response.into();
+            if let Some(reply) = self.route_handler(ctx, &path).await {
+                return reply;
             }
             if matches!(*ctx.method(), Method::GET | Method::HEAD) {
                 if let Some(response) = self.current().metadata.serve(&path, ctx.uri().query(), ctx.headers()) {
@@ -678,35 +690,51 @@ impl Server {
     }
 
     /// Runs the `route.ts` handler matching `path`, or serves its prerendered `GET` response.
-    async fn route_handler(&self, ctx: &Ctx, path: &str) -> Option<Response> {
+    async fn route_handler(&self, ctx: &Ctx, path: &str) -> Option<Reply> {
         let build = self.current();
         let (index, params) = build.handler(path)?;
         if matches!(*ctx.method(), Method::GET | Method::HEAD)
             && let Some(response) = build.prerendered.get(&index)
         {
-            return Some(response.clone());
+            return Some(response.clone().into());
         }
         let id = &build.manifest.handlers[index].id;
-        Some(match self.run_handler(ctx, id, path, &params).await {
-            Ok(response) => response,
+        let opened = match self.run_handler(ctx, id, path, &params, true) {
+            Ok(events) => handlers::open(events).await,
+            Err(error) => Err(error),
+        };
+        Some(match opened {
+            Ok((response, stream)) => Reply { response, stream: stream.map(Either::Right) },
             Err(error) => {
                 log::error(&format!("{} {path}: {}", ctx.method(), error.message()));
-                self.script_error(&error)
+                self.script_error(&error).into()
             }
         })
     }
 
-    async fn run_handler(&self, ctx: &Ctx, route: &str, path: &str, params: &Params) -> Result<Response> {
+    /// Starts the handler of `route`; an `open` response may stream past the render deadline.
+    fn run_handler(
+        &self,
+        ctx: &Ctx,
+        route: &str,
+        path: &str,
+        params: &Params,
+        open: bool,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<StreamEvent>> {
         let target = ctx.uri().path_and_query().map_or("/", |p| p.as_str()).to_owned();
         let request =
             ScriptRequest { route: Some(route), params: params.to_json(), ..ScriptRequest::new(ctx, &target, path) };
-        let events = self.engine.stream_with("handle", request.to_json()?, ctx.body().clone())?;
-        collect(events).await
+        let (payload, body) = (request.to_json()?, ctx.body().clone());
+        if open {
+            self.engine.stream_response("handle", payload, body)
+        } else {
+            self.engine.stream_with("handle", payload, body)
+        }
     }
 
     /// Renders a `force-static` route handler's `GET` response at build time.
     pub(crate) async fn prerender_handler(&self, id: &str) -> Result<Response> {
-        self.run_handler(&self.synthetic(id), id, id, &Params::default()).await
+        collect(self.run_handler(&self.synthetic(id), id, id, &Params::default(), false)?).await
     }
 
     fn script_error(&self, error: &Error) -> Response {
@@ -720,10 +748,19 @@ impl Server {
         let pass = Edge::Continue { ctx: None, target: None };
         let build = self.current();
         let Some(matcher) = build.middleware.as_ref().filter(|_| !target.starts_with("/_volt/")) else { return pass };
-        let path = split_query(target).0;
-        let matchers = match matcher.check(path) {
+        let (path, query) = split_query(target);
+        let lookup = |kind: ConditionKind, key: &str| match kind {
+            ConditionKind::Header => ctx.header(key).map(str::to_owned),
+            ConditionKind::Cookie => ctx.cookie(key),
+            ConditionKind::Query => crate::form::parse_pairs(query.unwrap_or_default().as_bytes())
+                .into_iter()
+                .find(|(name, _)| name == key)
+                .and_then(|(_, values)| values.into_iter().next()),
+            ConditionKind::Host => ctx.header("host").map(hostname),
+        };
+        let matchers = match matcher.check(path, &lookup) {
             Verdict::No => return pass,
-            Verdict::Yes => &[][..],
+            Verdict::Yes => Vec::new(),
             Verdict::Ask(patterns) => patterns,
         };
         let public = self.config.public_path(target);
@@ -906,6 +943,11 @@ impl Server {
     }
 
     async fn data(self: &Arc<Self>, ctx: &Ctx, target: &str) -> Response {
+        let (pathname, query) = split_query(target);
+        if !pathname.starts_with('/') {
+            return Error::bad_request("the data path must start with `/`").into_response();
+        }
+        let target = &with_query(&canonical_path(pathname), query);
         let (ctx, target) = match self.edge(ctx, target).await {
             Edge::Respond(response) => return self.edge_data(ctx, response),
             Edge::Continue { ctx: replaced, target: rewritten } => {
@@ -1603,6 +1645,8 @@ impl Server {
         if !self.config.server.compress
             || response.headers.contains_key(header::CONTENT_ENCODING)
             || (reply.stream.is_none() && response.body.len() < 1024)
+            // A handler stream, server-sent events say, must reach the client chunk by chunk.
+            || matches!(reply.stream, Some(Either::Right(_)))
         {
             return;
         }
@@ -1610,7 +1654,7 @@ impl Server {
         if !compressible(content_type) || !crate::assets::accepts(request).1 {
             return;
         }
-        if let Some(stream) = reply.stream.as_mut() {
+        if let Some(Either::Left(stream)) = reply.stream.as_mut() {
             stream.gzip();
             response.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
             response.headers.append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
@@ -1661,6 +1705,15 @@ fn split_query(target: &str) -> (&str, Option<&str>) {
         Some((path, query)) => (path, Some(query)),
         None => (target, None),
     }
+}
+
+/// Host name of a `Host` header, without the port.
+fn hostname(host: &str) -> String {
+    let name = match host.find(']') {
+        Some(end) if host.starts_with('[') => &host[..=end],
+        _ => host.split(':').next().unwrap_or(host),
+    };
+    name.to_ascii_lowercase()
 }
 
 fn with_query(path: &str, query: Option<&str>) -> String {

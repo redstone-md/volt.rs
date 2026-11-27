@@ -11,16 +11,32 @@ function allowed(module) {
   return own;
 }
 
-/** Writes a `Response` to the engine sink: the head as JSON, then the body chunks as bytes. */
+/**
+ * Writes a `Response` to the engine sink: the head as JSON, then the body chunks as bytes. `stream` tells the
+ * server whether the body is a `ReadableStream` to forward as it is written (server-sent events, AI streams) or
+ * one known up front, which it sends with a length.
+ */
 async function send(response, sink) {
   const headers = [...response.headers];
-  if (!sink.shell(JSON.stringify({ status: response.status, headers }))) return "";
+  const stream = response._stream != null;
+  if (!sink.shell(JSON.stringify({ status: response.status, headers, stream }))) return "";
   const body = response.body;
   if (!body) return "";
   const encoder = new TextEncoder();
-  for await (const chunk of body) {
-    const bytes = typeof chunk === "string" ? encoder.encode(chunk) : chunk;
-    if (bytes.byteLength && !sink.write(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes))) break;
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const bytes = typeof value === "string" ? encoder.encode(value) : value;
+      if (bytes.byteLength && !sink.write(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes))) {
+        // The client went away: let the stream's source stop producing.
+        await reader.cancel();
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock?.();
   }
   return "";
 }
@@ -35,7 +51,7 @@ function thrown(error) {
 
 /** The request of a handler or middleware call, from the JSON the server sends. */
 function request(input, body) {
-  const init = { method: input.method, headers: input.headers };
+  const init = { method: input.method, headers: input.headers, nextConfig: { basePath: input.basePath } };
   if (input.method !== "GET" && input.method !== "HEAD" && body?.length) init.body = body;
   return new NextRequest(input.url, init);
 }

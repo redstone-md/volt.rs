@@ -1,10 +1,37 @@
 // `next/server`: the request and response types of route handlers and middleware.
 export { connection } from "./navigation.js";
 
-/** A `URL` with `clone()`, as `request.nextUrl`. */
+/**
+ * `request.nextUrl`: a `URL` whose `pathname` leaves out the `basePath`, which `href` and `toString()` keep, as in
+ * Next.js. Setting `pathname` keeps the base path; setting `basePath` moves the path below another one.
+ */
 export class NextURL extends URL {
+  constructor(input, base, options) {
+    const named = base !== undefined && typeof base === "object" && !(base instanceof URL);
+    super(input, named ? undefined : base);
+    const basePath = ((named ? base : options)?.basePath ?? "").replace(/\/$/, "");
+    const full = super.pathname;
+    this._basePath = basePath && (full === basePath || full.startsWith(`${basePath}/`)) ? basePath : "";
+  }
+  get basePath() {
+    return this._basePath;
+  }
+  set basePath(value) {
+    const pathname = this.pathname;
+    this._basePath = String(value).replace(/\/$/, "");
+    this.pathname = pathname;
+  }
+  get pathname() {
+    const full = super.pathname;
+    return this._basePath ? full.slice(this._basePath.length) || "/" : full;
+  }
+  set pathname(value) {
+    const path = String(value);
+    const rest = path === "/" && this._basePath ? "" : path.startsWith("/") ? path : `/${path}`;
+    super.pathname = `${this._basePath}${rest}`;
+  }
   clone() {
-    return new NextURL(this.href);
+    return new NextURL(this.href, { basePath: this._basePath });
   }
 }
 
@@ -133,7 +160,7 @@ export class ResponseCookies {
 export class NextRequest extends Request {
   constructor(input, init = {}) {
     super(input, init);
-    this.nextUrl = new NextURL(this.url);
+    this.nextUrl = new NextURL(this.url, { basePath: init.nextConfig?.basePath });
     this.cookies = new RequestCookies(this.headers);
   }
 }
@@ -157,8 +184,10 @@ export class NextResponse extends Response {
     this.cookies = new ResponseCookies(this.headers);
   }
   static json(body, init = {}) {
-    const response = Response.json(body, init);
-    return new NextResponse(response.body, { status: response.status, statusText: response.statusText, headers: response.headers });
+    const headers = new Headers(init.headers);
+    if (!headers.has("content-type")) headers.set("content-type", "application/json");
+    // A string body, unlike `Response.json(...).body`, is known up front, so the server sends it with a length.
+    return new NextResponse(JSON.stringify(body), { ...init, headers });
   }
   static redirect(url, init) {
     const status = typeof init === "number" ? init : (init?.status ?? 307);

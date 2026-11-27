@@ -1,7 +1,10 @@
 export { connection } from "./navigation";
 
-/** A `URL` with `clone()`, as `request.nextUrl`. */
+/** `request.nextUrl`: a `URL` whose `pathname` leaves out `basePath`, which `href` keeps, as in Next.js. */
 export declare class NextURL extends URL {
+  constructor(input: string | URL, base?: string | URL | { basePath?: string }, options?: { basePath?: string });
+  /** `[build] base_path` when the URL is below it, else `""`. */
+  basePath: string;
   clone(): NextURL;
 }
 
@@ -52,7 +55,7 @@ export declare class ResponseCookies {
 
 /** The request of route handlers and middleware. */
 export declare class NextRequest extends Request {
-  constructor(input: URL | RequestInfo, init?: RequestInit);
+  constructor(input: URL | RequestInfo, init?: RequestInit & { nextConfig?: { basePath?: string } });
   readonly nextUrl: NextURL;
   readonly cookies: RequestCookies;
 }

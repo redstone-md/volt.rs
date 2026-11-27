@@ -1,6 +1,6 @@
 //! File-system style route patterns: `/blog/[slug]`, `/docs/[...path]`, `/shop/[[...rest]]`.
 
-use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
+use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use serde_json::{Map, Value};
 
 /// Characters escaped inside one path segment.
@@ -16,6 +16,45 @@ const SEGMENT: &AsciiSet = &CONTROLS
     .add(b'`')
     .add(b'{')
     .add(b'}');
+
+/// Characters a canonical path segment keeps as they are: RFC 3986 `pchar` without `%`.
+const PCHAR: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b'!')
+    .remove(b'$')
+    .remove(b'&')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b'*')
+    .remove(b'+')
+    .remove(b',')
+    .remove(b';')
+    .remove(b'=')
+    .remove(b':')
+    .remove(b'@');
+
+/// One spelling of a URL path: empty and dot segments (percent-encoded ones too) resolved, no trailing slash, and
+/// each segment decoded once and re-encoded, so that decoding it again as [`RoutePattern::matches`] does gives the
+/// same segment. Middleware matchers, `nextUrl` and routing all read this form, which keeps `/dash%62oard` or
+/// `//dashboard` from reaching `/dashboard` past a matcher written for it.
+pub fn canonical_path(path: &str) -> String {
+    let mut segments: Vec<String> = Vec::new();
+    for raw in path.split('/') {
+        let decoded = percent_decode_str(raw).decode_utf8_lossy();
+        match decoded.as_ref() {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            segment => segments.push(utf8_percent_encode(segment, PCHAR).to_string()),
+        }
+    }
+    format!("/{}", segments.join("/"))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Segment {
@@ -316,6 +355,21 @@ impl<T> FromIterator<(String, T)> for Router<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonicalizes_paths() {
+        assert_eq!(canonical_path("/dash%62oard"), "/dashboard");
+        assert_eq!(canonical_path("//dashboard//x/"), "/dashboard/x");
+        assert_eq!(canonical_path("/a/./b/../%2e%2E/dashboard"), "/dashboard");
+        assert_eq!(canonical_path("/../.."), "/");
+        assert_eq!(canonical_path("/a%2Fb/caf%c3%a9"), "/a%2Fb/caf%C3%A9");
+        // Decoding once more must not change what the router sees.
+        assert_eq!(canonical_path("/dash%2562oard"), "/dash%2562oard");
+        assert_eq!(canonical_path("/a%5Cb c"), "/a%5Cb%20c");
+        let pattern = RoutePattern::parse("/blog/[slug]");
+        assert_eq!(pattern.matches(&canonical_path("/blog/a%2Fb")).unwrap().get("slug"), Some("a/b"));
+        assert!(RoutePattern::parse("/dashboard").matches(&canonical_path("/dash%2562oard")).is_none());
+    }
 
     #[test]
     fn parses_groups_and_params() {
