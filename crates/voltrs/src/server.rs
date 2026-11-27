@@ -31,10 +31,11 @@ use crate::registry::{self, ActionDef, ApiDef, BoxFuture, LoaderDef, Payload};
 use crate::response::{IntoResponse, Response};
 use crate::router::{Params, RoutePattern, Router};
 use crate::seo::{self, SitemapEntry};
-use crate::ssr::{Engine, EngineOptions};
+use crate::ssr::{Engine, EngineOptions, StreamEvent};
+use crate::stream::PageStream;
 
 pub type Middleware = Arc<dyn Fn(Ctx) -> BoxFuture<Option<Response>> + Send + Sync>;
-type HyperResponse = hyper::Response<Either<Full<Bytes>, EventStream>>;
+type HyperResponse = hyper::Response<Either<Full<Bytes>, Either<EventStream, PageStream>>>;
 
 /// A loaded build: manifest, page routes and static assets.
 struct Build {
@@ -63,8 +64,10 @@ impl Build {
     }
 }
 
+/// Answer of the render methods; a streamed shell reports the same fields without `html`.
 #[derive(Deserialize)]
 struct Rendered {
+    #[serde(default)]
     html: String,
     status: u16,
     redirect: Option<RenderedRedirect>,
@@ -110,6 +113,48 @@ struct Page {
     response: Response,
     hints: CacheHints,
     data: Option<Value>,
+    /// The body when the page streams; `response.body` is empty then.
+    stream: Option<PageStream>,
+}
+
+/// A response on its way out, with the streaming body of a page when there is one.
+struct Reply {
+    response: Response,
+    stream: Option<PageStream>,
+}
+
+impl From<Response> for Reply {
+    fn from(response: Response) -> Self {
+        Self { response, stream: None }
+    }
+}
+
+impl From<Page> for Reply {
+    fn from(page: Page) -> Self {
+        Self { response: page.response, stream: page.stream }
+    }
+}
+
+/// How React renders a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderMode {
+    /// `renderToString`, with `[server] streaming = false`.
+    String,
+    /// `renderToReadableStream` buffered until every Suspense boundary is ready: cached and prerendered
+    /// pages, crawlers.
+    Complete,
+    /// `renderToReadableStream` sent as it is produced.
+    Stream,
+}
+
+impl RenderMode {
+    fn method(self) -> &'static str {
+        match self {
+            Self::String => "render",
+            Self::Complete => "document",
+            Self::Stream => "stream",
+        }
+    }
 }
 
 /// Outcome of matching a path and running its loader.
@@ -130,6 +175,8 @@ pub(crate) struct Server {
     apis: HashMap<Method, Router<&'static ApiDef>>,
     cache: Arc<PageCache>,
     hub: Option<Hub>,
+    /// User agents that get complete documents instead of streams.
+    bots: Option<regex::Regex>,
     #[cfg(feature = "images")]
     images: crate::images::Images,
     dev: bool,
@@ -138,6 +185,7 @@ pub(crate) struct Server {
 impl Server {
     pub fn new(config: Config, state: State, middleware: Vec<Middleware>) -> Result<Arc<Self>> {
         let dev = crate::config::is_dev();
+        let bots = config.server.bot_pattern().map_err(|e| Error::internal(e.0))?;
         let out_dir = config.out_dir();
         let build = Build::load(&out_dir)?;
         let engine = Engine::start(EngineOptions {
@@ -175,6 +223,7 @@ impl Server {
             images,
             cache: PageCache::shared(config.server.page_cache_mb * 1024 * 1024),
             hub: dev.then(Hub::default),
+            bots,
             config: Arc::new(config),
             state: Arc::new(state),
             middleware,
@@ -247,7 +296,7 @@ impl Server {
         let body = match Limited::new(body, self.config.server.body_limit()).collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(_) => {
-                return finish(Response::text("Payload Too Large").status(StatusCode::PAYLOAD_TOO_LARGE));
+                return finish(Response::text("Payload Too Large").status(StatusCode::PAYLOAD_TOO_LARGE).into());
             }
         };
         let accept = parts.headers.clone();
@@ -261,39 +310,39 @@ impl Server {
         };
         let ctx = Ctx::new(request, self.state.clone(), self.config.clone(), self.cache.clone());
 
-        let mut response = self.dispatch(&ctx).await;
-        ctx.take_response().apply(&mut response);
-        self.localize_redirect(&mut response);
-        self.decorate(&mut response, &accept);
+        let mut reply = self.dispatch(&ctx).await;
+        ctx.take_response().apply(&mut reply.response);
+        self.localize_redirect(&mut reply.response);
+        self.decorate(&mut reply, &accept);
         if self.dev && !path.starts_with(&self.config.static_prefix()) {
-            log::request(method.as_str(), &path, response.status.as_u16(), started.elapsed());
+            log::request(method.as_str(), &path, reply.response.status.as_u16(), started.elapsed());
         }
-        finish(response)
+        finish(reply)
     }
 
-    async fn dispatch(self: &Arc<Self>, ctx: &Ctx) -> Response {
+    async fn dispatch(self: &Arc<Self>, ctx: &Ctx) -> Reply {
         let Some(path) = self.config.app_path(ctx.path()).map(str::to_owned) else {
-            return not_found_text();
+            return not_found_text().into();
         };
         if let Some(response) = self.normalize_slash(ctx, &path) {
-            return response;
+            return response.into();
         }
         if let Some(response) = self.redirect(&path) {
-            return response;
+            return response.into();
         }
         for middleware in &self.middleware {
             if let Some(response) = middleware(ctx.clone()).await {
-                return response;
+                return response.into();
             }
         }
         if let Some(asset) = path.strip_prefix(STATIC_PREFIX) {
-            return self.current().assets.serve(asset, ctx.headers()).unwrap_or_else(not_found_text);
+            return self.current().assets.serve(asset, ctx.headers()).unwrap_or_else(not_found_text).into();
         }
         if let Some(name) = path.strip_prefix("/_volt/action/") {
-            return self.action(ctx, name).await;
+            return self.action(ctx, name).await.into();
         }
         if path == "/_volt/data" {
-            return self.data(ctx, &ctx.query_param("path").unwrap_or_else(|| "/".into())).await;
+            return self.data(ctx, &ctx.query_param("path").unwrap_or_else(|| "/".into())).await.into();
         }
         if let Some(stem) = path.strip_prefix("/_volt/data/").and_then(|p| p.strip_suffix(".json")) {
             let pathname = if stem == "index" { "/".to_owned() } else { format!("/{stem}") };
@@ -301,26 +350,27 @@ impl Server {
                 Some(query) => format!("{pathname}?{query}"),
                 None => pathname,
             };
-            return self.data(ctx, &target).await;
+            return self.data(ctx, &target).await.into();
         }
         #[cfg(feature = "images")]
         if path == "/_volt/image" && self.config.images.optimize {
-            return self.images.serve(ctx.query_string()).await;
+            return self.images.serve(ctx.query_string()).await.into();
         }
         if let Some(error) = self.current().manifest.error.as_deref().filter(|_| self.dev) {
             return Response::html(error_overlay("Build failed", error, self.config.base_path()))
-                .status(StatusCode::INTERNAL_SERVER_ERROR);
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into();
         }
         let path = self.rewrite(&path);
         if let Some(response) = self.api(ctx, &path).await {
-            return response;
+            return response.into();
         }
         if matches!(*ctx.method(), Method::GET | Method::HEAD) {
             if let Some(response) = serve_public(&self.config.public_dir(), &path, ctx.headers()).await {
-                return response;
+                return response.into();
             }
             if let Some(response) = self.seo(ctx, &path).await {
-                return response;
+                return response.into();
             }
         }
         self.page(ctx, &path).await
@@ -550,7 +600,7 @@ impl Server {
         entries
     }
 
-    async fn page(self: &Arc<Self>, ctx: &Ctx, path: &str) -> Response {
+    async fn page(self: &Arc<Self>, ctx: &Ctx, path: &str) -> Reply {
         if *ctx.method() == Method::POST
             && let Some(form) = permalink_form(ctx)
             && let Some(name) = form.marker().action.clone()
@@ -560,29 +610,46 @@ impl Server {
                 Some(query) => format!("{page}?{query}"),
                 None => page.to_owned(),
             };
-            return self.run_action(ctx, &name, Some(form), Some(&page)).await;
+            return self.run_action(ctx, &name, Some(form), Some(&page)).await.into();
         }
         if matches!(*ctx.method(), Method::GET | Method::HEAD)
             && let Some(flash) = ActionFlash::take(ctx)
         {
             return self.flash_page(ctx, path, flash).await;
         }
-        self.serve_page(ctx, path).await.response
+        self.serve_page(ctx, path).await.into()
     }
 
     /// Renders a page for one visitor with the result of their no-JavaScript action submission, bypassing the cache.
-    async fn flash_page(&self, ctx: &Ctx, path: &str, flash: Value) -> Response {
+    async fn flash_page(&self, ctx: &Ctx, path: &str, flash: Value) -> Reply {
         let build = self.current();
         let search = ctx.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
-        let mut response = match self.resolve_page(ctx, path, &search).await {
+        let mut page = match self.resolve_page(ctx, path, &search).await {
             Resolved::Page(mut state) => {
                 state.action = Some(flash);
-                self.render(&build, *state).await.response
+                self.render(&build, *state, self.mode(Some(ctx), false)).await
             }
-            Resolved::Redirect(status, location) => return Response::redirect(status, &location),
+            Resolved::Redirect(status, location) => return Response::redirect(status, &location).into(),
         };
-        response.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(PRIVATE_CACHE));
-        response
+        page.response.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(PRIVATE_CACHE));
+        page.into()
+    }
+
+    /// Streams unless the page is shared (cached, prerendered), has no visitor, the visitor is a crawler,
+    /// or streaming is off.
+    fn mode(&self, ctx: Option<&Ctx>, shared: bool) -> RenderMode {
+        if !self.config.server.streaming {
+            return RenderMode::String;
+        }
+        let Some(ctx) = ctx.filter(|_| !shared) else {
+            return RenderMode::Complete;
+        };
+        let agent = ctx.header("user-agent").unwrap_or_default();
+        if self.bots.as_ref().is_some_and(|bots| bots.is_match(agent)) {
+            RenderMode::Complete
+        } else {
+            RenderMode::Stream
+        }
     }
 
     async fn serve_page(self: &Arc<Self>, ctx: &Ctx, path: &str) -> Page {
@@ -600,7 +667,7 @@ impl Server {
         };
         let cacheable = !self.dev && entry.is_some_and(|e| e.is_cached() || is_static);
         if !cacheable {
-            return self.generate(ctx, &build, path, &search).await;
+            return self.generate(ctx, &build, path, &search, self.mode(Some(ctx), false)).await;
         }
         let key = cache::key(path, query);
         match self.cache.get(&key) {
@@ -614,7 +681,7 @@ impl Server {
             Lookup::Miss => {}
         }
         let ticket = self.cache.ticket();
-        let page = self.generate(ctx, &build, path, &search).await;
+        let page = self.generate(ctx, &build, path, &search, self.mode(Some(ctx), true)).await;
         if page.response.status == StatusCode::OK {
             self.cache.put(key, &page.cached(), Self::ttl(&build, path, &page), ticket);
         }
@@ -633,7 +700,7 @@ impl Server {
             let ctx = server.synthetic(&format!("{path}{search}"));
             let build = server.current();
             let ticket = server.cache.ticket();
-            let page = server.generate(&ctx, &build, &path, &search).await;
+            let page = server.generate(&ctx, &build, &path, &search, server.mode(None, true)).await;
             match page.response.status {
                 StatusCode::OK => server.cache.put(key, &page.cached(), Self::ttl(&build, &path, &page), ticket),
                 StatusCode::NOT_FOUND => server.cache.remove(&key),
@@ -646,9 +713,9 @@ impl Server {
     }
 
     /// Resolves and renders a page without consulting the cache.
-    async fn generate(&self, ctx: &Ctx, build: &Build, path: &str, search: &str) -> Page {
+    async fn generate(&self, ctx: &Ctx, build: &Build, path: &str, search: &str, mode: RenderMode) -> Page {
         match self.resolve_page(ctx, path, search).await {
-            Resolved::Page(state) => self.render(build, *state).await,
+            Resolved::Page(state) => self.render(build, *state, mode).await,
             Resolved::Redirect(status, location) => Response::redirect(status, &location).into(),
         }
     }
@@ -672,7 +739,7 @@ impl Server {
         let build = self.current();
         match self.resolve_page(&ctx, path, "").await {
             Resolved::Page(mut state) => {
-                let page = self.render(&build, (*state).clone()).await;
+                let page = self.render(&build, (*state).clone(), self.mode(None, true)).await;
                 if let Some(data) = page.data {
                     state.data = data;
                 }
@@ -699,7 +766,7 @@ impl Server {
         let path = "/404";
         let state = self.failure_state(path, "", &Error::not_found());
         let data = serde_json::to_string(&state).unwrap_or_default();
-        let page = self.render(&self.current(), state).await;
+        let page = self.render(&self.current(), state, self.mode(None, true)).await;
         let html = String::from_utf8_lossy(&page.response.body).into_owned();
         Prerendered { path: path.to_owned(), status: page.response.status, html, data, revalidate: None }
     }
@@ -788,8 +855,8 @@ impl Server {
         }
     }
 
-    async fn render(&self, build: &Build, state: PageState) -> Page {
-        match self.render_once(build, &state).await {
+    async fn render(&self, build: &Build, state: PageState, mode: RenderMode) -> Page {
+        match self.render_once(build, &state, mode).await {
             Ok(page) => page,
             Err(error) if self.dev => {
                 log::error(error.message());
@@ -805,7 +872,8 @@ impl Server {
                     error: Some(Error::internal("render failed").to_json(false)),
                     ..state
                 };
-                match self.render_once(build, &fallback).await {
+                let mode = if mode == RenderMode::Stream { RenderMode::Complete } else { mode };
+                match self.render_once(build, &fallback, mode).await {
                     Ok(page) => page,
                     Err(_) => Response::html("<!DOCTYPE html><title>500</title><h1>500 Internal Server Error</h1>")
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -815,10 +883,30 @@ impl Server {
         }
     }
 
-    async fn render_once(&self, build: &Build, state: &PageState) -> Result<Page> {
+    async fn render_once(&self, build: &Build, state: &PageState, mode: RenderMode) -> Result<Page> {
         let payload = serde_json::to_string(state)?;
-        let output = self.engine.call("render", payload).await?;
-        let rendered: Rendered = serde_json::from_str(&output)?;
+        if mode != RenderMode::Stream {
+            let output = self.engine.call(mode.method(), payload).await?;
+            return self.assemble(build, state, serde_json::from_str(&output)?, None);
+        }
+        let mut events = self.engine.stream(mode.method(), payload)?;
+        match events.recv().await {
+            Some(StreamEvent::Shell(shell)) => self.assemble(build, state, serde_json::from_str(&shell)?, Some(events)),
+            // Pages Router routes and redirects answer with a complete result instead of a shell.
+            Some(StreamEvent::Done(Ok(output))) => self.assemble(build, state, serde_json::from_str(&output)?, None),
+            Some(StreamEvent::Done(Err(message))) => Err(Error::internal(message)),
+            Some(StreamEvent::Chunk(_)) | None => Err(Error::internal("the render stream ended before its shell")),
+        }
+    }
+
+    /// Builds the page response around React's output, or around the stream that follows its shell.
+    fn assemble(
+        &self,
+        build: &Build,
+        state: &PageState,
+        rendered: Rendered,
+        events: Option<tokio::sync::mpsc::UnboundedReceiver<StreamEvent>>,
+    ) -> Result<Page> {
         if let Some(redirect) = rendered.redirect {
             let status = StatusCode::from_u16(redirect.status).unwrap_or(StatusCode::TEMPORARY_REDIRECT);
             return Ok(Response::redirect(status, &redirect.location).into());
@@ -844,7 +932,10 @@ impl Server {
             dev: self.dev,
             base_path: self.config.base_path(),
         };
-        let html = document.render(&rendered.html);
+        let (html, stream) = match events {
+            Some(events) => (String::new(), Some(PageStream::new(events, document.splice(), &state.pathname))),
+            None => (document.render(&rendered.html), None),
+        };
         let status = StatusCode::from_u16(rendered.status).unwrap_or(StatusCode::OK);
         let shared = route.filter(|r| !self.dev && !r.id.starts_with("/_") && (r.is_cached() || hints.is_static));
         let cache = match shared {
@@ -852,11 +943,12 @@ impl Server {
             None => HeaderValue::from_static(PRIVATE_CACHE),
         };
         let response = Response::html(html).status(status).header(header::CACHE_CONTROL, cache);
-        Ok(Page { response, hints, data: rendered.data })
+        Ok(Page { response, hints, data: rendered.data, stream })
     }
 
     /// Security headers, configured headers and on-the-fly gzip.
-    fn decorate(&self, response: &mut Response, request: &http::HeaderMap) {
+    fn decorate(&self, reply: &mut Reply, request: &http::HeaderMap) {
+        let response = &mut reply.response;
         let defaults = [
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "strict-origin-when-cross-origin"),
@@ -870,12 +962,18 @@ impl Server {
         }
         if !self.config.server.compress
             || response.headers.contains_key(header::CONTENT_ENCODING)
-            || response.body.len() < 1024
+            || (reply.stream.is_none() && response.body.len() < 1024)
         {
             return;
         }
         let content_type = response.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or_default();
         if !compressible(content_type) || !crate::assets::accepts(request).1 {
+            return;
+        }
+        if let Some(stream) = reply.stream.as_mut() {
+            stream.gzip();
+            response.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+            response.headers.append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
             return;
         }
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -897,13 +995,13 @@ impl Page {
 
 impl From<Response> for Page {
     fn from(response: Response) -> Self {
-        Self { response, hints: CacheHints::default(), data: None }
+        Self { response, hints: CacheHints::default(), data: None, stream: None }
     }
 }
 
 impl From<CachedPage> for Page {
     fn from(page: CachedPage) -> Self {
-        Self { response: page.response, hints: CacheHints::default(), data: page.data }
+        Self { response: page.response, hints: CacheHints::default(), data: page.data, stream: None }
     }
 }
 
@@ -982,15 +1080,20 @@ fn search_params(search: &str) -> Value {
     Value::Object(map)
 }
 
-fn finish(response: Response) -> HyperResponse {
-    let mut out = hyper::Response::new(Either::Left(Full::new(response.body)));
+fn finish(reply: Reply) -> HyperResponse {
+    let Reply { response, stream } = reply;
+    let body = match stream {
+        Some(stream) => Either::Right(Either::Right(stream)),
+        None => Either::Left(Full::new(response.body)),
+    };
+    let mut out = hyper::Response::new(body);
     *out.status_mut() = response.status;
     *out.headers_mut() = response.headers;
     out
 }
 
 fn sse(stream: EventStream) -> HyperResponse {
-    let mut out = hyper::Response::new(Either::Right(stream));
+    let mut out = hyper::Response::new(Either::Right(Either::Left(stream)));
     let headers = out.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));

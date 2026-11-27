@@ -66,7 +66,15 @@ pub struct ServerConfig {
     pub page_cache_mb: usize,
     /// Largest accepted request body (actions, API routes, uploads) in megabytes.
     pub body_limit_mb: usize,
+    /// Streams dynamic pages: the shell first, then each Suspense boundary as it resolves.
+    /// `false` renders every page to a complete string with `renderToString`.
+    pub streaming: bool,
+    /// Case-insensitive regular expression of user agents that get the complete document instead of a stream.
+    pub bots: String,
 }
+
+/// Crawlers and link-preview fetchers that should see the whole page in one response.
+pub const DEFAULT_BOTS: &str = r"(bot|crawler|spider|crawling)\b|slurp|mediapartners|facebookexternalhit|facebookcatalog|embedly|quora link preview|outbrain|pinterest|vkshare|w3c_validator|whatsapp|skypeuripreview|bingpreview|ia_archiver|yandex|baiduspider|lighthouse|google-inspectiontool";
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -78,6 +86,8 @@ impl Default for ServerConfig {
             compress: true,
             page_cache_mb: 50,
             body_limit_mb: 8,
+            streaming: true,
+            bots: DEFAULT_BOTS.into(),
         }
     }
 }
@@ -85,6 +95,18 @@ impl Default for ServerConfig {
 impl ServerConfig {
     pub fn body_limit(&self) -> usize {
         self.body_limit_mb.saturating_mul(1024 * 1024)
+    }
+
+    /// The compiled `bots` pattern; an empty pattern matches no user agent.
+    pub fn bot_pattern(&self) -> Result<Option<regex::Regex>, ConfigError> {
+        if self.bots.trim().is_empty() {
+            return Ok(None);
+        }
+        regex::RegexBuilder::new(&self.bots)
+            .case_insensitive(true)
+            .build()
+            .map(Some)
+            .map_err(|e| ConfigError(format!("server.bots is not a valid regular expression: {e}")))
     }
 }
 
@@ -194,6 +216,7 @@ impl Config {
                 path.display()
             )));
         }
+        config.server.bot_pattern().map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
         config.apply_env();
         Ok(config)
     }

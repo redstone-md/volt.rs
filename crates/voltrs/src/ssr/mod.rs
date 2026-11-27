@@ -1,25 +1,77 @@
 //! React rendering on a pool of QuickJS workers.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rquickjs::{CaughtError, Context, Ctx, Function, Object, Runtime, Value, promise::PromiseState};
-use tokio::sync::oneshot;
+use bytes::Bytes;
+use rquickjs::{
+    CaughtError, Context, Ctx, Function, Object, Promise, Runtime, TypedArray, Value, promise::PromiseState,
+};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
 
 const POLYFILLS: &str = include_str!("polyfills.js");
 const RENDER_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_TICKS: usize = 100_000;
 const GC_THRESHOLD: usize = 8 * 1024 * 1024;
+/// Renders one worker interleaves while they wait on timers; beyond it, other workers take new jobs.
+const MAX_ACTIVE: usize = 32;
 
 struct Job {
     method: &'static str,
     payload: String,
-    reply: oneshot::Sender<Result<String, String>>,
+    reply: Reply,
+}
+
+/// Where the result of a job goes.
+enum Reply {
+    Call(oneshot::Sender<Result<String, String>>),
+    Stream(Arc<Sink>),
+}
+
+impl Reply {
+    fn finish(self, result: Result<String, String>) {
+        match self {
+            Self::Call(reply) => {
+                let _ = reply.send(result);
+            }
+            Self::Stream(sink) => sink.close(result),
+        }
+    }
+}
+
+/// Output of a streamed render, in order: at most one shell, its chunks, then the end.
+#[derive(Debug)]
+pub enum StreamEvent {
+    /// JSON sent once the shell is ready (status, route), before any chunk.
+    Shell(String),
+    Chunk(Bytes),
+    /// The function's return value: empty after a streamed shell, else a complete buffered result.
+    Done(Result<String, String>),
+}
+
+/// The channel a streaming render writes to. Writes fail once the receiver is gone or the job has ended,
+/// which tells the JavaScript side to abort rendering.
+struct Sink {
+    events: Mutex<Option<mpsc::UnboundedSender<StreamEvent>>>,
+}
+
+impl Sink {
+    fn send(&self, event: StreamEvent) -> bool {
+        match self.events.lock().ok().as_deref() {
+            Some(Some(events)) => events.send(event).is_ok(),
+            _ => false,
+        }
+    }
+
+    fn close(&self, result: Result<String, String>) {
+        if let Some(events) = self.events.lock().ok().and_then(|mut e| e.take()) {
+            let _ = events.send(StreamEvent::Done(result));
+        }
+    }
 }
 
 /// Configuration of the rendering pool.
@@ -47,6 +99,10 @@ struct Shared {
 impl Shared {
     fn bundle(&self) -> PathBuf {
         self.bundle.read().map(|b| b.clone()).unwrap_or_else(|p| p.into_inner().clone())
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 }
 
@@ -79,8 +135,21 @@ impl Engine {
     /// Calls `globalThis.__VOLT__[method](payload)` and returns its string result.
     pub async fn call(&self, method: &'static str, payload: String) -> Result<String> {
         let (reply, rx) = oneshot::channel();
-        self.jobs.send(Job { method, payload, reply }).map_err(|_| Error::internal("SSR pool is not running"))?;
+        self.send(Job { method, payload, reply: Reply::Call(reply) })?;
         rx.await.map_err(|_| Error::internal("SSR worker dropped the request"))?.map_err(Error::internal)
+    }
+
+    /// Calls `globalThis.__VOLT__[method](payload, sink)`, where `sink.shell(json)` and `sink.write(bytes)`
+    /// forward output as it is produced. Both return `false` once the receiver is dropped.
+    pub fn stream(&self, method: &'static str, payload: String) -> Result<mpsc::UnboundedReceiver<StreamEvent>> {
+        let (events, rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(Sink { events: Mutex::new(Some(events)) });
+        self.send(Job { method, payload, reply: Reply::Stream(sink) })?;
+        Ok(rx)
+    }
+
+    fn send(&self, job: Job) -> Result<()> {
+        self.jobs.send(job).map_err(|_| Error::internal("SSR pool is not running"))
     }
 
     /// Makes every worker evaluate `bundle` before its next job.
@@ -92,12 +161,19 @@ impl Engine {
     }
 }
 
+/// A job whose function returned a pending promise.
+struct Active<'js> {
+    promise: Promise<'js>,
+    reply: Reply,
+    started: Instant,
+}
+
 struct Worker {
     /// Owns the QuickJS heap the context lives in.
     _runtime: Runtime,
     context: Context,
     generation: u64,
-    deadline: Arc<std::sync::Mutex<Option<Instant>>>,
+    deadline: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Worker {
@@ -107,7 +183,7 @@ impl Worker {
         shared: Arc<Shared>,
         ready: std::sync::mpsc::Sender<Result<(), String>>,
     ) {
-        let mut worker = match Self::load(&options, &shared.bundle(), shared.generation.load(Ordering::SeqCst)) {
+        let mut worker = match Self::load(&options, &shared.bundle(), shared.generation()) {
             Ok(worker) => {
                 let _ = ready.send(Ok(()));
                 worker
@@ -118,18 +194,17 @@ impl Worker {
             }
         };
         while let Ok(job) = jobs.recv() {
-            let current = shared.generation.load(Ordering::SeqCst);
+            let current = shared.generation();
             if current != worker.generation {
                 match Self::load(&options, &shared.bundle(), current) {
                     Ok(fresh) => worker = fresh,
                     Err(message) => {
-                        let _ = job.reply.send(Err(message));
+                        job.reply.finish(Err(message));
                         continue;
                     }
                 }
             }
-            let result = worker.call(job.method, &job.payload);
-            let _ = job.reply.send(result);
+            worker.serve(job, &jobs, &shared);
         }
     }
 
@@ -140,7 +215,7 @@ impl Worker {
         runtime.set_memory_limit(options.memory_limit);
         runtime.set_gc_threshold(GC_THRESHOLD);
         runtime.set_max_stack_size(8 * 1024 * 1024);
-        let deadline: Arc<std::sync::Mutex<Option<Instant>>> = Arc::default();
+        let deadline: Arc<Mutex<Option<Instant>>> = Arc::default();
         let watched = deadline.clone();
         runtime.set_interrupt_handler(Some(Box::new(move || {
             watched.lock().ok().and_then(|d| *d).is_some_and(|d| Instant::now() > d)
@@ -155,17 +230,108 @@ impl Worker {
         Ok(Self { _runtime: runtime, context, generation, deadline })
     }
 
-    fn call(&mut self, method: &str, payload: &str) -> Result<String, String> {
-        self.set_deadline(Some(Instant::now() + RENDER_TIMEOUT));
-        let result = self.context.with(|ctx| -> Result<String, String> {
-            let run = || -> rquickjs::Result<String> {
-                let volt: Object = ctx.globals().get("__VOLT__")?;
-                let function: Function = volt.get(method)?;
-                let value: Value = function.call((payload,))?;
-                settle(&ctx, value)
+    /// Runs `first` and every job taken while it waits on timers, until all of them have settled.
+    /// Renders interleave on the one JavaScript event loop, so a Suspense boundary waiting on a slow
+    /// promise does not hold the worker.
+    fn serve(&self, first: Job, jobs: &flume::Receiver<Job>, shared: &Shared) {
+        self.context.with(|ctx| {
+            let mut active = Vec::new();
+            active.extend(self.start(&ctx, first));
+            let tick = match ctx.globals().get::<_, Function>("__volt_tick") {
+                Ok(tick) => tick,
+                Err(error) => {
+                    let message = describe(&ctx, error);
+                    for job in active {
+                        job.reply.finish(Err(message.clone()));
+                    }
+                    return;
+                }
             };
-            run().map_err(|e| describe(&ctx, e))
+            while !active.is_empty() {
+                self.guarded(|| while ctx.execute_pending_job() {});
+                active = self.settle(&ctx, active);
+                if active.is_empty() {
+                    break;
+                }
+                let wait = self.guarded(|| tick.call::<_, i32>(()));
+                let wait = match wait {
+                    Ok(0) => continue,
+                    Ok(wait) => wait,
+                    Err(error) => {
+                        crate::log::js("error", &describe(&ctx, error));
+                        continue;
+                    }
+                };
+                if wait < 0 {
+                    for job in active.drain(..) {
+                        job.reply.finish(Err("render never settled: it awaits a promise nothing resolves".into()));
+                    }
+                    break;
+                }
+                let until_deadline = active
+                    .iter()
+                    .map(|job| (job.started + RENDER_TIMEOUT).saturating_duration_since(Instant::now()))
+                    .min()
+                    .unwrap_or(RENDER_TIMEOUT);
+                let timeout = Duration::from_millis(wait as u64).min(until_deadline).max(Duration::from_millis(1));
+                let accepting = active.len() < MAX_ACTIVE && shared.generation() == self.generation;
+                match accepting.then(|| jobs.recv_timeout(timeout)) {
+                    Some(Ok(job)) => active.extend(self.start(&ctx, job)),
+                    Some(Err(flume::RecvTimeoutError::Timeout)) => {}
+                    _ => thread::sleep(timeout),
+                }
+            }
         });
+    }
+
+    /// Calls the job's function; a non-promise result or a synchronous error finishes it at once.
+    fn start<'js>(&self, ctx: &Ctx<'js>, job: Job) -> Option<Active<'js>> {
+        let started = Instant::now();
+        let called = self.guarded(|| -> rquickjs::Result<Value<'js>> {
+            let volt: Object = ctx.globals().get("__VOLT__")?;
+            let function: Function = volt.get(job.method)?;
+            match &job.reply {
+                Reply::Call(_) => function.call((job.payload.as_str(),)),
+                Reply::Stream(sink) => function.call((job.payload.as_str(), sink_object(ctx, sink)?)),
+            }
+        });
+        match called {
+            Ok(value) => match value.as_promise() {
+                Some(promise) => Some(Active { promise: promise.clone(), reply: job.reply, started }),
+                None => {
+                    job.reply.finish(value.get::<String>().map_err(|e| describe(ctx, e)));
+                    None
+                }
+            },
+            Err(error) => {
+                job.reply.finish(Err(describe(ctx, error)));
+                None
+            }
+        }
+    }
+
+    /// Replies to settled and timed-out jobs and returns the ones still pending.
+    fn settle<'js>(&self, ctx: &Ctx<'js>, active: Vec<Active<'js>>) -> Vec<Active<'js>> {
+        let mut pending = Vec::with_capacity(active.len());
+        for job in active {
+            match job.promise.state() {
+                PromiseState::Pending if job.started.elapsed() > RENDER_TIMEOUT => {
+                    job.reply.finish(Err(format!("render timed out after {}s", RENDER_TIMEOUT.as_secs())));
+                }
+                PromiseState::Pending => pending.push(job),
+                _ => {
+                    let result = job.promise.result::<String>().unwrap_or(Err(rquickjs::Error::Exception));
+                    job.reply.finish(result.map_err(|e| describe(ctx, e)));
+                }
+            }
+        }
+        pending
+    }
+
+    /// Runs JavaScript under the watchdog, which interrupts code that runs too long without yielding.
+    fn guarded<T>(&self, run: impl FnOnce() -> T) -> T {
+        self.set_deadline(Some(Instant::now() + RENDER_TIMEOUT));
+        let result = run();
         self.set_deadline(None);
         result
     }
@@ -175,6 +341,23 @@ impl Worker {
             *deadline = value;
         }
     }
+}
+
+/// The `{ shell, write }` object a streaming render reports its output to.
+fn sink_object<'js>(ctx: &Ctx<'js>, sink: &Arc<Sink>) -> rquickjs::Result<Object<'js>> {
+    let object = Object::new(ctx.clone())?;
+    let shell = sink.clone();
+    object.set("shell", Function::new(ctx.clone(), move |meta: String| shell.send(StreamEvent::Shell(meta)))?)?;
+    let write = sink.clone();
+    object.set(
+        "write",
+        Function::new(ctx.clone(), move |chunk: TypedArray<'js, u8>| {
+            // SAFETY: the bytes are copied before any JavaScript runs again.
+            let bytes = unsafe { chunk.as_bytes() }.map(Bytes::copy_from_slice).unwrap_or_default();
+            write.send(StreamEvent::Chunk(bytes))
+        })?,
+    )?;
+    Ok(object)
 }
 
 fn install_host<'js>(ctx: &Ctx<'js>, env: &str) -> rquickjs::Result<()> {
@@ -203,27 +386,6 @@ fn eval_file<'js>(ctx: &Ctx<'js>, code: &str, path: &Path) -> rquickjs::Result<(
     ctx.eval_with_options::<(), _>(code, options)
 }
 
-/// Drives the job queue and timers until a returned promise settles.
-fn settle<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<String> {
-    let Some(promise) = value.as_promise().cloned() else {
-        return value.get();
-    };
-    let tick: Function = ctx.globals().get("__volt_tick")?;
-    for _ in 0..MAX_TICKS {
-        match promise.state() {
-            PromiseState::Pending => {
-                if !ctx.execute_pending_job() && tick.call::<_, i32>(())? == 0 {
-                    return Err(rquickjs::Error::new_from_js_message("promise", "string", "render never settled"));
-                }
-            }
-            _ => {
-                return promise.result::<String>().unwrap_or(Err(rquickjs::Error::Exception));
-            }
-        }
-    }
-    Err(rquickjs::Error::new_from_js_message("promise", "string", "render exceeded the tick budget"))
-}
-
 fn describe<'js>(ctx: &Ctx<'js>, error: rquickjs::Error) -> String {
     match CaughtError::from_error(ctx, error) {
         CaughtError::Exception(exception) => {
@@ -234,5 +396,77 @@ fn describe<'js>(ctx: &Ctx<'js>, error: rquickjs::Error) -> String {
             }
         }
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUNDLE: &str = r#"
+globalThis.__VOLT__ = {
+  wait: (ms) => new Promise((resolve) => setTimeout(() => resolve(ms), Number(ms))),
+  text: (s) => new TextDecoder().decode(new TextEncoder().encode(s)),
+  async read() {
+    const stream = new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode("ab"));
+        controller.close();
+      },
+    });
+    let out = "";
+    for await (const chunk of stream) out += new TextDecoder().decode(chunk);
+    return out;
+  },
+  stream(payload, sink) {
+    sink.shell(JSON.stringify({ status: 200 }));
+    sink.write(new TextEncoder().encode(payload));
+    return new Promise((resolve) => setTimeout(() => resolve(String(sink.write(new TextEncoder().encode("é")))), 30));
+  },
+};
+"#;
+
+    fn engine(name: &str) -> Engine {
+        let dir = std::env::temp_dir().join(format!("volt-ssr-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bundle = dir.join("server.js");
+        std::fs::write(&bundle, BUNDLE).unwrap();
+        Engine::start(EngineOptions { bundle, workers: 1, memory_limit: 64 * 1024 * 1024, dev: false }).unwrap()
+    }
+
+    #[tokio::test]
+    async fn interleaves_renders_waiting_on_timers() {
+        let engine = engine("timers");
+        let started = Instant::now();
+        let calls: Vec<_> = (0..5)
+            .map(|_| {
+                let engine = engine.clone();
+                tokio::spawn(async move { engine.call("wait", "200".into()).await })
+            })
+            .collect();
+        for call in calls {
+            assert_eq!(call.await.unwrap().unwrap(), "200");
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(200), "timers fired early: {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(800), "the worker ran the renders one by one: {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn polyfills_encode_and_stream() {
+        let engine = engine("polyfills");
+        let text = "a é 😀 \u{2028}";
+        assert_eq!(engine.call("text", text.into()).await.unwrap(), text);
+        assert_eq!(engine.call("read", String::new()).await.unwrap(), "ab");
+    }
+
+    #[tokio::test]
+    async fn streams_events_in_order() {
+        let engine = engine("stream");
+        let mut events = engine.stream("stream", "<p>".into()).unwrap();
+        assert!(matches!(events.recv().await, Some(StreamEvent::Shell(meta)) if meta.contains("200")));
+        assert!(matches!(events.recv().await, Some(StreamEvent::Chunk(bytes)) if bytes == "<p>".as_bytes()));
+        assert!(matches!(events.recv().await, Some(StreamEvent::Chunk(bytes)) if bytes == "é".as_bytes()));
+        assert!(matches!(events.recv().await, Some(StreamEvent::Done(Ok(written))) if written == "true"));
     }
 }

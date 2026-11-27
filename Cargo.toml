@@ -33,6 +33,7 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful"] }
 inventory = "0.3"
 memchr = "2"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
 oxc_allocator = "0.158"
 oxc_ast = "0.158"
 oxc_ast_visit = "0.158"

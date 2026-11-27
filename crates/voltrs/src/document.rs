@@ -70,44 +70,17 @@ pub struct Document<'a> {
 }
 
 impl Document<'_> {
+    /// The complete document around React's buffered output.
     pub fn render(&self, html: &str) -> String {
-        let head = self.head();
-        let body = self.body();
-        let mut out = String::with_capacity(html.len() + head.len() + body.len() + 64);
-        if !html.trim_start().to_ascii_lowercase().starts_with("<!doctype") {
-            out.push_str("<!DOCTYPE html>");
-        }
-        if !html.contains("<html") {
-            out.push_str("<html><head>");
-            out.push_str(&head);
-            out.push_str("</head><body><div id=\"__volt\">");
-            out.push_str(html);
-            out.push_str("</div>");
-            out.push_str(&body);
-            out.push_str("</body></html>");
-            return out;
-        }
-        let head_at = html.find("</head>");
-        let body_at = html.rfind("</body>");
-        match (head_at, body_at) {
-            (Some(h), Some(b)) if h < b => {
-                out.push_str(&html[..h]);
-                out.push_str(&head);
-                out.push_str(&html[h..b]);
-                out.push_str(&body);
-                out.push_str(&html[b..]);
-            }
-            _ => {
-                let insert = html.find("<body").unwrap_or(html.len());
-                out.push_str(&html[..insert]);
-                out.push_str("<head>");
-                out.push_str(&head);
-                out.push_str("</head>");
-                out.push_str(&html[insert..]);
-                out.push_str(&body);
-            }
-        }
-        out
+        let mut splice = self.splice();
+        let mut out = splice.push(html.as_bytes());
+        out.extend(splice.finish());
+        String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+    }
+
+    /// Inserts this document's head and body additions into HTML that arrives in chunks.
+    pub fn splice(&self) -> Splice {
+        Splice::new(self.head(), self.body())
     }
 
     fn head(&self) -> String {
@@ -139,6 +112,137 @@ impl Document<'_> {
             body.push_str(&crate::dev::client(self.base_path));
         }
         body
+    }
+}
+
+/// How far into the output an `<html>` tag is looked for before treating it as a fragment.
+const DOCUMENT_PROBE: usize = 1024;
+const HEAD_END: &[u8] = b"</head>";
+const BODY_START: &[u8] = b"<body";
+const BODY_END: &[u8] = b"</body>";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Undecided,
+    /// The root layout renders `<html>`: additions go before `</head>` and the last `</body>`.
+    Document,
+    /// Output without `<html>` is wrapped in a document with a `#__volt` container.
+    Fragment,
+}
+
+/// Inserts the head additions (stylesheets, preloads) and the body additions (state, entry script)
+/// into HTML that may arrive in arbitrary chunks. Markers split across chunks are found by holding
+/// back a few bytes, and everything from the last `</body>` is held until the stream ends, since
+/// React writes the closing tags only after every Suspense boundary has completed.
+#[derive(Debug)]
+pub struct Splice {
+    head: Option<String>,
+    body: String,
+    shape: Shape,
+    pending: Vec<u8>,
+}
+
+impl Splice {
+    pub fn new(head: String, body: String) -> Self {
+        Self { head: Some(head), body, shape: Shape::Undecided, pending: Vec::new() }
+    }
+
+    /// Accepts the next chunk and returns the bytes that can be sent now.
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.pending.extend_from_slice(chunk);
+        self.process(false)
+    }
+
+    /// Returns the remaining bytes once the output is complete.
+    pub fn finish(&mut self) -> Vec<u8> {
+        self.process(true)
+    }
+
+    fn process(&mut self, end: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.shape == Shape::Undecided && !self.decide(&mut out, end) {
+            return out;
+        }
+        match self.shape {
+            Shape::Fragment => {
+                out.append(&mut self.pending);
+                if end {
+                    out.extend_from_slice(b"</div>");
+                    out.extend_from_slice(self.body.as_bytes());
+                    out.extend_from_slice(b"</body></html>");
+                }
+            }
+            _ => self.document(&mut out, end),
+        }
+        out
+    }
+
+    /// Picks the shape once enough output is known; returns whether it is decided.
+    fn decide(&mut self, out: &mut Vec<u8>, end: bool) -> bool {
+        let start = self.pending.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(self.pending.len());
+        let probe = &self.pending[start..self.pending.len().min(start + DOCUMENT_PROBE)];
+        let html = memchr::memmem::find(probe, b"<html").is_some();
+        if !html && !end && probe.len() < DOCUMENT_PROBE {
+            return false;
+        }
+        if !probe.get(..9).is_some_and(|p| p.eq_ignore_ascii_case(b"<!doctype")) {
+            out.extend_from_slice(b"<!DOCTYPE html>");
+        }
+        if html {
+            self.shape = Shape::Document;
+        } else {
+            self.shape = Shape::Fragment;
+            out.extend_from_slice(b"<html><head>");
+            out.extend_from_slice(self.head.take().unwrap_or_default().as_bytes());
+            out.extend_from_slice(b"</head><body><div id=\"__volt\">");
+        }
+        true
+    }
+
+    fn document(&mut self, out: &mut Vec<u8>, end: bool) {
+        if let Some(head) = self.head.take() {
+            let body = memchr::memmem::find(&self.pending, BODY_START);
+            let close = memchr::memmem::find(&self.pending, HEAD_END).filter(|at| body.is_none_or(|b| *at < b));
+            match (close, body) {
+                (Some(at), _) => {
+                    out.extend(self.pending.drain(..at));
+                    out.extend_from_slice(head.as_bytes());
+                }
+                (_, Some(at)) => {
+                    out.extend(self.pending.drain(..at));
+                    out.extend_from_slice(b"<head>");
+                    out.extend_from_slice(head.as_bytes());
+                    out.extend_from_slice(b"</head>");
+                }
+                (None, None) if end => {
+                    out.append(&mut self.pending);
+                    out.extend_from_slice(b"<head>");
+                    out.extend_from_slice(head.as_bytes());
+                    out.extend_from_slice(b"</head>");
+                }
+                (None, None) => {
+                    self.head = Some(head);
+                    let keep = HEAD_END.len().max(BODY_START.len()) - 1;
+                    out.extend(self.pending.drain(..self.pending.len().saturating_sub(keep)));
+                    return;
+                }
+            }
+        }
+        if end {
+            if self.pending.starts_with(BODY_END) {
+                out.extend_from_slice(self.body.as_bytes());
+                out.append(&mut self.pending);
+            } else {
+                out.append(&mut self.pending);
+                out.extend_from_slice(self.body.as_bytes());
+            }
+            return;
+        }
+        let keep = match memchr::memmem::rfind(&self.pending, BODY_END) {
+            Some(at) => self.pending.len() - at,
+            None => BODY_END.len() - 1,
+        };
+        out.extend(self.pending.drain(..self.pending.len().saturating_sub(keep)));
     }
 }
 
@@ -197,5 +301,53 @@ mod tests {
         assert!(head.starts_with(
             "<link rel=\"preload\" href=\"/_volt/static/media/a-1.woff2\" as=\"font\" type=\"font/woff2\" crossorigin=\"\">"
         ));
+    }
+
+    fn spliced(chunks: &[&str]) -> String {
+        let mut splice = Splice::new("[H]".into(), "[B]".into());
+        let mut out = Vec::new();
+        for chunk in chunks {
+            out.extend(splice.push(chunk.as_bytes()));
+        }
+        out.extend(splice.finish());
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn splices_documents_and_fragments() {
+        let page = "<!DOCTYPE html><html><head><title>t</title></head><body><p>é</p></body></html>";
+        assert_eq!(
+            spliced(&[page]),
+            "<!DOCTYPE html><html><head><title>t</title>[H]</head><body><p>é</p>[B]</body></html>"
+        );
+        assert_eq!(
+            spliced(&["<html><body>x</body></html>"]),
+            "<!DOCTYPE html><html><head>[H]</head><body>x[B]</body></html>"
+        );
+        assert_eq!(
+            spliced(&["<p>x</p>"]),
+            "<!DOCTYPE html><html><head>[H]</head><body><div id=\"__volt\"><p>x</p></div>[B]</body></html>"
+        );
+    }
+
+    #[test]
+    fn splices_markers_split_across_chunks() {
+        let page = "<!DOCTYPE html><html><head></head><body><div>a</div><script>x</script></body></html>";
+        let whole = spliced(&[page]);
+        for at in 1..page.len() {
+            assert_eq!(spliced(&[&page[..at], &page[at..]]), whole, "split at {at}");
+        }
+        let bytes: Vec<String> = page.chars().map(String::from).collect();
+        assert_eq!(spliced(&bytes.iter().map(String::as_str).collect::<Vec<_>>()), whole);
+    }
+
+    #[test]
+    fn holds_only_the_final_body_end() {
+        let mut splice = Splice::new(String::new(), "[B]".into());
+        let first = splice.push(b"<!DOCTYPE html><html><head></head><body><p>shell</p><template></template>");
+        assert!(String::from_utf8_lossy(&first).contains("shell"));
+        let late = splice.push(b"<div hidden id=\"S:0\">late</div></body></html>");
+        assert!(String::from_utf8_lossy(&late).contains("late"));
+        assert_eq!(splice.finish(), b"[B]</body></html>");
     }
 }

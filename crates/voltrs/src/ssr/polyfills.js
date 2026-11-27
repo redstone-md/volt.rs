@@ -19,11 +19,13 @@
     g.console[level] = (...args) => host.log(level, format(args));
   }
 
+  // Timers follow the wall clock: the worker sleeps until the next one is due, so a delayed promise
+  // resolves when it would in a browser and its Suspense boundary streams at that moment.
   const timers = new Map();
   let timerId = 0;
   g.setTimeout = (fn, delay = 0, ...args) => {
     const id = ++timerId;
-    timers.set(id, { fn, args, delay: Number(delay) || 0, seq: id });
+    timers.set(id, { fn, args, due: host.now() + Math.max(0, Number(delay) || 0), seq: id });
     return id;
   };
   g.clearTimeout = (id) => void timers.delete(id);
@@ -32,13 +34,19 @@
   g.setImmediate = (fn, ...args) => g.setTimeout(fn, 0, ...args);
   g.clearImmediate = g.clearTimeout;
   g.queueMicrotask ??= (fn) => void Promise.resolve().then(fn);
+  /** Runs the earliest due timer and returns 0, else the milliseconds until the next one (-1 when there is none). */
   g.__volt_tick = () => {
-    if (timers.size === 0) return 0;
-    const due = [...timers.entries()].sort((a, b) => a[1].delay - b[1].delay || a[1].seq - b[1].seq);
-    const [id, timer] = due[0];
-    timers.delete(id);
-    if (typeof timer.fn === "function") timer.fn(...timer.args);
-    return 1;
+    let next = null;
+    for (const entry of timers) {
+      const [, timer] = entry;
+      if (!next || timer.due < next[1].due || (timer.due === next[1].due && timer.seq < next[1].seq)) next = entry;
+    }
+    if (!next) return -1;
+    const wait = next[1].due - host.now();
+    if (wait > 0) return Math.ceil(wait);
+    timers.delete(next[0]);
+    if (typeof next[1].fn === "function") next[1].fn(...next[1].args);
+    return 0;
   };
 
   g.MessageChannel ??= class MessageChannel {
@@ -54,36 +62,110 @@
   const start = host.now();
   g.performance ??= { now: () => host.now() - start, timeOrigin: start, mark() {}, measure() {} };
 
+  /** UTF-8 bytes of `s` from code unit `start` to `end`; lone surrogates become U+FFFD as in browsers. */
+  const encodeUtf8 = (s, start = 0, end = s.length) => {
+    const out = new Uint8Array((end - start) * 3);
+    let n = 0;
+    for (let i = start; i < end; i++) {
+      let c = s.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff && i + 1 < end) {
+        const low = s.charCodeAt(i + 1);
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          c = 0x10000 + ((c - 0xd800) << 10) + (low - 0xdc00);
+          i++;
+        }
+      }
+      if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd;
+      if (c < 0x80) out[n++] = c;
+      else if (c < 0x800) {
+        out[n++] = 0xc0 | (c >> 6);
+        out[n++] = 0x80 | (c & 63);
+      } else if (c < 0x10000) {
+        out[n++] = 0xe0 | (c >> 12);
+        out[n++] = 0x80 | ((c >> 6) & 63);
+        out[n++] = 0x80 | (c & 63);
+      } else {
+        out[n++] = 0xf0 | (c >> 18);
+        out[n++] = 0x80 | ((c >> 12) & 63);
+        out[n++] = 0x80 | ((c >> 6) & 63);
+        out[n++] = 0x80 | (c & 63);
+      }
+    }
+    return out.slice(0, n);
+  };
   g.TextEncoder ??= class TextEncoder {
     get encoding() {
       return "utf-8";
     }
     encode(input = "") {
-      const s = unescape(encodeURIComponent(String(input)));
-      const out = new Uint8Array(s.length);
-      for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-      return out;
+      return encodeUtf8(String(input));
     }
     encodeInto(input, dest) {
-      const bytes = this.encode(input);
-      dest.set(bytes.subarray(0, dest.length));
-      return { read: input.length, written: Math.min(bytes.length, dest.length) };
+      const s = String(input);
+      let read = 0;
+      let written = 0;
+      while (read < s.length) {
+        const c = s.charCodeAt(read);
+        const units = c >= 0xd800 && c <= 0xdbff && read + 1 < s.length ? 2 : 1;
+        const bytes = encodeUtf8(s, read, read + units);
+        if (written + bytes.length > dest.length) break;
+        dest.set(bytes, written);
+        written += bytes.length;
+        read += units;
+      }
+      return { read, written };
     }
   };
   g.TextDecoder ??= class TextDecoder {
+    constructor() {
+      this.pending = [];
+    }
     get encoding() {
       return "utf-8";
     }
-    decode(input) {
-      if (!input) return "";
-      const bytes = input instanceof Uint8Array ? input : new Uint8Array(input.buffer || input);
-      let s = "";
-      for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode(...bytes.subarray(i, i + 8192));
-      try {
-        return decodeURIComponent(escape(s));
-      } catch {
-        return s;
+    decode(input, options) {
+      const view = !input
+        ? new Uint8Array(0)
+        : ArrayBuffer.isView(input)
+          ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
+          : new Uint8Array(input);
+      const bytes = this.pending.length ? Uint8Array.from([...this.pending, ...view]) : view;
+      this.pending = [];
+      const units = [];
+      let out = "";
+      let i = 0;
+      while (i < bytes.length) {
+        const b = bytes[i];
+        const size = b < 0x80 ? 1 : b >= 0xf8 ? 0 : b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc2 ? 2 : 0;
+        if (size === 0) {
+          units.push(0xfffd);
+          i++;
+        } else if (i + size > bytes.length) {
+          if (options?.stream) this.pending = [...bytes.subarray(i)];
+          else units.push(0xfffd);
+          break;
+        } else {
+          let c = size === 1 ? b : b & (0xff >> (size + 1));
+          let valid = true;
+          for (let k = 1; k < size; k++) {
+            const next = bytes[i + k];
+            if ((next & 0xc0) !== 0x80) valid = false;
+            c = (c << 6) | (next & 63);
+          }
+          if (!valid) {
+            units.push(0xfffd);
+            i++;
+            continue;
+          }
+          i += size;
+          if (c >= 0x10000) {
+            c -= 0x10000;
+            units.push(0xd800 + (c >> 10), 0xdc00 + (c & 0x3ff));
+          } else units.push(c);
+        }
+        if (units.length >= 8192) out += String.fromCharCode(...units.splice(0));
       }
+      return out + String.fromCharCode(...units);
     }
   };
 
@@ -222,14 +304,205 @@
   }
   g.URL ??= URL;
 
+  class EventTarget {
+    constructor() {
+      this._listeners = [];
+    }
+    addEventListener(type, listener, options) {
+      if (typeof listener !== "function" && typeof listener?.handleEvent !== "function") return;
+      const signal = options === Object(options) ? options.signal : undefined;
+      if (signal?.aborted) return;
+      this._listeners.push({ type, listener, once: options === Object(options) && options.once === true });
+      signal?.addEventListener("abort", () => this.removeEventListener(type, listener), { once: true });
+    }
+    removeEventListener(type, listener) {
+      this._listeners = this._listeners.filter((entry) => entry.type !== type || entry.listener !== listener);
+    }
+    dispatchEvent(event) {
+      for (const entry of [...this._listeners]) {
+        if (entry.type !== event.type) continue;
+        if (entry.once) this.removeEventListener(entry.type, entry.listener);
+        if (typeof entry.listener === "function") entry.listener.call(this, event);
+        else entry.listener.handleEvent(event);
+      }
+      const handler = this[`on${event.type}`];
+      if (typeof handler === "function") handler.call(this, event);
+      return true;
+    }
+  }
+  g.EventTarget ??= EventTarget;
+
+  class AbortSignal extends EventTarget {
+    constructor() {
+      super();
+      this.aborted = false;
+      this.reason = undefined;
+      this.onabort = null;
+    }
+    throwIfAborted() {
+      if (this.aborted) throw this.reason;
+    }
+    static abort(reason) {
+      const controller = new g.AbortController();
+      controller.abort(reason);
+      return controller.signal;
+    }
+  }
+  g.AbortSignal ??= AbortSignal;
   g.AbortController ??= class AbortController {
     constructor() {
-      this.signal = { aborted: false, addEventListener() {}, removeEventListener() {} };
+      this.signal = new AbortSignal();
     }
-    abort() {
-      this.signal.aborted = true;
+    abort(reason) {
+      const signal = this.signal;
+      if (signal.aborted) return;
+      signal.aborted = true;
+      signal.reason = reason ?? Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+      signal.dispatchEvent({ type: "abort", target: signal });
     }
   };
+
+  /** The part of WHATWG readable streams that `renderToReadableStream` and its readers use. */
+  class ReadableStream {
+    constructor(source = {}, strategy = {}) {
+      this._source = source;
+      this._queue = [];
+      this._reads = [];
+      this._state = "readable";
+      this._closing = false;
+      this._started = false;
+      this._pulling = false;
+      this._pullAgain = false;
+      this._highWaterMark = strategy.highWaterMark ?? (source.type === "bytes" ? 0 : 1);
+      this._reader = null;
+      const stream = this;
+      this._controller = {
+        byobRequest: null,
+        get desiredSize() {
+          if (stream._state === "errored") return null;
+          return stream._state === "closed" ? 0 : stream._highWaterMark - stream._queue.length;
+        },
+        enqueue(chunk) {
+          if (stream._state !== "readable" || stream._closing) throw new TypeError("the stream is not readable");
+          const read = stream._reads.shift();
+          if (read) read.resolve({ value: chunk, done: false });
+          else stream._queue.push(chunk);
+          stream._pullIfNeeded();
+        },
+        close() {
+          if (stream._state !== "readable" || stream._closing) return;
+          stream._closing = true;
+          if (stream._queue.length === 0) stream._close();
+        },
+        error(error) {
+          stream._fail(error);
+        },
+      };
+      Promise.resolve()
+        .then(() => (typeof source.start === "function" ? source.start(this._controller) : undefined))
+        .then(
+          () => {
+            this._started = true;
+            this._pullIfNeeded();
+          },
+          (error) => this._fail(error),
+        );
+    }
+    get locked() {
+      return this._reader !== null;
+    }
+    _close() {
+      this._state = "closed";
+      for (const read of this._reads.splice(0)) read.resolve({ value: undefined, done: true });
+      this._reader?._settle(null);
+    }
+    _fail(error) {
+      if (this._state !== "readable") return;
+      this._state = "errored";
+      this._error = error;
+      this._queue = [];
+      for (const read of this._reads.splice(0)) read.reject(error);
+      this._reader?._settle(error);
+    }
+    _pullIfNeeded() {
+      if (!this._started || this._state !== "readable" || this._closing || typeof this._source.pull !== "function") return;
+      if (this._reads.length === 0 && this._queue.length >= this._highWaterMark) return;
+      if (this._pulling) {
+        this._pullAgain = true;
+        return;
+      }
+      this._pulling = true;
+      Promise.resolve()
+        .then(() => this._source.pull(this._controller))
+        .then(
+          () => {
+            this._pulling = false;
+            if (this._pullAgain) {
+              this._pullAgain = false;
+              this._pullIfNeeded();
+            }
+          },
+          (error) => this._fail(error),
+        );
+    }
+    _read() {
+      if (this._queue.length > 0) {
+        const value = this._queue.shift();
+        if (this._closing && this._queue.length === 0) this._close();
+        else this._pullIfNeeded();
+        return Promise.resolve({ value, done: false });
+      }
+      if (this._state === "closed") return Promise.resolve({ value: undefined, done: true });
+      if (this._state === "errored") return Promise.reject(this._error);
+      return new Promise((resolve, reject) => {
+        this._reads.push({ resolve, reject });
+        this._pullIfNeeded();
+      });
+    }
+    cancel(reason) {
+      if (this._state === "closed") return Promise.resolve();
+      if (this._state === "errored") return Promise.reject(this._error);
+      this._queue = [];
+      this._close();
+      const cancel = typeof this._source.cancel === "function" ? this._source.cancel(reason) : undefined;
+      return Promise.resolve(cancel).then(() => undefined);
+    }
+    getReader() {
+      if (this._reader) throw new TypeError("the stream is locked to a reader");
+      const stream = this;
+      let settle;
+      const closed = new Promise((resolve, reject) => {
+        settle = (error) => (error === null ? resolve() : reject(error));
+      });
+      closed.catch(() => {});
+      const reader = {
+        closed,
+        _settle: settle,
+        read: () => stream._read(),
+        cancel: (reason) => stream.cancel(reason),
+        releaseLock() {
+          if (stream._reader === reader) stream._reader = null;
+        },
+      };
+      this._reader = reader;
+      if (this._state === "closed") settle(null);
+      else if (this._state === "errored") settle(this._error);
+      return reader;
+    }
+    async *[Symbol.asyncIterator]() {
+      const reader = this.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          yield value;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+  }
+  g.ReadableStream ??= ReadableStream;
   g.process ??= { env: {} };
   g.process.env.NODE_ENV ??= host.env;
 })();

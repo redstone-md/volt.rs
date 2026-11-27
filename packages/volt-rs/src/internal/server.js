@@ -1,5 +1,5 @@
 import { createElement as h } from "react";
-import { renderToString } from "react-dom/server";
+import { renderToReadableStream, renderToString } from "react-dom/server";
 import DefaultDocument, { DocumentContext } from "../document.js";
 import { isNotFound, readRedirect } from "./errors.js";
 import { resolveProps, staticPaths } from "./pages.js";
@@ -28,14 +28,73 @@ async function renderDocument(document, main, state) {
   return renderToString(h(DocumentContext.Provider, { value: { main } }, h(Doc, props ?? {})));
 }
 
-async function renderPage(routes, options, state) {
+async function readAll(stream) {
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+    length += chunk.byteLength;
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/**
+ * Renders an App Router tree. `"string"` uses `renderToString`; `"complete"` waits for every Suspense
+ * boundary; `"stream"` reports the shell to `sink` once it is ready and then writes each chunk as React
+ * flushes it, returning `null`. A `notFound()` or `redirect()` raised before the shell is sent is thrown,
+ * so it still decides the status code, even when a Suspense boundary caught it.
+ */
+async function renderApp(element, state, mode, sink) {
+  const status = state.status ?? 200;
+  if (mode === "string") return { html: renderToString(element), status };
+  let raised = null;
+  const controller = new AbortController();
+  const stream = await renderToReadableStream(element, {
+    signal: controller.signal,
+    onError(error) {
+      if (isNotFound(error) || readRedirect(error)) raised ??= error;
+      else console.error(error);
+      return typeof error?.digest === "string" ? error.digest : undefined;
+    },
+  });
+  if (mode === "complete") await stream.allReady;
+  if (raised) {
+    controller.abort();
+    throw raised;
+  }
+  if (mode === "complete") return { html: await readAll(stream), status };
+  if (!sink.shell(JSON.stringify({ status, route: state.route }))) {
+    controller.abort();
+    return null;
+  }
+  const reader = stream.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!sink.write(value)) {
+      // The client went away: stop rendering the remaining boundaries.
+      controller.abort();
+      await reader.cancel().catch(() => {});
+      break;
+    }
+  }
+  return null;
+}
+
+async function renderPage(routes, options, state, mode, sink) {
   const route = await loadRoute(routes, state.route);
   if (!isPages(route)) {
     const initial = await createView(routes, state);
-    return { html: renderToString(h(App, { routes, initial })), status: state.status ?? 200 };
+    return renderApp(h(App, { routes, initial }), state, mode, sink);
   }
   const result = await resolveProps(route, state);
-  if (result.notFound) return notFound(routes, options, state);
+  if (result.notFound) return notFound(routes, options, state, mode, sink);
   if (result.redirect) return { html: "", status: result.redirect.status, redirect: result.redirect };
   const next = { ...state, data: result.props };
   const initial = await createView(routes, next);
@@ -43,10 +102,27 @@ async function renderPage(routes, options, state) {
   return { html, status: next.status ?? 200, data: next.data, static: result.static, revalidate: result.revalidate };
 }
 
-async function notFound(routes, options, state) {
+async function notFound(routes, options, state, mode, sink) {
   if (state.route === NOT_FOUND_ROUTE) throw new Error("the not-found page itself reported not found");
-  const rendered = await renderPage(routes, options, { ...state, route: NOT_FOUND_ROUTE, status: 404, data: null });
+  const next = { ...state, route: NOT_FOUND_ROUTE, status: 404, data: null };
+  const rendered = await renderPage(routes, options, next, mode, sink);
+  if (rendered === null) return null;
   return { ...rendered, status: 404, route: NOT_FOUND_ROUTE, static: false, revalidate: null };
+}
+
+/** Renders a page state, turning `notFound()` and `redirect()` into the not-found page and a redirect. */
+async function respond(routes, options, payload, mode, sink) {
+  const state = JSON.parse(payload);
+  try {
+    const rendered = await renderPage(routes, options, state, mode, sink);
+    return rendered === null ? "" : JSON.stringify(rendered);
+  } catch (error) {
+    const redirect = readRedirect(error);
+    if (redirect) return JSON.stringify({ html: "", status: redirect.status, redirect });
+    if (!isNotFound(error) || state.route === NOT_FOUND_ROUTE) throw error;
+    const rendered = await notFound(routes, options, state, mode, sink);
+    return rendered === null ? "" : JSON.stringify(rendered);
+  }
 }
 
 /** The page module followed by its layouts, innermost first. */
@@ -81,17 +157,15 @@ async function generateParams(route) {
 /** Installs the render protocol used by the Rust SSR engine. */
 export function createServer(routes, options = {}) {
   globalThis.__VOLT__ = {
-    async render(payload) {
-      const state = JSON.parse(payload);
-      try {
-        return JSON.stringify(await renderPage(routes, options, state));
-      } catch (error) {
-        const redirect = readRedirect(error);
-        if (redirect) return JSON.stringify({ html: "", status: redirect.status, redirect });
-        if (!isNotFound(error) || state.route === NOT_FOUND_ROUTE) throw error;
-        return JSON.stringify(await notFound(routes, options, state));
-      }
-    },
+    /** The page rendered with `renderToString` (`[server] streaming = false`). */
+    render: (payload) => respond(routes, options, payload, "string"),
+    /** The complete page with every Suspense boundary resolved, for caches, prerendering and crawlers. */
+    document: (payload) => respond(routes, options, payload, "complete"),
+    /**
+     * Streams the page to `sink` (`shell(json)`, then `write(bytes)` per chunk) and resolves to `""`;
+     * Pages Router pages and redirects resolve to a complete result instead.
+     */
+    stream: (payload, sink) => respond(routes, options, payload, "stream", sink),
     /** Pages Router props for a client navigation (`/_volt/data`). */
     async props(payload) {
       const state = JSON.parse(payload);

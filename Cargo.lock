@@ -4320,6 +4320,7 @@ dependencies = [
  "inventory",
  "memchr",
  "percent-encoding",
+ "regex",
  "rquickjs",
  "serde",
  "serde_json",

@@ -32,6 +32,7 @@ mod images;
 mod multipart;
 mod response;
 mod server;
+mod stream;
 
 pub mod config;
 pub mod form;
