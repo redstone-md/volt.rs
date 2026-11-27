@@ -11,6 +11,7 @@ cargo install voltrs-cli
 | `volt new <dir> [--template default\|web] [--no-install]` | Scaffold a project. |
 | `volt dev [--port 3000] [--host 0.0.0.0]` | Dev server: rebuilds on save, recompiles Rust, live reload, error overlay. |
 | `volt build` | Production build: release server binary, minified bundles, CSS, prerendered pages, Brotli/gzip. |
+| `volt export` | Production build written as a static site to `out/` (`[build] export_dir`); fails with a list of routes that need the server. See [static generation](static-generation.md#static-export). |
 | `volt start [--port 3000]` | Run the production build. |
 | `volt sdk` | Regenerate `@volt/api` from the Rust server. |
 | `volt routes` | Print the route table with route kinds, the router (`app` or `pages`) and API endpoints. |

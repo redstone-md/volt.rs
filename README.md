@@ -95,7 +95,8 @@ export default function Home({ data }: PageProps<"/">) {
 - **Next.js imports work**: `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`.
 - **Tailwind CSS v4 and shadcn/ui** out of the box; `npx shadcn add` works.
 - **Images**: `<Image>` with `srcset`, lazy loading, priority preloading and on-demand resizing.
-- **Static prerendering**, `revalidate` caching, Brotli and gzip precompression, immutable asset caching, security headers, redirects and rewrites.
+- **Static prerendering** with `generateStaticParams`, `dynamicParams` and `getStaticPaths`, incremental static regeneration (stale-while-revalidate), on-demand `revalidate_path`, and **static export** (`volt export`) for any static host.
+- `base_path` and `trailing_slash`, Brotli and gzip precompression, immutable asset caching, security headers, redirects and rewrites.
 - **Dev server** with live reload, CSS hot swap, Rust recompilation and an in-browser error overlay.
 - **Instructions for coding agents** in every generated project (`AGENTS.md`) and [`llms.txt`](./llms.txt) for the framework itself.
 
@@ -111,6 +112,7 @@ export default function Home({ data }: PageProps<"/">) {
 - [Data: loaders, actions, API routes](./docs/data.md)
 - [Metadata and SEO](./docs/metadata-seo.md)
 - [Styling and assets](./docs/styling.md)
+- [Static generation, ISR and export](./docs/static-generation.md)
 - [Configuration](./docs/configuration.md)
 - [Deployment](./docs/deployment.md)
 - [Coming from Next.js](./docs/migrating-from-nextjs.md)

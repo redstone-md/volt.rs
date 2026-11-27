@@ -19,9 +19,12 @@ page_cache = 1000                 # pages rendered at runtime kept in memory (pr
 [build]
 minify = true
 sourcemap = false                 # client source maps in production
-prerender = true                  # prerender static routes at build time
+prerender = true                  # prerender static routes and generateStaticParams paths
 aliases = { "@ui" = "./components/ui" }
 define = { "__API_VERSION__" = "\"2\"" }
+base_path = "/docs"               # serve the app under a path prefix
+trailing_slash = false            # true: /about/ is canonical, the other form redirects with 308
+export_dir = "out"                # output of `volt export`
 
 [seo]
 sitemap = true
@@ -47,6 +50,8 @@ destination = "/docs/introduction"
 ```
 
 Unknown keys are rejected, so typos fail loudly.
+
+`base_path` and `trailing_slash` are applied to routing, links, assets, redirects, the sitemap and `volt export`; see [static generation](static-generation.md#base-path-and-trailing-slashes). Redirect and rewrite sources and destinations are written without the base path.
 
 ## Environment variables
 

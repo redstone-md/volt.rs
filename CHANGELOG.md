@@ -4,7 +4,13 @@
 
 - Pages Router next to the App Router: `pages/` routes, `_app`, `_document` (`next/document`), `404`, `500` / `_error`, `getServerSideProps`, `getStaticProps` with `revalidate`, `getStaticPaths` prerendering, Rust loader props merged into page props, and `next/router` (`volt-rs/router`) with `useRouter`, `withRouter`, the `Router` singleton and router events.
 - `next` and `next/*` imports type-check through `volt-rs/env`.
-- `[server] page_cache` bounds the in-memory page cache.
+- `generateStaticParams` (pages and layouts), `dynamicParams` and Pages Router `getStaticPaths`, evaluated at build time; generated paths are prerendered and listed in the sitemap.
+- Stale-while-revalidate for `revalidate` pages with a single background regeneration.
+- On-demand revalidation with `ctx.revalidate_path`, `ctx.revalidate_prefix`, `voltrs::revalidate_path` and `voltrs::revalidate_prefix`.
+- `volt export` writes a static site with client navigation from exported route data.
+- `[build] base_path`, `trailing_slash` (308 normalisation) and `export_dir`.
+- `<Image>` serves original files when `[images] optimize = false`.
+- `volt dev` no longer rebuilds on events of the `.volt` directory itself.
 
 ## 0.0.1
 

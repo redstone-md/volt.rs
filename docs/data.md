@@ -149,6 +149,7 @@ Every loader, action and handler can take `ctx: Ctx` as its first argument.
 | `ctx.set_cookie(Cookie::new("session", id))` | adds `Set-Cookie` |
 | `ctx.set_header(name, value)` / `ctx.set_status(code)` | response headers and status |
 | `ctx.method()`, `ctx.path()`, `ctx.remote_addr()`, `ctx.elapsed()` | request info |
+| `ctx.revalidate_path("/blog/x")` / `ctx.revalidate_prefix("/blog")` | purges cached pages, see [static generation](static-generation.md#on-demand-revalidation) |
 
 ## State and middleware
 

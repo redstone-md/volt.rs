@@ -12,7 +12,9 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 | `pages/**`, `_app`, `_document`, `404`, `500`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` | same, see [Pages Router](./pages-router.md) |
 | `export const metadata`, `generateMetadata`, `export const viewport` | same |
 | `params` / `searchParams` props (sync or awaited) | same |
-| `export const revalidate`, `export const dynamic = "force-dynamic"` | same |
+| `export const revalidate`, `export const dynamic = "force-dynamic"` | same, with stale-while-revalidate |
+| `generateStaticParams`, `dynamicParams`, `getStaticPaths` | same, evaluated at build time for routes without a Rust loader |
+| `output: "export"`, `basePath`, `trailingSlash` | `volt export`, `[build] base_path`, `[build] trailing_slash` |
 | Tailwind CSS, shadcn/ui, CSS imports, `@/*` alias | same |
 | `NEXT_PUBLIC_*`, `.env*` files | same (`VOLT_PUBLIC_*` also works) |
 | `public/` | same |
@@ -27,7 +29,7 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 | `app/api/**/route.ts`, `pages/api/**` | Rust `#[get]`, `#[post]`, ... |
 | `middleware.ts` | `App::new().middleware(...)` |
 | `app/sitemap.ts` | automatic, plus Rust `#[sitemap]` providers |
-| `revalidatePath()` after an action | `<Form>` refreshes automatically, or `router.refresh()` |
+| `revalidatePath()` after an action | `ctx.revalidate_path()` / `voltrs::revalidate_path()` for cached pages; `<Form>` refreshes the current page automatically, or `router.refresh()` |
 | `cookies()`, `headers()` | `ctx.cookie()`, `ctx.header()`, `ctx.set_cookie()` |
 | `next/font` | `@fontsource/*` packages or `@font-face` in CSS |
 

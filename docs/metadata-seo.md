@@ -48,7 +48,7 @@ import { JsonLd } from "volt-rs/seo";
 
 volt serves these automatically unless a file with the same name exists in `public/`.
 
-- `/sitemap.xml` lists every static route. Add dynamic URLs from Rust:
+- `/sitemap.xml` lists every static route and every path from `generateStaticParams`. Add dynamic URLs from Rust:
 
   ```rust
   #[sitemap]
