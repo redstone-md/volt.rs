@@ -35,3 +35,44 @@ export function stripBase(pathname) {
 
 /** URL of a prefixed internal endpoint such as `/_volt/action/x`. */
 export const endpoint = (path) => `${BASE_PATH}${path}`;
+
+/** `[i18n] locales`; empty when internationalized routing is off. */
+export const LOCALES = (process.env.__VOLT_LOCALES__ ?? "").split(",").filter(Boolean);
+/** Locale of unprefixed URLs: `[i18n] default_locale`, else `[site] language`. */
+export const DEFAULT_LOCALE = process.env.__VOLT_DEFAULT_LOCALE__ ?? "en";
+
+const findLocale = (candidate) => LOCALES.find((locale) => locale.toLowerCase() === candidate.toLowerCase()) ?? null;
+
+/** Splits an app pathname into its locale prefix (`null` when unprefixed) and the route path below it. */
+export function splitLocale(pathname) {
+  const [, first = "", ...rest] = pathname.split("/");
+  const locale = first ? findLocale(first) : null;
+  if (!locale) return { locale: null, path: pathname };
+  return { locale, path: rest.length ? `/${rest.join("/")}` : "/" };
+}
+
+/** App path of a route path in `locale`: prefixed unless it is the default locale. */
+export function localizePath(path, locale) {
+  if (!LOCALES.length || !locale || locale === DEFAULT_LOCALE) return path;
+  return path === "/" || path === "" ? `/${locale}` : `/${locale}${path}`;
+}
+
+/**
+ * Adds the locale prefix to an app href. With `explicit`, an existing prefix is replaced by `locale`;
+ * otherwise hrefs that already name a locale are left alone.
+ */
+export function localizeHref(href, locale, explicit = false) {
+  if (!LOCALES.length || !isAppHref(href) || href.startsWith("/_volt/")) return href;
+  const cut = href.search(/[?#]/);
+  const path = cut < 0 ? href : href.slice(0, cut);
+  const rest = cut < 0 ? "" : href.slice(cut);
+  const split = splitLocale(path);
+  if (split.locale && !explicit) return href;
+  return `${localizePath(split.path, locale)}${rest}`;
+}
+
+/** Remembers a visitor's explicit locale choice for `[i18n] locale_detection`. Browser only. */
+export function rememberLocale(locale) {
+  if (!LOCALES.length || typeof document === "undefined") return;
+  document.cookie = `VOLT_LOCALE=${encodeURIComponent(locale)}; path=${BASE_PATH || "/"}; max-age=31536000; samesite=lax`;
+}

@@ -1,6 +1,6 @@
 import { createElement as h, useContext, useMemo } from "react";
 import { routerEvents } from "./internal/events.js";
-import { pagesRouter } from "./internal/pages.js";
+import { localeFields, pagesRouter } from "./internal/pages.js";
 import { RouterContext, getRouter, getRouterState } from "./internal/router.js";
 
 /** Pages Router style router (`next/router`): pathname, query, asPath, events and navigation methods. */
@@ -55,6 +55,15 @@ const Router = {
   },
   get isFallback() {
     return false;
+  },
+  get locale() {
+    return localeFields(getRouterState() ?? {}).locale;
+  },
+  get locales() {
+    return localeFields({}).locales;
+  },
+  get defaultLocale() {
+    return localeFields({}).defaultLocale;
   },
   push: (...args) => current().push(...args),
   replace: (...args) => current().replace(...args),

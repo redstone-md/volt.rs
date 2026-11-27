@@ -1,4 +1,5 @@
 import { useContext, useMemo } from "react";
+import { DEFAULT_LOCALE, LOCALES } from "./internal/config.js";
 import { LayoutSegmentContext, RouterContext, ServerInsertedHTMLContext, getRouter } from "./internal/router.js";
 
 export { notFound, permanentRedirect, redirect } from "./internal/errors.js";
@@ -65,3 +66,14 @@ export function unstable_noStore() {}
 
 /** Next.js compatibility no-op: resolves immediately. */
 export async function connection() {}
+
+/** Active locale: the `[i18n]` locale of the URL, else the default locale, else `[site] language`. */
+export function useLocale() {
+  return useRouterContext().state.locale ?? DEFAULT_LOCALE;
+}
+
+/** The active locale with the `[i18n]` locales (empty when internationalized routing is off). */
+export function useI18n() {
+  const locale = useLocale();
+  return useMemo(() => ({ locale, locales: LOCALES, defaultLocale: DEFAULT_LOCALE }), [locale]);
+}

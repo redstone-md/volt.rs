@@ -1,5 +1,5 @@
 // Pages Router: data functions (`getServerSideProps`, `getStaticProps`, `getStaticPaths`) and the `next/router` object.
-import { BASE_PATH } from "./config.js";
+import { BASE_PATH, DEFAULT_LOCALE, LOCALES } from "./config.js";
 import { routerEvents } from "./events.js";
 
 export const NOT_FOUND_ROUTE = "/_not-found";
@@ -46,7 +46,8 @@ const normalize = (path) => {
 const pathsCache = new WeakMap();
 
 async function runStaticPaths(page, pattern) {
-  const result = (await page.getStaticPaths({})) ?? {};
+  const { locales, defaultLocale } = localeFields({});
+  const result = (await page.getStaticPaths({ locales, defaultLocale })) ?? {};
   const paths = (result.paths ?? []).map((entry) => (typeof entry === "string" ? entry : fillPattern(pattern, entry.params)));
   return { paths, fallback: result.fallback ?? false };
 }
@@ -77,16 +78,24 @@ function settle(result, base, isStatic, name) {
   }));
 }
 
+/** `locale`, `locales` and `defaultLocale` as Next.js passes them, all undefined without `[i18n]`. */
+export function localeFields(state) {
+  if (!LOCALES.length) return { locale: undefined, locales: undefined, defaultLocale: undefined };
+  return { locale: state.locale ?? DEFAULT_LOCALE, locales: LOCALES, defaultLocale: DEFAULT_LOCALE };
+}
+
 /** Resolves the props of a Pages Router page for a request. */
 export async function resolveProps(route, state) {
   const page = route.page ?? {};
   const base = toProps(state.data);
   const params = state.params ?? {};
+  const locales = localeFields(state);
   if (typeof page.getServerSideProps === "function") {
     const context = {
       params,
       query: { ...(state.searchParams ?? {}), ...params },
       resolvedUrl: `${state.pathname}${state.search ?? ""}`,
+      ...locales,
     };
     return settle(await page.getServerSideProps(context), base, false, "getServerSideProps");
   }
@@ -97,7 +106,7 @@ export async function resolveProps(route, state) {
         return { notFound: true };
       }
     }
-    return settle(await page.getStaticProps({ params }), base, true, "getStaticProps");
+    return settle(await page.getStaticProps({ params, ...locales }), base, true, "getStaticProps");
   }
   return { props: base, static: false, revalidate: null };
 }
@@ -143,9 +152,7 @@ export function pagesRouter(router, state) {
     isFallback: false,
     isPreview: false,
     isLocaleDomain: false,
-    locale: undefined,
-    locales: undefined,
-    defaultLocale: undefined,
+    ...localeFields(state),
     events: routerEvents,
     push: navigate("push"),
     replace: navigate("replace"),

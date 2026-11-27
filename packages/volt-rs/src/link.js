@@ -1,6 +1,6 @@
 import { createElement as h, forwardRef, useCallback, useContext, useEffect, useRef } from "react";
 import { withBase } from "./internal/config.js";
-import { RouterContext } from "./internal/router.js";
+import { RouterContext, localize } from "./internal/router.js";
 
 const toHref = (href) => (typeof href === "string" ? href : formatUrl(href));
 
@@ -18,13 +18,18 @@ function isLocal(href) {
   }
 }
 
-/** Client-side navigation with prefetching. Renders a plain `<a>`. */
+/**
+ * Client-side navigation with prefetching. Renders a plain `<a>`. With `[i18n]`, local hrefs get the
+ * current locale prefix; `locale="de"` links to another locale and `locale={false}` keeps `href` as given.
+ */
 const Link = forwardRef(function Link(
-  { href, replace = false, scroll = true, prefetch = true, onClick, onMouseEnter, onTouchStart, children, ...rest },
+  { href, locale, replace = false, scroll = true, prefetch = true, onClick, onMouseEnter, onTouchStart, children, ...rest },
   forwarded,
 ) {
   const context = useContext(RouterContext);
-  const target = toHref(href);
+  const target = localize(toHref(href), locale, context?.state.locale);
+  // The href is already localized; only an explicit locale is passed on, so the router remembers the choice.
+  const choice = typeof locale === "string" ? locale : false;
   const own = useRef(null);
   const ref = useCallback(
     (node) => {
@@ -42,14 +47,14 @@ const Link = forwardRef(function Link(
       if (entries.some((e) => e.isIntersecting)) {
         observer.disconnect();
         const idle = window.requestIdleCallback ?? ((fn) => setTimeout(fn, 1));
-        idle(() => context.router.prefetch(target));
+        idle(() => context.router.prefetch(target, { locale: false }));
       }
     });
     observer.observe(node);
     return () => observer.disconnect();
   }, [prefetch, target, context]);
 
-  const warm = () => prefetch !== false && context && isLocal(target) && context.router.prefetch(target);
+  const warm = () => prefetch !== false && context && isLocal(target) && context.router.prefetch(target, { locale: false });
 
   return h(
     "a",
@@ -81,7 +86,7 @@ const Link = forwardRef(function Link(
         )
           return;
         event.preventDefault();
-        context.router[replace ? "replace" : "push"](target, { scroll });
+        context.router[replace ? "replace" : "push"](target, { scroll, locale: choice });
       },
     },
     children,

@@ -4,6 +4,10 @@ export interface DocumentContext {
   pathname: string;
   query: Record<string, string | string[]>;
   asPath: string;
+  /** `[i18n]` locale fields; undefined without `[i18n]`. */
+  locale?: string;
+  locales?: string[];
+  defaultLocale?: string;
   renderPage(): { html: string; head: ReactNode[] };
   defaultGetInitialProps(context: DocumentContext): Promise<DocumentInitialProps>;
 }

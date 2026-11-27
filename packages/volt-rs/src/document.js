@@ -1,11 +1,12 @@
 import { Component, createContext, createElement as h, useContext } from "react";
 
-/** The page tree rendered by `<Main />`, provided by the server renderer. */
-export const DocumentContext = createContext({ main: null });
+/** The page tree rendered by `<Main />` and the active locale, provided by the server renderer. */
+export const DocumentContext = createContext({ main: null, locale: undefined });
 
-/** `<html>` of a Pages Router document. */
+/** `<html>` of a Pages Router document; `lang` defaults to the active locale. */
 export function Html({ children, ...props }) {
-  return h("html", props, children);
+  const { locale } = useContext(DocumentContext);
+  return h("html", { ...props, lang: props.lang ?? locale }, children);
 }
 
 /** `<head>` of the document, with the default charset and viewport tags. Not the same as `volt-rs/head`. */
@@ -36,7 +37,7 @@ export default class Document extends Component {
   }
 
   render() {
-    return h(Html, { lang: "en" }, h(Head), h("body", null, h(Main), h(NextScript)));
+    return h(Html, null, h(Head), h("body", null, h(Main), h(NextScript)));
   }
 }
 

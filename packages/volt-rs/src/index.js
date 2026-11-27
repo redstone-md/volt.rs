@@ -11,6 +11,8 @@ export {
   permanentRedirect,
   redirect,
   useData,
+  useI18n,
+  useLocale,
   useNavigationPending,
   useParams,
   usePathname,

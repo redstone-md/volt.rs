@@ -1,7 +1,7 @@
 import { useActionState as useReactActionState, useCallback, useContext, useMemo, useState, useTransition } from "react";
-import { endpoint, withBase } from "./internal/config.js";
+import { endpoint, localizeHref, withBase } from "./internal/config.js";
 import { ActionError } from "./internal/errors.js";
-import { RouterContext, getRouter, revalidatePaths } from "./internal/router.js";
+import { RouterContext, getRouter, getRouterState, revalidatePaths } from "./internal/router.js";
 
 export { ActionError };
 
@@ -52,7 +52,8 @@ function readRevalidate(response) {
 
 async function call(name, input) {
   const { body, type } = encode(input);
-  const headers = { accept: "application/json", "x-volt-action": "1" };
+  const locale = getRouterState()?.locale;
+  const headers = { accept: "application/json", "x-volt-action": "1", ...(locale ? { "x-volt-locale": locale } : {}) };
   if (type) headers["content-type"] = type;
   const response = await fetch(endpoint(`/_volt/action/${name}`), { method: "POST", headers, body, credentials: "same-origin" });
   const payload = await response.json().catch(() => ({ error: { status: response.status, message: response.statusText } }));
@@ -60,7 +61,7 @@ async function call(name, input) {
   const redirect = payload.error?.redirect;
   const revalidated = paths.length > 0 ? await revalidatePaths(paths, { refresh: !redirect }) : false;
   if (redirect) {
-    getRouter()?.push(redirect) ?? (location.href = withBase(redirect));
+    getRouter()?.push(redirect) ?? (location.href = withBase(localizeHref(redirect, locale)));
     return { data: undefined, revalidated: true };
   }
   if (payload.error) throw new ActionError(payload.error);

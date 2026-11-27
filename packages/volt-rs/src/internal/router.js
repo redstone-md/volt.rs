@@ -13,10 +13,19 @@ import {
   useState,
   useTransition,
 } from "react";
-import { endpoint, stripBase, withBase } from "./config.js";
+import {
+  DEFAULT_LOCALE,
+  LOCALES,
+  endpoint,
+  localizeHref,
+  rememberLocale,
+  splitLocale,
+  stripBase,
+  withBase,
+} from "./config.js";
 import { isNotFound, readRedirect } from "./errors.js";
 import { routerEvents } from "./events.js";
-import { Metadata, resolveMetadata } from "./metadata.js";
+import { LocaleAlternates, Metadata, resolveMetadata } from "./metadata.js";
 import { ERROR_ROUTE, NOT_FOUND_ROUTE, pagesRouter, toProps } from "./pages.js";
 
 export { ERROR_ROUTE, NOT_FOUND_ROUTE };
@@ -144,7 +153,7 @@ async function loadRoute(routes, id) {
 export async function createView(routes, state) {
   const route = await loadRoute(routes, state.route);
   const resolve = kindOf(route) === "app" && !state.globalError;
-  const metadata = resolve ? await resolveMetadata(route, pageProps(state), state.site, state.notFound) : null;
+  const metadata = resolve ? await resolveMetadata(route, pageProps(state), state.site, state) : null;
   return { route, state, metadata };
 }
 
@@ -241,7 +250,8 @@ function PagesTree({ view }) {
     () => (state.route === ERROR_ROUTE ? { statusCode: state.status, error: state.error } : toProps(state.data)),
     [state],
   );
-  return h(component(route.app), { Component: component(route.page), pageProps: props, router });
+  const app = h(component(route.app), { Component: component(route.page), pageProps: props, router });
+  return h(Fragment, null, h(LocaleAlternates, { state }), app);
 }
 
 function Tree({ view }) {
@@ -385,6 +395,18 @@ function dataUrl(path, search, exported) {
   return endpoint(`/_volt/data?path=${encodeURIComponent(path + search)}`);
 }
 
+/**
+ * The href to load for a navigation: `locale: false` keeps it as given, a locale string switches to that
+ * locale, and by default the current locale is kept.
+ */
+export function localize(href, locale, current) {
+  if (locale === false || typeof href !== "string") return href;
+  return typeof locale === "string" ? localizeHref(href, locale, true) : localizeHref(href, current);
+}
+
+/** Route path of an app path, without its locale prefix. */
+const routePath = (path) => splitLocale(path).path;
+
 /** Resolves an app href to a URL and its app path (`null` when it is not part of this app). */
 function locate(href) {
   const url = new URL(withBase(href), location.href);
@@ -462,7 +484,8 @@ export function App({ routes, shells = {}, initial }) {
   /** The loading view of a route with `loading` UI: its layouts around a page that is still pending. */
   const preview = useCallback(
     async (path, search) => {
-      const match = findRoute(Object.keys(routes), path);
+      const { locale, path: pathname } = splitLocale(path);
+      const match = findRoute(Object.keys(routes), pathname);
       const shell = match && shells[match.id];
       if (!shell) return null;
       const entry = routes[match.id];
@@ -471,7 +494,8 @@ export function App({ routes, shells = {}, initial }) {
       const state = {
         ...current.current.state,
         route: match.id,
-        pathname: path,
+        pathname,
+        locale: LOCALES.length ? (locale ?? DEFAULT_LOCALE) : current.current.state.locale,
         search,
         params: match.params,
         searchParams: searchParams(search),
@@ -520,8 +544,9 @@ export function App({ routes, shells = {}, initial }) {
   }, []);
 
   const navigate = useCallback(
-    async (href, { replace = false, scroll: toTop = true, fresh = false, shallow = false } = {}) => {
-      const { url, path } = locate(href);
+    async (href, { replace = false, scroll: toTop = true, fresh = false, shallow = false, locale } = {}) => {
+      if (typeof locale === "string") rememberLocale(locale);
+      const { url, path } = locate(localize(href, locale, current.current.state.locale));
       if (path === null) {
         location.href = url.href;
         return;
@@ -584,7 +609,7 @@ export function App({ routes, shells = {}, initial }) {
       }
       if (own !== ticket.current) return;
       inflight.current = null;
-      if (next.redirect) return navigate(next.redirect, { replace: true, scroll: toTop });
+      if (next.redirect) return navigate(next.redirect, { replace: true, scroll: toTop, locale: false });
       const view = settle(next, base, path + url.search);
       if (next.state.buildId !== buildId || kindOf(view.route) !== kindOf(base.route)) {
         location.href = url.href;
@@ -599,11 +624,11 @@ export function App({ routes, shells = {}, initial }) {
 
   const revalidate = useCallback(
     async (paths, { refresh = true } = {}) => {
-      const hit = (pathname) => paths.some((path) => path === "*" || matchPath(path, pathname));
+      const hit = (pathname) => paths.some((path) => path === "*" || matchPath(path, routePath(pathname)));
       for (const key of [...cache.current.keys()]) if (hit(key.split(/[? ]/)[0])) cache.current.delete(key);
       const current = stripBase(location.pathname);
       if (!refresh || current === null || !hit(current)) return false;
-      await navigate(`${current}${location.search}${location.hash}`, { replace: true, scroll: false, fresh: true });
+      await navigate(`${current}${location.search}${location.hash}`, { replace: true, scroll: false, fresh: true, locale: false });
       return true;
     },
     [navigate],
@@ -618,14 +643,15 @@ export function App({ routes, shells = {}, initial }) {
           replace: true,
           scroll: false,
           fresh: true,
+          locale: false,
         }),
       back: () => history.back(),
       forward: () => history.forward(),
-      prefetch: (href) => {
-        const { url, path } = locate(href);
+      prefetch: (href, { locale } = {}) => {
+        const { url, path } = locate(localize(href, locale, current.current.state.locale));
         if (path === null) return;
         load(path, url.search, false, current.current.state.route).catch(() => {});
-        const match = findRoute(Object.keys(routes), path);
+        const match = findRoute(Object.keys(routes), routePath(path));
         if (match && shells[match.id]) shells[match.id]().catch(() => {});
       },
       beforePopState: (callback) => {

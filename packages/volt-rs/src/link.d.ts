@@ -7,6 +7,8 @@ export interface LinkProps extends Omit<AnchorHTMLAttributes<HTMLAnchorElement>,
   replace?: boolean;
   scroll?: boolean;
   prefetch?: boolean;
+  /** `[i18n]` locale to link to; `false` uses `href` as given. Defaults to the current locale. */
+  locale?: string | false;
 }
 
 declare const Link: ForwardRefExoticComponent<LinkProps & RefAttributes<HTMLAnchorElement>>;

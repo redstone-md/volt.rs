@@ -37,6 +37,7 @@ export interface NextRouter {
   isFallback: boolean;
   isPreview: boolean;
   isLocaleDomain: boolean;
+  /** Active `[i18n]` locale; undefined without `[i18n]`. */
   locale?: string;
   locales?: string[];
   defaultLocale?: string;
@@ -50,7 +51,7 @@ export interface NextRouter {
   beforePopState(callback: (state: { url: string; as: string; options: TransitionOptions }) => boolean): void;
 }
 
-export interface SingletonRouter extends Omit<NextRouter, "isPreview" | "isLocaleDomain" | "locale" | "locales" | "defaultLocale"> {
+export interface SingletonRouter extends Omit<NextRouter, "isPreview" | "isLocaleDomain"> {
   router: NextRouter | null;
   ready(callback: () => void): void;
 }

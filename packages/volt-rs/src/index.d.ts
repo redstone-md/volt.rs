@@ -14,6 +14,8 @@ export {
   permanentRedirect,
   redirect,
   useData,
+  useI18n,
+  useLocale,
   useNavigationPending,
   useParams,
   usePathname,
@@ -25,7 +27,7 @@ export {
   unstable_noStore,
   connection,
 } from "./navigation";
-export type { Router } from "./navigation";
+export type { I18n, Router } from "./navigation";
 
 export type Params = Record<string, string | string[]>;
 export type SearchParams = Record<string, string | string[] | undefined>;
@@ -182,7 +184,14 @@ export type NextPage<P = {}, IP = P> = import("react").ComponentType<P> & { getI
 
 export type Redirect = { destination: string; permanent: boolean } | { destination: string; statusCode: 301 | 302 | 303 | 307 | 308 };
 
-export interface GetServerSidePropsContext<P extends Params = Params> {
+/** `[i18n]` fields of data function contexts; undefined without `[i18n]`. */
+export interface LocaleContext {
+  locale?: string;
+  locales?: string[];
+  defaultLocale?: string;
+}
+
+export interface GetServerSidePropsContext<P extends Params = Params> extends LocaleContext {
   params: P;
   query: Record<string, string | string[]>;
   resolvedUrl: string;
@@ -194,7 +203,7 @@ export type GetServerSideProps<P extends Record<string, any> = Record<string, an
   context: GetServerSidePropsContext<Q>,
 ) => Promise<GetServerSidePropsResult<P>> | GetServerSidePropsResult<P>;
 
-export interface GetStaticPropsContext<P extends Params = Params> {
+export interface GetStaticPropsContext<P extends Params = Params> extends LocaleContext {
   params: P;
 }
 

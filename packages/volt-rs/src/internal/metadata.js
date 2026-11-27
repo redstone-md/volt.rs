@@ -1,4 +1,5 @@
 import { createElement as h, Fragment } from "react";
+import { LOCALES, localizePath, withBase } from "./config.js";
 import { fillPattern } from "./pages.js";
 
 const list = (value) => (value == null ? [] : Array.isArray(value) ? value : [value]);
@@ -12,6 +13,25 @@ async function exported(module, props, name, generator) {
   if (!module) return undefined;
   if (typeof module[generator] === "function") return await module[generator](props);
   return module[name];
+}
+
+/** `hreflang` URLs of the page in every `[i18n]` locale plus `x-default`, or `null` without i18n or on error pages. */
+export function localeAlternates(state) {
+  if (!LOCALES.length || !state || state.route?.startsWith("/_")) return null;
+  const languages = {};
+  for (const locale of LOCALES) languages[locale] = withBase(localizePath(state.pathname, locale));
+  languages["x-default"] = withBase(state.pathname);
+  return languages;
+}
+
+/** `hreflang` links for trees without metadata (Pages Router). */
+export function LocaleAlternates({ state }) {
+  const languages = localeAlternates(state);
+  if (!languages) return null;
+  const links = Object.entries(languages).map(([lang, href]) =>
+    h("link", { key: `alt-${lang}`, rel: "alternate", hrefLang: lang, href: absolute(href, state.site?.url) }),
+  );
+  return h(Fragment, null, ...links);
 }
 
 /** A metadata file URL (`/blog/[slug]/opengraph-image.png?hash`) for the current params. */
@@ -46,10 +66,12 @@ function overridden(files, meta) {
 }
 
 /**
- * Merges `metadata` / `generateMetadata` and metadata files from every segment, Next.js style. With
- * `notFound` (the index of the segment showing its `not-found`), only that segment and its parents count.
+ * Merges `metadata` / `generateMetadata` and metadata files from every segment, Next.js style, and adds
+ * `[i18n]` alternates for `state`. With `state.notFound` (the index of the segment showing its `not-found`),
+ * only that segment and its parents count.
  */
-export async function resolveMetadata(route, props, site, notFound) {
+export async function resolveMetadata(route, props, site, state) {
+  const notFound = state?.notFound;
   const levels = [...route.segments.map((s) => [s.layout, s.files]), [route.page, route.files]];
   const shown = notFound == null ? levels : levels.slice(0, notFound + 1);
   const merged = { metadataBase: site?.url };
@@ -76,6 +98,8 @@ export async function resolveMetadata(route, props, site, notFound) {
   applyFiles(merged, files, props.params);
   if (notFound != null) merged.robots = { index: false };
   if (title == null && site?.name) title = site.name;
+  const languages = notFound == null ? localeAlternates(state) : null;
+  if (languages) merged.alternates = { ...merged.alternates, languages: { ...languages, ...merged.alternates?.languages } };
   return { ...merged, title, viewport };
 }
 

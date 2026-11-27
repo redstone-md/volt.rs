@@ -2,7 +2,7 @@ import { Fragment, createElement as h } from "react";
 import { renderToReadableStream, renderToString } from "react-dom/server";
 import DefaultDocument, { DocumentContext } from "../document.js";
 import { isNotFound, readRedirect } from "./errors.js";
-import { resolveProps, staticPaths } from "./pages.js";
+import { localeFields, resolveProps, staticPaths } from "./pages.js";
 import { App, ERROR_ROUTE, NOT_FOUND_ROUTE, ServerInsertedHTMLContext, createView } from "./router.js";
 
 const isPages = (route) => route?.kind === "pages";
@@ -21,11 +21,12 @@ async function renderDocument(document, main, state) {
     pathname: state.route,
     query,
     asPath: `${state.pathname}${state.search ?? ""}`,
+    ...localeFields(state),
     renderPage: () => ({ html: "", head: [] }),
     defaultGetInitialProps: (ctx) => DefaultDocument.getInitialProps(ctx),
   };
   const props = typeof Doc.getInitialProps === "function" ? await Doc.getInitialProps(context) : {};
-  return renderToString(h(DocumentContext.Provider, { value: { main } }, h(Doc, props ?? {})));
+  return renderToString(h(DocumentContext.Provider, { value: { main, locale: state.locale } }, h(Doc, props ?? {})));
 }
 
 /**
