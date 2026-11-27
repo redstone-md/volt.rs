@@ -328,6 +328,30 @@ export function App({ routes, shells = {}, initial }) {
     [routes, shells],
   );
 
+  /**
+   * Cancels the navigation still loading, if any, and returns a new ticket. A cancelled navigation must
+   * not commit its view or touch history once another one, a Back or Forward included, has begun.
+   */
+  const cancel = useCallback(() => {
+    if (inflight.current) {
+      const cancelled = Object.assign(new Error("Route Cancelled"), { cancelled: true });
+      routerEvents.emit("routeChangeError", cancelled, inflight.current.as, { shallow: inflight.current.shallow });
+      inflight.current = null;
+    }
+    return ++ticket.current;
+  }, []);
+
+  /** Starts a navigation and returns its ticket. */
+  const begin = useCallback(
+    (event) => {
+      const own = cancel();
+      inflight.current = event;
+      routerEvents.emit("routeChangeStart", event.as, { shallow: event.shallow });
+      return own;
+    },
+    [cancel],
+  );
+
   const commit = useCallback((next, after, event) => {
     startTransition(() => {
       scroll.current = after;
@@ -345,13 +369,7 @@ export function App({ routes, shells = {}, initial }) {
       }
       const as = pathOf(url);
       const event = { as, shallow };
-      const own = ++ticket.current;
-      if (inflight.current) {
-        const cancelled = Object.assign(new Error("Route Cancelled"), { cancelled: true });
-        routerEvents.emit("routeChangeError", cancelled, inflight.current.as, { shallow: inflight.current.shallow });
-      }
-      inflight.current = event;
-      routerEvents.emit("routeChangeStart", as, { shallow });
+      const own = begin(event);
       if (fresh) cache.current.clear();
       saveScroll(history.state?.__volt);
       const key = replace ? (history.state?.__volt ?? historyKey()) : historyKey();
@@ -412,7 +430,7 @@ export function App({ routes, shells = {}, initial }) {
       enter();
       commit(next, url.hash ? { hash: url.hash.slice(1) } : previewed ? null : target, event);
     },
-    [load, commit, preview, buildId],
+    [load, commit, preview, begin, buildId],
   );
 
   const revalidate = useCallback(
@@ -464,24 +482,32 @@ export function App({ routes, shells = {}, initial }) {
       const key = event.state?.__volt;
       if (!key) return;
       const as = pathOf(location);
-      if (beforePop.current && beforePop.current({ url: as, as, options: {} }) === false) return;
-      routerEvents.emit("routeChangeStart", as, { shallow: false });
+      if (beforePop.current && beforePop.current({ url: as, as, options: {} }) === false) {
+        cancel();
+        return;
+      }
+      const change = { as, shallow: false };
+      const own = begin(change);
       try {
         const path = stripBase(location.pathname);
         if (path === null) return location.reload();
         const next = await load(path, location.search, false);
+        if (own !== ticket.current) return;
+        inflight.current = null;
         if (next.redirect || next.state.buildId !== buildId || kindOf(next.route) !== kindOf(current.current.route)) {
           return location.reload();
         }
-        commit(next, { top: readScroll(key) }, { as, shallow: false });
+        commit(next, { top: readScroll(key) }, change);
       } catch (error) {
+        if (own !== ticket.current) return;
+        inflight.current = null;
         routerEvents.emit("routeChangeError", error, as, { shallow: false });
         location.reload();
       }
     };
     addEventListener("popstate", onPopState);
     return () => removeEventListener("popstate", onPopState);
-  }, [router, revalidate, load, commit, buildId]);
+  }, [router, revalidate, load, commit, cancel, begin, buildId]);
 
   useEffect(() => {
     controller.state = view.state;
