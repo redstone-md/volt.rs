@@ -1,4 +1,4 @@
-# Data: loaders, server actions and API routes
+# Data: loaders, server actions, API routes and route handlers
 
 The server side of a volt app is Rust. React components never fetch their own backend: pages receive data from **loaders**, and mutations go through **actions**. Both are plain async Rust functions, and their types are exported to TypeScript automatically.
 
@@ -253,6 +253,77 @@ async fn webhook(ctx: Ctx) -> Result<StatusCode> {
 
 `#[get]`, `#[post]`, `#[put]`, `#[patch]` and `#[delete]` take the same path syntax as `app/`. Handlers return anything implementing `IntoResponse`: `Json<T>`, `Html<T>`, `String`, `&str`, `StatusCode`, `(StatusCode, T)`, `Response` or a `Result` of those.
 
+## Route handlers
+
+Next.js route handlers work unchanged for code that does not need Node.js: an `app/**/route.ts` (or `.js`) exports functions named after HTTP methods, which take a Web `Request` and return a Web `Response`. They run in the same QuickJS workers that render React.
+
+```ts
+// app/api/posts/[id]/route.ts
+import { type NextRequest, NextResponse } from "next/server";
+
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const draft = request.nextUrl.searchParams.get("draft") === "1";
+  return NextResponse.json({ id, draft });
+}
+
+export async function POST(request: Request) {
+  const body = await request.json();
+  const response = NextResponse.json({ saved: body }, { status: 201 });
+  response.cookies.set("last-post", String(body.id), { httpOnly: true });
+  return response;
+}
+```
+
+- `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` and `OPTIONS` are supported. `HEAD` falls back to `GET`, `OPTIONS` answers 204 with an `Allow` header, and other methods get 405 with `Allow`.
+- `params` is a promise that also carries the params as properties, so both `await params` (Next.js 15) and `params.id` (Next.js 14) work.
+- Bodies can be strings, JSON (`Response.json`), `Uint8Array` / `ArrayBuffer` / `Blob` (binary, passed to Rust as bytes), `URLSearchParams`, `FormData` or a `ReadableStream`; the response is collected before it is sent. Requests offer `text()`, `json()`, `arrayBuffer()`, `bytes()`, `blob()` and `formData()` (urlencoded and multipart).
+- `redirect()` and `notFound()` from `next/navigation` turn into a 307/308 redirect and a 404.
+- Matching order: Rust API routes first, then route handlers, then pages; a more specific page pattern wins over a handler's dynamic one. A folder cannot hold both `page.tsx` and `route.ts`, and a handler cannot answer the URL of a page in another route group: both fail the build.
+- `export const dynamic = "force-static"` on a handler without params runs its `GET` once at `volt build` and serves the stored response (status, headers and body) from then on; `volt export` writes it as a file, e.g. `app/feed.xml/route.ts` becomes `feed.xml`. Other handlers run on every request, as in Next.js 15.
+- `volt routes` lists the handlers next to the pages.
+
+The QuickJS runtime provides `Request`, `Response` (`json()`, `redirect()`, `error()`), `Headers` (`getSetCookie()`), `URL`, `URLSearchParams`, `FormData`, `Blob`, `File`, `TextEncoder`, `TextDecoder`, `ReadableStream`, `AbortController`, `atob`/`btoa`, timers and `fetch`. There are no Node.js modules (`fs`, `crypto`, `Buffer`, ...): use a Rust API route for those. `next/server` (`volt-rs/server`) exports `NextRequest` (`nextUrl`, `cookies`), `NextResponse` (`json`, `redirect`, `rewrite`, `next`, `cookies`), `NextURL` and `userAgent`.
+
+### fetch on the server
+
+`fetch` in route handlers, middleware and server rendering (for example in `generateMetadata` or `app/sitemap.ts`) is backed by a Rust HTTP/1.1 client with rustls, verifying certificates with the platform's trust store. The worker keeps serving other requests while a response is on its way; redirects are followed (up to 20) unless `redirect: "manual"`, and response bodies are limited to 32 MB. Next.js caching options (`cache`, `next.revalidate`) are accepted and ignored: every call goes to the network.
+
+```toml
+[server]
+fetch_allow = ["api.example.com", "*.cdn.example.com", "localhost:4000"]
+fetch_timeout_secs = 10
+```
+
+With the default, empty `fetch_allow`, any host may be fetched as long as every address it resolves to is public, so code that fetches user-supplied URLs cannot reach `localhost`, private networks or cloud metadata endpoints. A non-empty list allows only the listed hosts (`*.` matches subdomains, `:port` pins the port, `*` allows any host) and lets those resolve to private addresses. `HTTP_PROXY` variables are not used.
+
+## TypeScript middleware
+
+`middleware.ts` (or `proxy.ts`, its Next.js 16 name) at the project root or in `src/` runs in QuickJS before routing, after Rust middleware:
+
+```ts
+// middleware.ts
+import { type NextRequest, NextResponse } from "next/server";
+
+export function middleware(request: NextRequest) {
+  if (!request.cookies.get("session")) return NextResponse.redirect(new URL("/login", request.url));
+  if (request.nextUrl.pathname === "/old") return NextResponse.rewrite(new URL("/new", request.url));
+  const headers = new Headers(request.headers);
+  headers.set("x-user", "ada");
+  const response = NextResponse.next({ request: { headers } });
+  response.headers.set("x-frame", "1");
+  return response;
+}
+
+export const config = { matcher: ["/dashboard/:path*", "/((?!api|login).*)"] };
+```
+
+- `NextResponse.next()` continues; headers and cookies set on it are added to the final response, and `request.headers` replaces the headers that loaders, actions and handlers see (`ctx.header("x-user")` in Rust).
+- `NextResponse.rewrite(url)` serves another path of the app under the requested URL, query included; a URL on another origin is proxied (subject to `fetch_allow`).
+- `NextResponse.redirect(url)` (307 by default) or any other `Response` answers the request directly.
+- It runs for page and route handler requests, Rust API routes, `public/` files and SEO files. Client navigations apply it to the target path of `/_volt/data`: redirects become client-side navigations, rewrites load the rewritten route's data, and any other response makes the browser load the page as a document. Static assets, actions (protect those in Rust) and the image endpoint skip it.
+- `config.matcher` takes Next.js path patterns: `:name`, `:name*`, `:name+`, `:name?`, `:id(\\d+)` and `(a|b)` groups, as a string, an array, or `{ source }` objects (`has` / `missing` are not supported). Like Next.js, the matcher must be written as literals; it is read at build time and matched in Rust, except patterns with lookarounds (`(?!...)`), which QuickJS evaluates. Without a matcher, middleware runs on every path. Patterns match the path without the base path and with the locale prefix.
+
 ## Ctx
 
 Every loader, action and handler can take `ctx: Ctx` as its first argument.
@@ -289,7 +360,7 @@ fn main() {
 }
 ```
 
-Middleware runs before routing for every request; returning `Some(response)` answers immediately.
+Middleware runs before routing for every request; returning `Some(response)` answers immediately. [TypeScript middleware](#typescript-middleware) runs after it.
 
 ## Errors
 

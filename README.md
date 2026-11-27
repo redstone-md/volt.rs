@@ -91,11 +91,12 @@ export default function Home({ data }: PageProps<"/">) {
 - **Server-side rendering** of React 19 with hydration, then client-side navigation with prefetching, scroll restoration and per-route code splitting.
 - **Streaming SSR**: the shell goes out first and each `<Suspense>` boundary (`use(promise)`, `lazy`, `next/dynamic`) streams in as it resolves; crawlers get the complete page. `loading.tsx` shows instantly on client navigation.
 - **Rust loaders, server actions and API routes** with a generated, fully typed TypeScript client.
+- **Next.js route handlers and middleware**: `app/**/route.ts` (`GET`, `POST`, ... with `NextRequest` / `NextResponse`, JSON, binary bodies, `force-static` prerendering) and `middleware.ts` with `next()`, `redirect()`, `rewrite()` and `config.matcher` run in QuickJS, with a server-side `fetch` limited by `[server] fetch_allow`.
 - **Forms that work without JavaScript**: `<Form action={...}>` posts natively (multipart, so file uploads too) and upgrades to in-place submission with pending state, `useFormStatus` and `useActionState`.
 - **File uploads and validation**: `File` fields in `#[model]` inputs, `ctx.multipart()` in API routes, `Error::validation` field errors, and `ctx.revalidate_path` to refresh cached pages and client route data after a mutation.
 - **Metadata API** (`metadata`, `generateMetadata`, `viewport`, Open Graph, Twitter, robots, alternates, verification), JSON-LD, automatic `sitemap.xml`, `robots.txt` and `llms.txt`.
 - **Metadata files**: `favicon.ico`, `icon.*`, `apple-icon.*`, `opengraph-image.*` (with `.alt.txt`), `twitter-image.*`, `manifest.json`, `robots.txt` and `sitemap.xml` in any segment are served and linked from the head with sizes; `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts` generate them in code, cached with `revalidate`.
-- **Next.js imports work**: `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/cache`, `next/server` (`connection`), `next/font/google`, `next/font/local`.
+- **Next.js imports work**: `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/cache`, `next/server` (`NextRequest`, `NextResponse`, `connection`), `next/font/google`, `next/font/local`.
 - **Tailwind CSS v4 and shadcn/ui** out of the box; `npx shadcn add` works.
 - **CSS Modules, Sass/SCSS and PostCSS**: `*.module.css` / `*.module.scss` with scoped class names, Sass compiled in Rust, Lightning CSS for `@import` inlining, `url()` assets, vendor prefixes and minification.
 - **Fonts**: `next/font/google` and `next/font/local` compatible loaders; Google Fonts are downloaded at build time and self-hosted, with preloading.
@@ -115,7 +116,7 @@ export default function Home({ data }: PageProps<"/">) {
 - [Getting started](./docs/getting-started.md)
 - [Routing](./docs/routing.md)
 - [Pages Router](./docs/pages-router.md)
-- [Data: loaders, actions, API routes](./docs/data.md)
+- [Data: loaders, actions, API routes, route handlers](./docs/data.md)
 - [Metadata and SEO](./docs/metadata-seo.md)
 - [Styling and assets](./docs/styling.md)
 - [Static generation, ISR and export](./docs/static-generation.md)

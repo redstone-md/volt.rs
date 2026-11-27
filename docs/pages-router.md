@@ -22,7 +22,7 @@ Special files in the root of `pages/`:
 | `404.tsx` | Page for unknown URLs and `notFound: true`. |
 | `500.tsx` / `_error.tsx` | Page for server errors; receives `statusCode` and `error`. |
 
-Files and folders starting with `_` or `.` are not routes, nor are `.d.ts` files. `pages/api/**` is ignored with a warning: API routes are Rust handlers (`#[get]`, `#[post]`, ...), see [Data](./data.md).
+Files and folders starting with `_` or `.` are not routes, nor are `.d.ts` files. `pages/api/**` is ignored with a warning: write App Router [route handlers](./data.md#route-handlers) (`app/api/**/route.ts`) or Rust handlers (`#[get]`, `#[post]`, ...).
 
 A URL defined in both `app/` and `pages/` is a build error. When both directories exist, an explicit `app/not-found.tsx` / `app/error.tsx` is used for unknown URLs and errors; otherwise `pages/404.tsx` / `pages/500.tsx` are; otherwise the built-in App Router pages. Navigating between a Pages Router page and an App Router page performs a full page load, as in Next.js.
 
@@ -122,5 +122,5 @@ The default export is the `Router` singleton with the same fields, usable outsid
 - i18n locale domains, `basePath` in `next.config` (use `[build] base_path`), preview and draft mode.
 - `req` / `res` in `getServerSideProps` (use a Rust loader).
 - The `fallback: true` loading state (`router.isFallback`); it behaves like `"blocking"`.
-- `pages/api` routes (write Rust handlers).
+- `pages/api` routes with `(req, res)` (write `app/**/route.ts` [route handlers](./data.md#route-handlers) or Rust handlers).
 - `next/head` `key` deduplication.

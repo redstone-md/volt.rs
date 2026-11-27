@@ -8,7 +8,7 @@
             │  server/main.rs  ──►  cargo  ──►  binary  ──►  --emit-sdk  ──►  @volt/api     │
             └────────────────────────────────────────────────────────────────────────────┘
 
- request ──► hyper ──► middleware ──► static / action / data / image / API / page
+ request ──► hyper ──► middleware ──► static / action / data / image / API / route.ts / page
                                                                      │
                                                     Rust loader ──► QuickJS worker pool
                                                                      │  React renderToReadableStream
@@ -49,6 +49,10 @@ Pages Router routes run `getServerSideProps` / `getStaticProps` in the same rend
 With `[i18n]`, the server strips the locale prefix of a page or data path before route matching and puts the locale into the page state (`locale`) and `Ctx`; the page cache keys entries by route path, query and locale. The client reads the configured locales from build-time defines and adds the prefix back when it builds hrefs.
 
 Error boundaries do not catch on the server, so the render resolves them itself: a `notFound()` that reaches the shell is rendered again with the innermost `not-found.tsx` in place of its segment's children (`state.notFound`, which the client hydrates the same way), and when the error page fails too, `global-error.tsx` replaces the document (`state.globalError`). Elements returned by `useServerInsertedHTML` callbacks are rendered once the shell (or, with `renderToString`, the tree) is complete and returned to Rust as extra head HTML. `__VOLT__.metadataRoute(name)` evaluates `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts`; Rust turns the result into XML, text or JSON.
+
+Route handlers (`route.ts`) and `middleware.ts` are bundled into the server bundle. `__VOLT__.handle(request, sink)` and `__VOLT__.middleware(request, sink)` take the request as JSON (method, absolute URL, app path, headers, route and params) with the body as `sink.body`, a `Uint8Array`, and answer like a streamed render: the status and headers through `sink.shell`, then the body bytes through `sink.write`, so binary bodies cross without encoding. Middleware speaks Next.js's marker headers (`x-middleware-next`, `x-middleware-rewrite`, `x-middleware-override-headers`, `x-middleware-request-*`), which Rust strips and applies. The matcher is read from the source at build time with oxc, compiled from path-to-regexp syntax to one regular expression per pattern and matched in Rust, so unmatched requests never reach QuickJS; patterns the `regex` crate cannot run (lookarounds) are passed to the call and tested by QuickJS.
+
+`fetch` calls the host's `fetch(request, body)`, which starts the request on a small Tokio runtime of its own (hyper HTTP/1.1 and rustls with the platform verifier) and returns an id; the worker delivers the response to `__volt_fetched(id, ...)` when it arrives. While a job waits on a `fetch`, the worker waits on both the job queue and the responses, so it keeps taking renders; `[server] fetch_allow` and the timeout are checked in Rust, and unlisted hosts must resolve to public addresses.
 
 Workers are plain OS threads pulling jobs from a shared queue, so a slow render never blocks the async HTTP runtime. In development the pool reloads the bundle when the manifest changes, once the renders in flight have finished.
 

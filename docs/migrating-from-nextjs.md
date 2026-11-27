@@ -11,7 +11,10 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 | `app/sitemap.ts`, `app/robots.ts`, `app/manifest.ts` | same, plus Rust `#[sitemap]` providers |
 | `[slug]`, `[...slug]`, `[[...slug]]`, `(group)`, `_private` | same |
 | `@slot` parallel routes with `default.tsx`, `(.)` / `(..)` / `(...)` intercepting routes | same, see [Routing](./routing.md#parallel-routes) |
-| `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/cache`, `next/server` | aliased to `volt-rs/*` (`next/cache` and `next/server` only export `unstable_noStore` and `connection`) |
+| `next/link`, `next/navigation`, `next/router`, `next/document`, `next/app`, `next/image`, `next/script`, `next/head`, `next/form`, `next/dynamic`, `next/cache`, `next/server` | aliased to `volt-rs/*` (`next/cache` only exports `unstable_noStore`; `next/server` exports `NextRequest`, `NextResponse`, `NextURL`, `userAgent` and `connection`) |
+| `app/**/route.ts` route handlers (`GET`, `POST`, ... with `{ params }`, `NextResponse.json`, `redirect`, cookies, binary bodies, `export const dynamic = "force-static"`) | same, run in QuickJS without Node.js APIs, see [Route handlers](./data.md#route-handlers) |
+| `middleware.ts` / `proxy.ts` with `NextResponse.next()`, `redirect()`, `rewrite()`, request header overrides and `config.matcher` | same, after Rust middleware and on client navigations too, see [TypeScript middleware](./data.md#typescript-middleware) |
+| `fetch` in route handlers, middleware and rendering | same, through a Rust client limited by `[server] fetch_allow`; no `fetch` cache |
 | `pages/**`, `_app`, `_document`, `404`, `500`, `getServerSideProps`, `getStaticProps`, `getStaticPaths` | same, see [Pages Router](./pages-router.md) |
 | `export const metadata`, `generateMetadata`, `export const viewport` | same |
 | `params` / `searchParams` props (sync or awaited) | same |
@@ -30,8 +33,9 @@ volt keeps the App Router and Pages Router file layouts, the component APIs and 
 | --- | --- |
 | async server component that queries data | Rust `#[loader("/route")]`, page receives `data` |
 | `"use server"` action | Rust `#[action]`, imported from `@volt/api` |
-| `app/api/**/route.ts`, `pages/api/**` | Rust `#[get]`, `#[post]`, ... |
-| `middleware.ts` | `App::new().middleware(...)` |
+| route handlers that need Node.js, a database or shared state, `pages/api/**` | Rust `#[get]`, `#[post]`, ..., matched before `route.ts` handlers |
+| `middleware.ts` that needs Node.js or Rust state | `App::new().middleware(...)`, which runs before `middleware.ts` |
+| `cookies()`, `headers()` from `next/headers` in route handlers | `request.cookies` and `request.headers` of the `NextRequest` |
 | no `app/sitemap.ts` | automatic sitemap of every known path |
 | `revalidatePath()` after an action | `ctx.revalidate_path()` / `voltrs::revalidate_path()` for cached pages and client route data; `<Form>` refreshes the current page automatically, or `router.refresh()` |
 | `useActionState`, `useFormStatus` | same; `volt-rs/actions` also exports a `useActionState` that returns action errors |
@@ -76,6 +80,7 @@ export default function Post({ data }: PageProps<"/posts/[id]">) {
 
 - React Server Components. Every component renders on the server (streaming Suspense boundaries) and hydrates in the browser; data that needs the server comes from Rust loaders, which run before rendering starts.
 - Intercepting routes in `volt export` builds (client navigations render the original route) and `metadata` from slot pages.
-- `next/og`, edge runtime.
+- `next/og`, edge runtime, Node.js APIs in route handlers and middleware (`fs`, `Buffer`, `node:crypto`, npm packages that need them).
+- Route handler streaming (bodies are collected before they are sent), `force-static` handlers with params (`generateStaticParams`) and `revalidate` on handlers; `has` / `missing` conditions in middleware matchers; `waitUntil` work after the response; the `fetch` cache and `next.revalidate`.
 - `next/font` metric-adjusted fallback fonts (`adjustFontFallback`) and the Google `axes` option.
 - Pages Router `getInitialProps`, i18n locale domains and `req`/`res` in `getServerSideProps` (see [Pages Router](./pages-router.md#not-supported)).

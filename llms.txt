@@ -6,6 +6,7 @@ Key facts:
 - Create an app: `npm create volt-rs@latest my-app`. Dev: `npm run dev`. Build: `npm run build`. Run: `npm run start`.
 - Pages are React components in `app/` (App Router) or `pages/` (Pages Router, with `getServerSideProps`, `getStaticProps` and `next/router`). Server code is Rust in `server/main.rs` using the `voltrs` crate.
 - `#[loader("/route")]` returns the page `data` prop. `#[action]` functions are called from React via the generated `@volt/api` module. `#[get("/api/x")]` defines JSON endpoints.
+- Next.js route handlers (`app/**/route.ts` exporting `GET`, `POST`, ...) and `middleware.ts` run in QuickJS with Web APIs (`Request`, `Response`, `fetch`, `NextRequest`, `NextResponse`) but no Node.js APIs; Rust API routes are matched first.
 - `#[model]` structs are serialized with camelCase fields and exported as TypeScript interfaces.
 - Pages stream Suspense boundaries from the server (`use(promise)`, `lazy`, `next/dynamic`); `loading.tsx` shows at once on client navigation.
 - Not supported: React Server Components, async components, `"use server"`.
@@ -16,7 +17,7 @@ Key facts:
 - [Getting started](https://github.com/redstone-md/volt.rs/blob/main/docs/getting-started.md): install, project structure, dev and production builds
 - [Routing](https://github.com/redstone-md/volt.rs/blob/main/docs/routing.md): file conventions, layouts, dynamic segments, parallel and intercepting routes, Link, navigation hooks
 - [Pages Router](https://github.com/redstone-md/volt.rs/blob/main/docs/pages-router.md): pages/, _app, _document, getServerSideProps, getStaticProps, getStaticPaths, next/router
-- [Data](https://github.com/redstone-md/volt.rs/blob/main/docs/data.md): models, loaders, actions, forms, API routes, Ctx, state, middleware, errors
+- [Data](https://github.com/redstone-md/volt.rs/blob/main/docs/data.md): models, loaders, actions, forms, API routes, route handlers, fetch, TypeScript middleware, Ctx, state, middleware, errors
 - [Metadata and SEO](https://github.com/redstone-md/volt.rs/blob/main/docs/metadata-seo.md): metadata API, JSON-LD, sitemap.xml, robots.txt, llms.txt
 - [Styling and assets](https://github.com/redstone-md/volt.rs/blob/main/docs/styling.md): Tailwind CSS, shadcn/ui, CSS Modules, Sass, PostCSS, fonts, images, scripts
 - [Static generation](https://github.com/redstone-md/volt.rs/blob/main/docs/static-generation.md): generateStaticParams, dynamicParams, getStaticPaths, ISR, revalidate_path, volt export, base_path, trailing_slash

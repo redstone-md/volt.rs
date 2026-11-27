@@ -28,6 +28,7 @@ When several routes match, static segments win over dynamic ones, and dynamic on
 | `not-found.tsx` | Rendered for `notFound()` thrown below its segment and, at the root, for unknown URLs. |
 | `template.tsx` | Like a layout, but remounted when the segment below it changes. |
 | `default.tsx` | Rendered by a [parallel route](#parallel-routes) slot that has no page for the URL. |
+| `route.ts` | A [route handler](./data.md#route-handlers): `GET`, `POST`, ... returning a `Response`, instead of a page (`.ts` or `.js` only). |
 
 Files may use `.tsx`, `.ts`, `.jsx` or `.js`. Metadata files (`icon.png`, `opengraph-image.jpg`, `sitemap.ts`, ...) are described in [Metadata and SEO](./metadata-seo.md).
 

@@ -19,6 +19,8 @@ body_limit_mb = 8                 # largest request body (actions, API routes, u
 streaming = true                  # stream dynamic pages with Suspense; false renders with renderToString
 # user agents (regex, case-insensitive) that get complete pages; the default:
 bots = '(bot|crawler|spider|crawling)\b|slurp|mediapartners|facebookexternalhit|facebookcatalog|embedly|quora link preview|outbrain|pinterest|vkshare|w3c_validator|whatsapp|skypeuripreview|bingpreview|ia_archiver|yandex|baiduspider|lighthouse|google-inspectiontool'
+fetch_allow = []                  # hosts server-side fetch may reach; empty = any host with public addresses only
+fetch_timeout_secs = 10           # time limit of one server-side fetch
 
 [build]
 minify = true
@@ -62,6 +64,8 @@ destination = "/docs/introduction"
 Unknown keys are rejected, so typos fail loudly.
 
 `[server] streaming` and `bots` are described in [Loading UI and streaming](routing.md#loading-ui-and-streaming). The default `bots` pattern above covers the common search engine crawlers and link-preview fetchers (Googlebot, Bingbot, Slurp, facebookexternalhit, Twitterbot, Slackbot, WhatsApp, Lighthouse and others). Setting `bots` replaces it rather than adding to it, so extend the default when you only need one more agent; an empty string streams to every client. An invalid pattern fails `volt build` and the server start.
+
+`fetch_allow` and `fetch_timeout_secs` govern `fetch` in route handlers, middleware and server rendering, see [fetch on the server](data.md#fetch-on-the-server). Entries are host names (`api.example.com`), wildcards for subdomains (`*.example.com`), a host with a port (`localhost:4000`) or `*`; a listed host may resolve to private addresses, the default empty list only reaches public ones.
 
 `base_path` and `trailing_slash` are applied to routing, links, assets, redirects, the sitemap and `volt export`; see [static generation](static-generation.md#base-path-and-trailing-slashes). Redirect and rewrite sources and destinations are written without the base path.
 
