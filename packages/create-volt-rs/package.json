@@ -1,6 +1,6 @@
 {
   "name": "create-volt-rs",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Create a volt.rs app: React on a Rust server",
   "license": "MIT",
   "type": "module",

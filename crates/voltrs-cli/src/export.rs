@@ -164,7 +164,7 @@ impl<'a> Export<'a> {
         if !out.exists() {
             return Ok(());
         }
-        let resolved = out.canonicalize()?;
+        let resolved = crate::util::canonical(out)?;
         if resolved == project.root || !resolved.starts_with(&project.root) {
             bail!("[build] export_dir resolves outside the project: {}", resolved.display());
         }
@@ -228,7 +228,7 @@ mod tests {
     fn refuses_to_empty_project_directories() {
         let root = std::env::temp_dir().join(format!("volt-export-guard-{}", std::process::id()));
         std::fs::create_dir_all(root.join("app")).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = crate::util::canonical(&root).unwrap();
         std::fs::create_dir_all(root.join("docs")).unwrap();
         std::fs::write(root.join("docs").join("notes.md"), "keep").unwrap();
         std::fs::create_dir_all(root.join("out").join("_volt")).unwrap();

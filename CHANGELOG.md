@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.3
+
+- `volt build` and `volt dev` on Windows no longer fail with "Bundling CSS is no longer supported": the project root is resolved without the `\\?\` verbatim prefix, so stylesheet imports are recognised again.
+- Releases publish to npm and crates.io with trusted publishing (OIDC) instead of long-lived tokens.
+
 ## 0.0.2
 
 - Route handlers: `app/**/route.ts` exporting `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD` and `OPTIONS` run in QuickJS after Rust API routes and before pages, with `{ params }`, automatic `HEAD`, `OPTIONS` and 405 answers, string, JSON and binary bodies, `ReadableStream` bodies streamed chunk by chunk (server-sent events) past the render deadline, and `dynamic = "force-static"` `GET` handlers prerendered by `volt build` (and written by `volt export`). A page and a handler for the same URL fail the build.

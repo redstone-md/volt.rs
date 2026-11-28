@@ -27,8 +27,8 @@ End-to-end check against a scaffolded app (uses local crates and packages):
 ```bash
 target/debug/volt new /tmp/app --no-install
 cd /tmp/app
-sed -i 's|"volt-rs": "^0.0.2"|"volt-rs": "file:../path/to/volt.rs/packages/volt-rs"|' package.json
-sed -i 's|^voltrs = "0.0.2"|voltrs = { path = "../path/to/volt.rs/crates/voltrs" }|' Cargo.toml
+sed -i 's|"volt-rs": "^0.0.3"|"volt-rs": "file:../path/to/volt.rs/packages/volt-rs"|' package.json
+sed -i 's|^voltrs = "0.0.3"|voltrs = { path = "../path/to/volt.rs/crates/voltrs" }|' Cargo.toml
 npm install && ../path/to/volt.rs/target/debug/volt build && ./target/release/app
 ```
 

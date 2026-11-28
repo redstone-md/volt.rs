@@ -4808,7 +4808,7 @@ checksum = "65dd7eed29412da847b0f78bcec0ac98588165988a8cfe41d4ea1d429f8ccfff"
 
 [[package]]
 name = "voltrs"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "base64",
  "bytes",
@@ -4838,7 +4838,7 @@ dependencies = [
 
 [[package]]
 name = "voltrs-cli"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4872,7 +4872,7 @@ dependencies = [
 
 [[package]]
 name = "voltrs-macros"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "proc-macro2",
  "quote",

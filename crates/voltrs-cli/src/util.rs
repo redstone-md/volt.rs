@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// FNV-1a 64-bit, rendered as 10 base36 characters. Stable across builds and toolchains.
 pub fn hash(bytes: &[u8]) -> String {
@@ -15,6 +15,19 @@ pub fn hash(bytes: &[u8]) -> String {
             c
         })
         .collect()
+}
+
+/// `Path::canonicalize` without the Windows `\\?\` prefix on drive paths. Bundler module ids built from a
+/// verbatim root become `//?/C:\...`, which `Path` cannot split into file names or extensions.
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let path = path.canonicalize()?;
+    if cfg!(windows)
+        && let Some(rest) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\"))
+        && rest.as_bytes().get(1) == Some(&b':')
+    {
+        return Ok(PathBuf::from(rest));
+    }
+    Ok(path)
 }
 
 pub fn to_slash(path: &Path) -> String {

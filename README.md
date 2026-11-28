@@ -129,7 +129,7 @@ export default function Home({ data }: PageProps<"/">) {
 
 ## Status
 
-volt.rs is at 0.0.2. The core is usable: routing (App Router and Pages Router), SSR with streaming, hydration, navigation, actions, metadata, styling, static generation and builds are covered by end-to-end tests. Not there yet: React Server Components. See [CHANGELOG.md](https://github.com/redstone-md/volt.rs/blob/main/CHANGELOG.md).
+volt.rs is at 0.0.3. The core is usable: routing (App Router and Pages Router), SSR with streaming, hydration, navigation, actions, metadata, styling, static generation and builds are covered by end-to-end tests. Not there yet: React Server Components. See [CHANGELOG.md](https://github.com/redstone-md/volt.rs/blob/main/CHANGELOG.md).
 
 ## Contributing
 

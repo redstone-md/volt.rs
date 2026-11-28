@@ -9,7 +9,7 @@ name = "streaming"
 path = "server/main.rs"
 
 [dependencies]
-voltrs = "0.0.2"
+voltrs = "0.0.3"
 tokio = { version = "1", features = ["time"] }
 
 [workspace]

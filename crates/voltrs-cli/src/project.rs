@@ -21,7 +21,7 @@ pub struct Project {
 impl Project {
     /// Finds the project containing `start` by walking up to a `volt.toml` or `package.json`.
     pub fn discover(start: &Path) -> Result<Self> {
-        let start = start.canonicalize().with_context(|| format!("cannot open {}", start.display()))?;
+        let start = crate::util::canonical(start).with_context(|| format!("cannot open {}", start.display()))?;
         let root = start
             .ancestors()
             .find(|dir| {
