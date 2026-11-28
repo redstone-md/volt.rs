@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
@@ -13,7 +14,7 @@ function resolveBinary() {
   try {
     return join(require.resolve(`${pkg}/package.json`), "..", "bin", exe);
   } catch {}
-  const cargo = join(process.env.CARGO_HOME ?? join(process.env.HOME ?? "", ".cargo"), "bin", exe);
+  const cargo = join(process.env.CARGO_HOME ?? join(homedir(), ".cargo"), "bin", exe);
   if (existsSync(cargo)) return cargo;
   return null;
 }

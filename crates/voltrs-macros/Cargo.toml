@@ -1,6 +1,9 @@
 [package]
 name = "voltrs-macros"
 description = "Procedural macros for volt.rs"
+readme = "README.md"
+keywords = ["react", "ssr", "web", "framework", "macros"]
+categories = ["web-programming::http-server"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true

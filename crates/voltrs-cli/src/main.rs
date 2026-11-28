@@ -24,7 +24,7 @@ mod util;
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use voltrs::log;
 
@@ -200,6 +200,7 @@ async fn start(project: &Project) -> Result<()> {
         // Replacing this process lets signals sent to `volt start` reach the server instead of orphaning it.
         #[cfg(unix)]
         {
+            use anyhow::Context;
             use std::os::unix::process::CommandExt;
             return Err(command.exec()).with_context(|| format!("cannot run {}", binary.display()));
         }

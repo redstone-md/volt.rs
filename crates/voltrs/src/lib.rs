@@ -1,5 +1,10 @@
 //! volt.rs runtime: a Rust server for React apps with SSR, server actions, loaders and API routes.
 //!
+//! An app is a React frontend in `app/` (or `pages/`) and a Rust binary in `server/main.rs` that uses this
+//! crate. The `volt` command (`npm create volt-rs@latest my-app`, or `cargo install voltrs-cli`) bundles the
+//! frontend, generates the typed TypeScript client `@volt/api` from the items registered with the macros below,
+//! and runs this server. The guide lives at <https://github.com/redstone-md/volt.rs/tree/main/docs>.
+//!
 //! ```no_run
 //! use voltrs::prelude::*;
 //!
@@ -66,6 +71,7 @@ pub use http::{self, HeaderMap, Method, StatusCode};
 pub use serde;
 pub use serde_json;
 
+/// Everything a typical `server/main.rs` needs: `use voltrs::prelude::*;`.
 pub mod prelude {
     pub use crate::{
         App, ChangeFrequency, Cookie, Ctx, Error, File, FormData, Html, IntoResponse, Json, Response, Result, SameSite,

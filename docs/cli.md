@@ -1,10 +1,12 @@
 # CLI
 
-Install with the npm package (`volt-rs` ships a `volt` bin backed by a prebuilt binary) or with Cargo:
+Install with the npm package (`volt-rs` ships a `volt` bin backed by a prebuilt binary from `@volt-rs/cli-<platform>`, available for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64` and `win32-x64`) or with Cargo:
 
 ```bash
 cargo install voltrs-cli
 ```
+
+On a platform without a prebuilt binary, the npm `volt` bin falls back to `volt` in `$CARGO_HOME/bin` (`~/.cargo/bin`), where `cargo install` puts it.
 
 | Command | Description |
 | --- | --- |
@@ -12,7 +14,7 @@ cargo install voltrs-cli
 | `volt dev [--port 3000] [--host 0.0.0.0]` | Dev server: rebuilds on save, React Fast Refresh, recompiles Rust, error overlay. |
 | `volt build` | Production build: release server binary, minified bundles, CSS, prerendered pages, Brotli/gzip. |
 | `volt export` | Production build written as a static site to `out/` (`[build] export_dir`); fails with a list of routes that need the server. See [static generation](static-generation.md#static-export). |
-| `volt start [--port 3000] [--host 0.0.0.0]` | Run the production build. |
+| `volt start [--port 3000] [--host 0.0.0.0]` | Run the production build (needs `volt build` first; with a Rust server, runs `cargo build --release`, then the server binary). |
 | `volt sdk` | Regenerate `@volt/api` from the Rust server. |
 | `volt routes` | Print the route table: pages with their kind and router (`app` or `pages`), `route.ts` handlers, Rust API endpoints and `middleware.ts` with its matcher. |
 

@@ -26,7 +26,13 @@ for (const platform of platforms) {
     repository,
     os: [os],
     cpu: [cpu],
-    files: ["bin"],
+    homepage: "https://github.com/redstone-md/volt.rs",
+    files: ["bin", "README.md"],
   };
   writeFileSync(join(dir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  // npm shows an empty page for packages without a README.
+  writeFileSync(
+    join(dir, "README.md"),
+    `# @volt-rs/cli-${platform}\n\nThe prebuilt \`volt\` binary for ${platform}. It is installed as an optional dependency of [volt-rs](https://www.npmjs.com/package/volt-rs); don't depend on it directly.\n\nSee https://github.com/redstone-md/volt.rs.\n`,
+  );
 }

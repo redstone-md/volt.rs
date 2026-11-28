@@ -11,14 +11,20 @@
 npm create volt-rs@latest my-app
 ```
 
-The scaffolder picks the `default` template (React + Rust server) when `cargo` is installed and the `web` template (React only) otherwise. Choose explicitly with `--template default` or `--template web`.
+The scaffolder picks the `default` template (React + Rust server) when `cargo` is installed and the `web` template (React only) otherwise. Choose explicitly with `--template default` or `--template web` (`--web` for short), and skip the dependency install with `--no-install`. npm needs `--` before the options:
 
-The `volt` binary can also scaffold:
+```bash
+npm create volt-rs@latest my-app -- --template web
+```
+
+The `volt` binary can also scaffold. `volt new` always uses the `default` template unless `--template web` is given:
 
 ```bash
 cargo install voltrs-cli
 volt new my-app
 ```
+
+The `volt` command inside a project comes from the `volt-rs` npm package, which installs a prebuilt binary for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64). On other platforms install it with `cargo install voltrs-cli`; see [CLI](./cli.md).
 
 ## Run it
 
@@ -41,7 +47,9 @@ my-app/
 ├── lib/utils.ts         cn() helper
 ├── public/              static files served at /
 ├── server/main.rs       Rust loaders, actions, API routes
+├── AGENTS.md            instructions for coding agents
 ├── Cargo.toml           Rust server crate
+├── components.json      shadcn/ui configuration
 ├── package.json
 ├── tsconfig.json        `@/*` and `@volt/api` path aliases
 ├── volt.toml            configuration

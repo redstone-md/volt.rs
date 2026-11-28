@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.jpg" alt="volt.rs: React on a Rust server" width="100%">
+  <img src="https://raw.githubusercontent.com/redstone-md/volt.rs/main/assets/banner.jpg" alt="volt.rs: React on a Rust server" width="100%">
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@ Same app (shadcn/ui + Tailwind todo list with server actions), same machine (4 v
 | Production build | **1.1 s** | 5.9 s |
 | Runtime to deploy | one 4 MB binary + assets | Node.js + `node_modules` |
 
-`next start` runs as a single Node.js process with default settings; volt renders on a pool of QuickJS workers, one per core. Benchmarks are in [`docs/benchmarks.md`](./docs/benchmarks.md) with the exact setup so you can reproduce them.
+`next start` runs as a single Node.js process with default settings; volt renders on a pool of QuickJS workers, one per core. Benchmarks are in [`docs/benchmarks.md`](https://github.com/redstone-md/volt.rs/blob/main/docs/benchmarks.md) with the exact setup so you can reproduce them.
 
 ## What it looks like
 
@@ -105,36 +105,36 @@ export default function Home({ data }: PageProps<"/">) {
 - **Internationalized routing**: `[i18n] locales` with unprefixed default locale, `/de/...` prefixes, `Accept-Language` and cookie detection, `useLocale()`, `<Link locale>`, `ctx.locale()` in Rust, automatic `hreflang` tags and localized sitemaps.
 - `base_path` and `trailing_slash`, Brotli and gzip precompression, immutable asset caching, security headers, redirects and rewrites.
 - **Dev server** with React Fast Refresh (state-preserving component updates), CSS hot swap, Rust recompilation and an in-browser error overlay that keeps the page running.
-- **Instructions for coding agents** in every generated project (`AGENTS.md`) and [`llms.txt`](./llms.txt) for the framework itself.
+- **Instructions for coding agents** in every generated project (`AGENTS.md`) and [`llms.txt`](https://github.com/redstone-md/volt.rs/blob/main/llms.txt) for the framework itself.
 
 ## How it works
 
-`volt build` bundles the app twice with [rolldown](https://rolldown.rs): an ESM build for browsers split per route, and a single-file build that the Rust server evaluates in [QuickJS](https://github.com/quickjs-ng/quickjs) workers. A request is routed by [hyper](https://hyper.rs), the Rust loader runs, React renders the page to HTML in a worker, and the browser hydrates the same tree. Navigations fetch only the loader's JSON and the route's chunk. Details in [docs/architecture.md](./docs/architecture.md).
+`volt build` bundles the app twice with [rolldown](https://rolldown.rs): an ESM build for browsers split per route, and a single-file build that the Rust server evaluates in [QuickJS](https://github.com/quickjs-ng/quickjs) workers. A request is routed by [hyper](https://hyper.rs), the Rust loader runs, React renders the page to HTML in a worker, and the browser hydrates the same tree. Navigations fetch only the loader's JSON and the route's chunk. Details in [docs/architecture.md](https://github.com/redstone-md/volt.rs/blob/main/docs/architecture.md).
 
 ## Documentation
 
-- [Getting started](./docs/getting-started.md)
-- [Routing](./docs/routing.md)
-- [Pages Router](./docs/pages-router.md)
-- [Data: loaders, actions, API routes, route handlers](./docs/data.md)
-- [Metadata and SEO](./docs/metadata-seo.md)
-- [Styling and assets](./docs/styling.md)
-- [Static generation, ISR and export](./docs/static-generation.md)
-- [Internationalized routing](./docs/i18n.md)
-- [Configuration](./docs/configuration.md)
-- [Deployment](./docs/deployment.md)
-- [Coming from Next.js](./docs/migrating-from-nextjs.md)
-- [CLI](./docs/cli.md)
-- [Architecture](./docs/architecture.md)
+- [Getting started](https://github.com/redstone-md/volt.rs/blob/main/docs/getting-started.md)
+- [Routing](https://github.com/redstone-md/volt.rs/blob/main/docs/routing.md)
+- [Pages Router](https://github.com/redstone-md/volt.rs/blob/main/docs/pages-router.md)
+- [Data: loaders, actions, API routes, route handlers](https://github.com/redstone-md/volt.rs/blob/main/docs/data.md)
+- [Metadata and SEO](https://github.com/redstone-md/volt.rs/blob/main/docs/metadata-seo.md)
+- [Styling and assets](https://github.com/redstone-md/volt.rs/blob/main/docs/styling.md)
+- [Static generation, ISR and export](https://github.com/redstone-md/volt.rs/blob/main/docs/static-generation.md)
+- [Internationalized routing](https://github.com/redstone-md/volt.rs/blob/main/docs/i18n.md)
+- [Configuration](https://github.com/redstone-md/volt.rs/blob/main/docs/configuration.md)
+- [Deployment](https://github.com/redstone-md/volt.rs/blob/main/docs/deployment.md)
+- [Coming from Next.js](https://github.com/redstone-md/volt.rs/blob/main/docs/migrating-from-nextjs.md)
+- [CLI](https://github.com/redstone-md/volt.rs/blob/main/docs/cli.md)
+- [Architecture](https://github.com/redstone-md/volt.rs/blob/main/docs/architecture.md)
 
 ## Status
 
-volt.rs is at 0.0.2. The core is usable: routing (App Router and Pages Router), SSR with streaming, hydration, navigation, actions, metadata, styling, static generation and builds are covered by end-to-end tests. Not there yet: React Server Components. See [CHANGELOG.md](./CHANGELOG.md).
+volt.rs is at 0.0.2. The core is usable: routing (App Router and Pages Router), SSR with streaming, hydration, navigation, actions, metadata, styling, static generation and builds are covered by end-to-end tests. Not there yet: React Server Components. See [CHANGELOG.md](https://github.com/redstone-md/volt.rs/blob/main/CHANGELOG.md).
 
 ## Contributing
 
-Issues and pull requests are welcome. Start with [CONTRIBUTING.md](./CONTRIBUTING.md) and [AGENTS.md](./AGENTS.md).
+Issues and pull requests are welcome. Start with [CONTRIBUTING.md](https://github.com/redstone-md/volt.rs/blob/main/CONTRIBUTING.md) and [AGENTS.md](https://github.com/redstone-md/volt.rs/blob/main/AGENTS.md).
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](https://github.com/redstone-md/volt.rs/blob/main/LICENSE)
